@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/danieljustus/symaira-ingest/internal/extract"
@@ -89,6 +90,61 @@ func TestRunner_ExtractPDF_MissingPDFToPPM(t *testing.T) {
 	}
 	if _, err := r.Extract(context.Background(), pdf, extract.KindPDF); err == nil {
 		t.Fatal("expected error for missing pdftoppm")
+	}
+}
+
+func TestDefaultRunner_CleanedPaths(t *testing.T) {
+	r := DefaultRunner("eng")
+	if r.Tesseract != "tesseract" {
+		t.Fatalf("Tesseract = %q, want %q", r.Tesseract, "tesseract")
+	}
+	if r.PDFToPPM != "pdftoppm" {
+		t.Fatalf("PDFToPPM = %q, want %q", r.PDFToPPM, "pdftoppm")
+	}
+}
+
+func TestRunner_Available_EmptyPath(t *testing.T) {
+	r := &Runner{Tesseract: ""}
+	if err := r.Available(); err == nil {
+		t.Fatal("expected error for empty tesseract path")
+	}
+}
+
+func TestRunner_AvailableForPDF_EmptyPDFToPPM(t *testing.T) {
+	dir := t.TempDir()
+	tess := writeFakeBin(t, dir, "tesseract", `echo "ok"`)
+	r := &Runner{Tesseract: tess, PDFToPPM: ""}
+	if err := r.AvailableForPDF(); err == nil {
+		t.Fatal("expected error for empty pdftoppm path")
+	}
+}
+
+func TestRunner_ExtractPDF_MaintainsPageOrder(t *testing.T) {
+	dir := t.TempDir()
+	// pdftoppm creates page-N.png files for pages 1 and 2.
+	pdfppm := writeFakeBin(t, dir, "pdftoppm",
+		`echo "page-1.png" > "$5-page-1.png" && echo "page-2.png" > "$5-page-2.png"`)
+	tess := writeFakeBin(t, dir, "tesseract", `echo "page text from $(basename "$3")"`)
+	r := &Runner{Tesseract: tess, PDFToPPM: pdfppm, OCRLang: "eng"}
+	pdf := filepath.Join(dir, "doc.pdf")
+	if err := os.WriteFile(pdf, []byte("%PDF-1.4"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := r.Extract(context.Background(), pdf, extract.KindPDF)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if !strings.Contains(res.Text, "page-page-1") {
+		t.Fatalf("text missing first page content:\n%s", res.Text)
+	}
+	if !strings.Contains(res.Text, "page-page-2") {
+		t.Fatalf("text missing second page content:\n%s", res.Text)
+	}
+	// Verify page-1 appears before page-2 (index order preserved).
+	idx1 := strings.Index(res.Text, "page-1")
+	idx2 := strings.Index(res.Text, "page-2")
+	if idx1 > idx2 {
+		t.Fatal("pages out of order: page-2 appears before page-1")
 	}
 }
 

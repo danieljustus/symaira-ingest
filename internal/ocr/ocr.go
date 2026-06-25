@@ -10,8 +10,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/danieljustus/symaira-ingest/internal/extract"
+	"golang.org/x/sync/errgroup"
 )
 
 // Runner executes external OCR tools.
@@ -24,19 +26,29 @@ type Runner struct {
 // DefaultRunner returns a runner that looks up tools on PATH.
 func DefaultRunner(ocrLang string) *Runner {
 	return &Runner{
-		Tesseract: "tesseract",
-		PDFToPPM:  "pdftoppm",
+		Tesseract: filepath.Clean("tesseract"),
+		PDFToPPM:  filepath.Clean("pdftoppm"),
 		OCRLang:   ocrLang,
 	}
+}
+
+// cleanToolPath sanitises a tool path and returns an error if it is unusable.
+func cleanToolPath(name, path string) (string, error) {
+	cleaned := filepath.Clean(path)
+	if cleaned == "" || cleaned == "." {
+		return "", fmt.Errorf("%s command is not configured", name)
+	}
+	return cleaned, nil
 }
 
 // Available returns an error if required tools are missing.
 // For image-only pipelines pdftoppm is not required.
 func (r *Runner) Available() error {
-	if r.Tesseract == "" {
-		return fmt.Errorf("tesseract command is not configured")
+	path, err := cleanToolPath("tesseract", r.Tesseract)
+	if err != nil {
+		return err
 	}
-	if _, err := exec.LookPath(r.Tesseract); err != nil {
+	if _, err := exec.LookPath(path); err != nil {
 		return fmt.Errorf("tesseract not found on PATH: %w", err)
 	}
 	return nil
@@ -47,10 +59,11 @@ func (r *Runner) AvailableForPDF() error {
 	if err := r.Available(); err != nil {
 		return err
 	}
-	if r.PDFToPPM == "" {
-		return fmt.Errorf("pdftoppm command is not configured")
+	path, err := cleanToolPath("pdftoppm", r.PDFToPPM)
+	if err != nil {
+		return err
 	}
-	if _, err := exec.LookPath(r.PDFToPPM); err != nil {
+	if _, err := exec.LookPath(path); err != nil {
 		return fmt.Errorf("pdftoppm not found on PATH: %w", err)
 	}
 	return nil
@@ -112,13 +125,35 @@ func (r *Runner) extractPDF(ctx context.Context, path string) (*extract.Result, 
 	}
 	sort.Strings(pages)
 
+	// Process pages concurrently with errgroup.
+	// Results are collected in order by page index.
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(4) // reasonable default concurrency
+
+	var (
+		mu      sync.Mutex
+		results = make([]string, len(pages))
+	)
+	for i, p := range pages {
+		i, p := i, p
+		g.Go(func() error {
+			out, err := r.runTool(ctx, r.Tesseract, "-l", r.OCRLang, p, "stdout")
+			if err != nil {
+				return fmt.Errorf("tesseract failed for page %s: %w", filepath.Base(p), err)
+			}
+			mu.Lock()
+			results[i] = string(out)
+			mu.Unlock()
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
 	var sb strings.Builder
-	for _, p := range pages {
-		out, err := r.runTool(ctx, r.Tesseract, "-l", r.OCRLang, p, "stdout")
-		if err != nil {
-			return nil, fmt.Errorf("tesseract failed for page %s: %w", filepath.Base(p), err)
-		}
-		sb.Write(out)
+	for _, text := range results {
+		sb.WriteString(text)
 		sb.WriteByte('\n')
 	}
 
