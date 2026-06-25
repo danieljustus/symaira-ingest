@@ -9,10 +9,16 @@ import (
 	"time"
 
 	"github.com/danieljustus/symaira-corekit/fsutil"
-
-	"github.com/danieljustus/symaira-ingest/internal/frontmatter"
 	"gopkg.in/yaml.v3"
 )
+
+type Note struct {
+	SourcePath string    `yaml:"source_path"`
+	IngestedAt time.Time `yaml:"ingested_at"`
+	SHA256     string    `yaml:"sha256"`
+	MIME       string    `yaml:"mime"`
+	OCREngine  string    `yaml:"ocr_engine,omitempty"`
+}
 
 // NoteWriter writes deduplicated Markdown sidecars into a vault.
 type NoteWriter struct {
@@ -32,7 +38,7 @@ func (w *NoteWriter) WriteNote(sourcePath, sha256, mime, ocrEngine, text string,
 		return "", fmt.Errorf("create vault directory: %w", err)
 	}
 
-	meta := frontmatter.Note{
+	meta := Note{
 		SourcePath: sourcePath,
 		IngestedAt: ingestedAt,
 		SHA256:     sha256,
