@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -51,18 +52,24 @@ func (p *Pipeline) Ingest(ctx context.Context, source string) (*Result, error) {
 		return nil, ErrDuplicate
 	}
 
-	var res *Result
+	var extractRes *extract.Result
 	switch kind {
 	case extract.KindText, extract.KindMarkdown:
-		res, err = OneShot(ctx, source, nil)
+		extractRes, err = extractText(ctx, source, kind, nil)
 	default:
 		if p.Engine == nil {
 			return nil, fmt.Errorf("no extraction engine available for %q", kind)
 		}
-		res, err = OneShot(ctx, source, p.Engine)
+		extractRes, err = extractText(ctx, source, kind, p.Engine)
 	}
 	if err != nil {
 		return nil, err
+	}
+
+	res := &Result{
+		SourcePath: source,
+		Kind:       kind,
+		Extract:    extractRes,
 	}
 
 	vaultPath, err := p.Writer.WriteNote(
@@ -90,10 +97,15 @@ func (p *Pipeline) Ingest(ctx context.Context, source string) (*Result, error) {
 }
 
 func hashFile(path string) (string, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:]), nil
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }

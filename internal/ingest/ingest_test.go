@@ -17,39 +17,40 @@ func (f *fakeEngine) Extract(ctx context.Context, path string, kind extract.Kind
 	return f.result, nil
 }
 
-func TestOneShot_TextFile(t *testing.T) {
+func TestExtractText_TextFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "note.txt")
 	if err := os.WriteFile(path, []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	res, err := OneShot(context.Background(), path, nil)
+	kind, err := extract.Detect(path)
 	if err != nil {
-		t.Fatalf("OneShot: %v", err)
+		t.Fatal(err)
 	}
-	if res.Extract.Text != "hello" {
-		t.Fatalf("text = %q, want hello", res.Extract.Text)
+	res, err := extractText(context.Background(), path, kind, nil)
+	if err != nil {
+		t.Fatalf("extractText: %v", err)
+	}
+	if res.Text != "hello" {
+		t.Fatalf("text = %q, want hello", res.Text)
 	}
 }
 
-func TestOneShot_Engine(t *testing.T) {
+func TestExtractText_Engine(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "scan.png")
 	if err := os.WriteFile(path, []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	res, err := OneShot(context.Background(), path, &fakeEngine{result: &extract.Result{Text: "ocr"}})
+	kind, err := extract.Detect(path)
 	if err != nil {
-		t.Fatalf("OneShot: %v", err)
+		t.Fatal(err)
 	}
-	if res.Extract.Text != "ocr" {
-		t.Fatalf("text = %q, want ocr", res.Extract.Text)
+	res, err := extractText(context.Background(), path, kind, &fakeEngine{result: &extract.Result{Text: "ocr"}})
+	if err != nil {
+		t.Fatalf("extractText: %v", err)
 	}
-}
-
-func TestOneShot_Directory(t *testing.T) {
-	dir := t.TempDir()
-	if _, err := OneShot(context.Background(), dir, nil); err == nil {
-		t.Fatal("expected error for directory")
+	if res.Text != "ocr" {
+		t.Fatalf("text = %q, want ocr", res.Text)
 	}
 }
