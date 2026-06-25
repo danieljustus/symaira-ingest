@@ -24,19 +24,29 @@ type Runner struct {
 // DefaultRunner returns a runner that looks up tools on PATH.
 func DefaultRunner(ocrLang string) *Runner {
 	return &Runner{
-		Tesseract: "tesseract",
-		PDFToPPM:  "pdftoppm",
+		Tesseract: filepath.Clean("tesseract"),
+		PDFToPPM:  filepath.Clean("pdftoppm"),
 		OCRLang:   ocrLang,
 	}
+}
+
+// cleanToolPath sanitises a tool path and returns an error if it is unusable.
+func cleanToolPath(name, path string) (string, error) {
+	cleaned := filepath.Clean(path)
+	if cleaned == "" || cleaned == "." {
+		return "", fmt.Errorf("%s command is not configured", name)
+	}
+	return cleaned, nil
 }
 
 // Available returns an error if required tools are missing.
 // For image-only pipelines pdftoppm is not required.
 func (r *Runner) Available() error {
-	if r.Tesseract == "" {
-		return fmt.Errorf("tesseract command is not configured")
+	path, err := cleanToolPath("tesseract", r.Tesseract)
+	if err != nil {
+		return err
 	}
-	if _, err := exec.LookPath(r.Tesseract); err != nil {
+	if _, err := exec.LookPath(path); err != nil {
 		return fmt.Errorf("tesseract not found on PATH: %w", err)
 	}
 	return nil
@@ -47,10 +57,11 @@ func (r *Runner) AvailableForPDF() error {
 	if err := r.Available(); err != nil {
 		return err
 	}
-	if r.PDFToPPM == "" {
-		return fmt.Errorf("pdftoppm command is not configured")
+	path, err := cleanToolPath("pdftoppm", r.PDFToPPM)
+	if err != nil {
+		return err
 	}
-	if _, err := exec.LookPath(r.PDFToPPM); err != nil {
+	if _, err := exec.LookPath(path); err != nil {
 		return fmt.Errorf("pdftoppm not found on PATH: %w", err)
 	}
 	return nil

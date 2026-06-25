@@ -92,6 +92,32 @@ func TestRunner_ExtractPDF_MissingPDFToPPM(t *testing.T) {
 	}
 }
 
+func TestDefaultRunner_CleanedPaths(t *testing.T) {
+	r := DefaultRunner("eng")
+	if r.Tesseract != "tesseract" {
+		t.Fatalf("Tesseract = %q, want %q", r.Tesseract, "tesseract")
+	}
+	if r.PDFToPPM != "pdftoppm" {
+		t.Fatalf("PDFToPPM = %q, want %q", r.PDFToPPM, "pdftoppm")
+	}
+}
+
+func TestRunner_Available_EmptyPath(t *testing.T) {
+	r := &Runner{Tesseract: ""}
+	if err := r.Available(); err == nil {
+		t.Fatal("expected error for empty tesseract path")
+	}
+}
+
+func TestRunner_AvailableForPDF_EmptyPDFToPPM(t *testing.T) {
+	dir := t.TempDir()
+	tess := writeFakeBin(t, dir, "tesseract", `echo "ok"`)
+	r := &Runner{Tesseract: tess, PDFToPPM: ""}
+	if err := r.AvailableForPDF(); err == nil {
+		t.Fatal("expected error for empty pdftoppm path")
+	}
+}
+
 func TestRunner_CapturesStderr(t *testing.T) {
 	dir := t.TempDir()
 	tess := writeFakeBin(t, dir, "tesseract", `echo "broken" >&2; exit 1`)
