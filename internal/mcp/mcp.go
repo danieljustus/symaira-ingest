@@ -20,7 +20,7 @@ import (
 func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, defaultVault string) {
 	server.RegisterTool(&mcpserver.Tool{
 		Name:        "ingest_file",
-		Description: "Ingest a single file into the vault, returning metadata about the generated Markdown note.",
+		Description: "Ingest a single file into the vault, returning metadata about the generated Markdown note including the vault_path where it was written.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -68,13 +68,14 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 				return nil, err
 			}
 
-			return map[string]any{
-				"status":      "success",
-				"source":      source,
-				"mime":        res.Extract.MIME,
-				"engine":      res.Extract.Engine,
-				"text_length": len(res.Extract.Text),
-			}, nil
+		return map[string]any{
+			"status":      "success",
+			"source":      source,
+			"vault_path":  res.VaultPath,
+			"mime":        res.Extract.MIME,
+			"engine":      res.Extract.Engine,
+			"text_length": len(res.Extract.Text),
+		}, nil
 		},
 	})
 }
