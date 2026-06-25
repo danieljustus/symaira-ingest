@@ -107,7 +107,11 @@ Ingest a single file into the configured vault.`)
 		*dbFlag = cfg.DBPath
 	}
 	if *dbFlag == "" {
-		*dbFlag = defaultDBPath()
+		path, err := defaultDBPath()
+		if err != nil {
+			return err
+		}
+		*dbFlag = path
 	}
 
 	source, err := filepath.Abs(remaining[0])
@@ -146,12 +150,13 @@ Ingest a single file into the configured vault.`)
 	return nil
 }
 
-func defaultDBPath() string {
+func defaultDBPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(".", "symingest.db")
+		return "", exitcodes.Wrapf(err, exitcodes.ExitConfig, exitcodes.KindConfig,
+			"cannot determine home directory; use --db to specify a database path explicitly")
 	}
-	return filepath.Join(home, ".local", "share", "symingest", "symingest.db")
+	return filepath.Join(home, ".local", "share", "symingest", "symingest.db"), nil
 }
 
 func runMCP(args []string) error {
@@ -183,7 +188,11 @@ func runMCP(args []string) error {
 		*dbFlag = cfg.DBPath
 	}
 	if *dbFlag == "" {
-		*dbFlag = defaultDBPath()
+		path, err := defaultDBPath()
+		if err != nil {
+			return err
+		}
+		*dbFlag = path
 	}
 
 	st, err := store.Open(*dbFlag)
