@@ -101,7 +101,7 @@ Ingest a single file into the configured vault.`)
 	}
 	if *vaultFlag == "" {
 		return exitcodes.Wrapf(nil, exitcodes.ExitConfig, exitcodes.KindConfig,
-			"no vault configured; use --vault or SYMINGEST_VAULT")
+			"no vault configured; use --vault, SYMINGEST_VAULT env, or set vault in ~/.config/symingest/config.toml")
 	}
 	if *dbFlag == "" {
 		*dbFlag = cfg.DBPath
