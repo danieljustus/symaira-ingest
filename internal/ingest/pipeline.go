@@ -51,18 +51,24 @@ func (p *Pipeline) Ingest(ctx context.Context, source string) (*Result, error) {
 		return nil, ErrDuplicate
 	}
 
-	var res *Result
+	var extractRes *extract.Result
 	switch kind {
 	case extract.KindText, extract.KindMarkdown:
-		res, err = OneShot(ctx, source, nil)
+		extractRes, err = extractText(ctx, source, kind, nil)
 	default:
 		if p.Engine == nil {
 			return nil, fmt.Errorf("no extraction engine available for %q", kind)
 		}
-		res, err = OneShot(ctx, source, p.Engine)
+		extractRes, err = extractText(ctx, source, kind, p.Engine)
 	}
 	if err != nil {
 		return nil, err
+	}
+
+	res := &Result{
+		SourcePath: source,
+		Kind:       kind,
+		Extract:    extractRes,
 	}
 
 	vaultPath, err := p.Writer.WriteNote(

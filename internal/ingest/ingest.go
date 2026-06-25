@@ -4,7 +4,6 @@ package ingest
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"github.com/danieljustus/symaira-ingest/internal/extract"
 )
@@ -17,22 +16,10 @@ type Result struct {
 	VaultPath  string
 }
 
-// OneShot extracts text from a single source file.
-func OneShot(ctx context.Context, source string, engine extract.Engine) (*Result, error) {
-	info, err := os.Stat(source)
-	if err != nil {
-		return nil, fmt.Errorf("stat source: %w", err)
-	}
-	if info.IsDir() {
-		return nil, fmt.Errorf("source is a directory: %s", source)
-	}
-
-	kind, err := extract.Detect(source)
-	if err != nil {
-		return nil, fmt.Errorf("detect source type: %w", err)
-	}
-
+func extractText(ctx context.Context, source string, kind extract.Kind, engine extract.Engine) (*extract.Result, error) {
 	var res *extract.Result
+	var err error
+
 	switch kind {
 	case extract.KindText, extract.KindMarkdown:
 		res, err = extract.ReadText(ctx, source)
@@ -42,13 +29,10 @@ func OneShot(ctx context.Context, source string, engine extract.Engine) (*Result
 		}
 		res, err = engine.Extract(ctx, source, kind)
 	}
+
 	if err != nil {
 		return nil, fmt.Errorf("extract text: %w", err)
 	}
 
-	return &Result{
-		SourcePath: source,
-		Kind:       kind,
-		Extract:    res,
-	}, nil
+	return res, nil
 }
