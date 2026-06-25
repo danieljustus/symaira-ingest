@@ -14,6 +14,7 @@ type Result struct {
 	SourcePath string
 	Kind       extract.Kind
 	Extract    *extract.Result
+	VaultPath  string
 }
 
 // OneShot extracts text from a single source file.

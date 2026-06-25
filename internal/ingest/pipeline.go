@@ -85,6 +85,7 @@ func (p *Pipeline) Ingest(ctx context.Context, source string) (*Result, error) {
 		SourcePath: source,
 		Kind:       kind,
 		Extract:    res.Extract,
+		VaultPath:  vaultPath,
 	}, nil
 }
 
