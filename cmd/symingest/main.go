@@ -11,9 +11,11 @@ import (
 
 	"github.com/danieljustus/symaira-corekit/exitcodes"
 	"github.com/danieljustus/symaira-corekit/logkit"
+	"github.com/danieljustus/symaira-corekit/mcpserver"
 
 	"github.com/danieljustus/symaira-ingest/internal/config"
 	"github.com/danieljustus/symaira-ingest/internal/ingest"
+	"github.com/danieljustus/symaira-ingest/internal/mcp"
 	"github.com/danieljustus/symaira-ingest/internal/ocr"
 	"github.com/danieljustus/symaira-ingest/internal/store"
 	"github.com/danieljustus/symaira-ingest/internal/version"
@@ -153,6 +155,52 @@ func defaultDBPath() string {
 }
 
 func runMCP(args []string) error {
-	return exitcodes.Wrapf(nil, exitcodes.ExitSoftware, exitcodes.KindInternal,
-		"mcp server is not yet implemented")
+	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	ocrLang := fs.String("ocr-lang", "", "Tesseract language override")
+	vaultFlag := fs.String("vault", "", "Target vault directory")
+	dbFlag := fs.String("db", "", "SQLite database path")
+	if err := fs.Parse(args); err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
+			"invalid mcp flags")
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
+			"failed to load configuration")
+	}
+
+	if *ocrLang == "" {
+		*ocrLang = cfg.OCRLang
+	}
+	if *ocrLang == "" {
+		*ocrLang = "eng"
+	}
+	if *vaultFlag == "" {
+		*vaultFlag = cfg.Vault
+	}
+	if *dbFlag == "" {
+		*dbFlag = cfg.DBPath
+	}
+	if *dbFlag == "" {
+		*dbFlag = defaultDBPath()
+	}
+
+	st, err := store.Open(*dbFlag)
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
+			"failed to open document store")
+	}
+	defer st.Close()
+
+	engine := ocr.DefaultRunner(*ocrLang)
+	server := mcpserver.New("symingest", version.Version)
+	mcp.Register(server, st, engine, *vaultFlag)
+
+	ctx := context.Background()
+	if err := server.ServeStdio(ctx); err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitSoftware, exitcodes.KindInternal,
+			"mcp server failed")
+	}
+	return nil
 }
