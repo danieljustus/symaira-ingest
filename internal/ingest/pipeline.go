@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -96,10 +97,15 @@ func (p *Pipeline) Ingest(ctx context.Context, source string) (*Result, error) {
 }
 
 func hashFile(path string) (string, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:]), nil
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
