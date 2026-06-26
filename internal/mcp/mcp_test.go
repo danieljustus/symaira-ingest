@@ -163,6 +163,522 @@ func atoi(s string) int {
 	return n
 }
 
+func TestRegister_IngestFile_InvalidInput(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "mcp.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	server := mcpserver.New("symingest", "0.1.0")
+	Register(server, st, fakeEngine{}, filepath.Join(dir, "vault"), filepath.Join(dir, "archive"))
+
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	defer outR.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = server.ServeIO(ctx, inR, outW)
+	}()
+
+	writeFramed(t, inW, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+	})
+	readResp(t, outR)
+
+	writeFramed(t, inW, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      "ingest_file",
+			"arguments": "not-a-json-object",
+		},
+	})
+	resp := readResp(t, outR)
+	if resp.Error != nil {
+		return
+	}
+	result, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result type = %T, want map", resp.Result)
+	}
+	content, ok := result["content"].([]any)
+	if !ok || len(content) == 0 {
+		t.Fatalf("missing content in result: %v", result)
+	}
+	first, ok := content[0].(map[string]any)
+	if !ok {
+		t.Fatalf("content[0] type = %T", content[0])
+	}
+	text, ok := first["text"].(string)
+	if !ok {
+		t.Fatalf("content text type = %T", first["text"])
+	}
+	if !strings.Contains(text, "invalid") && !strings.Contains(text, "error") {
+		t.Fatalf("expected error message, got: %s", text)
+	}
+}
+
+func TestRegister_IngestFile_NoVault(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "mcp.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	server := mcpserver.New("symingest", "0.1.0")
+	Register(server, st, fakeEngine{}, "", "")
+
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	defer outR.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = server.ServeIO(ctx, inR, outW)
+	}()
+
+	writeFramed(t, inW, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+	})
+	readResp(t, outR)
+
+	writeFramed(t, inW, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      "ingest_file",
+			"arguments": map[string]any{"path": "/nonexistent/file.txt"},
+		},
+	})
+	resp := readResp(t, outR)
+	if resp.Error != nil {
+		return
+	}
+	result, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result type = %T, want map", resp.Result)
+	}
+	content, ok := result["content"].([]any)
+	if !ok || len(content) == 0 {
+		t.Fatalf("missing content in result: %v", result)
+	}
+	first, ok := content[0].(map[string]any)
+	if !ok {
+		t.Fatalf("content[0] type = %T", content[0])
+	}
+	text, ok := first["text"].(string)
+	if !ok {
+		t.Fatalf("content text type = %T", first["text"])
+	}
+	if !strings.Contains(text, "vault") && !strings.Contains(text, "error") {
+		t.Fatalf("expected vault error message, got: %s", text)
+	}
+}
+
+func TestRegister_IngestFile_Duplicate(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "mcp.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	vault := filepath.Join(dir, "vault")
+	if err := os.MkdirAll(vault, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(dir, "scan.png")
+	if err := os.WriteFile(src, []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	server := mcpserver.New("symingest", "0.1.0")
+	Register(server, st, fakeEngine{}, vault, filepath.Join(dir, "archive"))
+
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	defer outR.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = server.ServeIO(ctx, inR, outW)
+	}()
+
+	writeFramed(t, inW, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+	})
+	readResp(t, outR)
+
+	writeFramed(t, inW, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      "ingest_file",
+			"arguments": map[string]any{"path": src},
+		},
+	})
+	readResp(t, outR)
+
+	writeFramed(t, inW, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      3,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      "ingest_file",
+			"arguments": map[string]any{"path": src},
+		},
+	})
+	resp := readResp(t, outR)
+	if resp.Error != nil {
+		t.Fatalf("expected no error for duplicate, got: %v", resp.Error)
+	}
+	result, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result type = %T, want map", resp.Result)
+	}
+	content, ok := result["content"].([]any)
+	if !ok || len(content) == 0 {
+		t.Fatalf("missing content in result: %v", result)
+	}
+	first, ok := content[0].(map[string]any)
+	if !ok {
+		t.Fatalf("content[0] type = %T", content[0])
+	}
+	raw, ok := first["text"].(map[string]any)
+	if !ok {
+		t.Fatalf("content text type = %T", first["text"])
+	}
+	if raw["status"] != "duplicate" {
+		t.Fatalf("status = %v, want duplicate", raw["status"])
+	}
+}
+
+func TestRegister_RetryJob_InvalidInput(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "mcp.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	server := mcpserver.New("symingest", "0.1.0")
+	Register(server, st, fakeEngine{}, filepath.Join(dir, "vault"), filepath.Join(dir, "archive"))
+
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	defer outR.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = server.ServeIO(ctx, inR, outW)
+	}()
+
+	writeFramed(t, inW, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+	})
+	readResp(t, outR)
+
+	writeFramed(t, inW, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      "retry_job",
+			"arguments": "not-a-json-object",
+		},
+	})
+	resp := readResp(t, outR)
+	if resp.Error != nil {
+		return
+	}
+	result, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result type = %T, want map", resp.Result)
+	}
+	content, ok := result["content"].([]any)
+	if !ok || len(content) == 0 {
+		t.Fatalf("missing content in result: %v", result)
+	}
+	first, ok := content[0].(map[string]any)
+	if !ok {
+		t.Fatalf("content[0] type = %T", content[0])
+	}
+	text, ok := first["text"].(string)
+	if !ok {
+		t.Fatalf("content text type = %T", first["text"])
+	}
+	if !strings.Contains(text, "invalid") && !strings.Contains(text, "error") {
+		t.Fatalf("expected error message, got: %s", text)
+	}
+}
+
+func TestRegister_AddRule_InvalidInput(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "mcp.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	server := mcpserver.New("symingest", "0.1.0")
+	Register(server, st, fakeEngine{}, filepath.Join(dir, "vault"), filepath.Join(dir, "archive"))
+
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	defer outR.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = server.ServeIO(ctx, inR, outW)
+	}()
+
+	writeFramed(t, inW, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+	})
+	readResp(t, outR)
+
+	writeFramed(t, inW, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      "add_rule",
+			"arguments": "not-a-json-object",
+		},
+	})
+	resp := readResp(t, outR)
+	if resp.Error != nil {
+		return
+	}
+	result, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result type = %T, want map", resp.Result)
+	}
+	content, ok := result["content"].([]any)
+	if !ok || len(content) == 0 {
+		t.Fatalf("missing content in result: %v", result)
+	}
+	first, ok := content[0].(map[string]any)
+	if !ok {
+		t.Fatalf("content[0] type = %T", content[0])
+	}
+	text, ok := first["text"].(string)
+	if !ok {
+		t.Fatalf("content text type = %T", first["text"])
+	}
+	if !strings.Contains(text, "invalid") && !strings.Contains(text, "error") {
+		t.Fatalf("expected error message, got: %s", text)
+	}
+}
+
+func TestRegister_DeleteRule_InvalidInput(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "mcp.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	server := mcpserver.New("symingest", "0.1.0")
+	Register(server, st, fakeEngine{}, filepath.Join(dir, "vault"), filepath.Join(dir, "archive"))
+
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	defer outR.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = server.ServeIO(ctx, inR, outW)
+	}()
+
+	writeFramed(t, inW, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+	})
+	readResp(t, outR)
+
+	writeFramed(t, inW, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      "delete_rule",
+			"arguments": "not-a-json-object",
+		},
+	})
+	resp := readResp(t, outR)
+	if resp.Error != nil {
+		return
+	}
+	result, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result type = %T, want map", resp.Result)
+	}
+	content, ok := result["content"].([]any)
+	if !ok || len(content) == 0 {
+		t.Fatalf("missing content in result: %v", result)
+	}
+	first, ok := content[0].(map[string]any)
+	if !ok {
+		t.Fatalf("content[0] type = %T", content[0])
+	}
+	text, ok := first["text"].(string)
+	if !ok {
+		t.Fatalf("content text type = %T", first["text"])
+	}
+	if !strings.Contains(text, "invalid") && !strings.Contains(text, "error") {
+		t.Fatalf("expected error message, got: %s", text)
+	}
+}
+
+func TestRegister_DeleteRule_NotFound(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "mcp.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	server := mcpserver.New("symingest", "0.1.0")
+	Register(server, st, fakeEngine{}, filepath.Join(dir, "vault"), filepath.Join(dir, "archive"))
+
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	defer outR.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = server.ServeIO(ctx, inR, outW)
+	}()
+
+	writeFramed(t, inW, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+	})
+	readResp(t, outR)
+
+	writeFramed(t, inW, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      "delete_rule",
+			"arguments": map[string]any{"rule_id": 99999},
+		},
+	})
+	resp := readResp(t, outR)
+	if resp.Error != nil {
+		return
+	}
+	result, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result type = %T, want map", resp.Result)
+	}
+	content, ok := result["content"].([]any)
+	if !ok || len(content) == 0 {
+		t.Fatalf("missing content in result: %v", result)
+	}
+	first, ok := content[0].(map[string]any)
+	if !ok {
+		t.Fatalf("content[0] type = %T", content[0])
+	}
+	text, ok := first["text"].(string)
+	if !ok {
+		t.Fatalf("content text type = %T", first["text"])
+	}
+	if !strings.Contains(text, "not found") && !strings.Contains(text, "error") {
+		t.Fatalf("expected not found error, got: %s", text)
+	}
+}
+
+func TestRegister_ListJobs_Empty(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "mcp.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	server := mcpserver.New("symingest", "0.1.0")
+	Register(server, st, fakeEngine{}, filepath.Join(dir, "vault"), filepath.Join(dir, "archive"))
+
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	defer outR.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = server.ServeIO(ctx, inR, outW)
+	}()
+
+	writeFramed(t, inW, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+	})
+	readResp(t, outR)
+
+	writeFramed(t, inW, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      "list_jobs",
+			"arguments": map[string]any{},
+		},
+	})
+	resp := readResp(t, outR)
+	if resp.Error != nil {
+		t.Fatalf("expected no error, got: %v", resp.Error)
+	}
+	result, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result type = %T, want map", resp.Result)
+	}
+	content, ok := result["content"].([]any)
+	if !ok || len(content) == 0 {
+		t.Fatalf("missing content in result: %v", result)
+	}
+	first, ok := content[0].(map[string]any)
+	if !ok {
+		t.Fatalf("content[0] type = %T", content[0])
+	}
+	raw, ok := first["text"].(map[string]any)
+	if !ok {
+		t.Fatalf("content text type = %T", first["text"])
+	}
+	if raw["status"] != "success" {
+		t.Fatalf("status = %v, want success", raw["status"])
+	}
+}
+
 func TestRegister_Rules(t *testing.T) {
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "mcp.db"))
