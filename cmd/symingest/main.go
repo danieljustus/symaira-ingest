@@ -2,12 +2,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"strconv"
+	"syscall"
+	"text/tabwriter"
 
 	"github.com/danieljustus/symaira-corekit/exitcodes"
 	"github.com/danieljustus/symaira-corekit/logkit"
@@ -45,6 +51,12 @@ func run(args []string) error {
 		return printUsage()
 	case "ingest":
 		return runIngest(args[1:])
+	case "watch":
+		return runWatch(args[1:])
+	case "jobs":
+		return runJobs(args[1:])
+	case "retry":
+		return runRetry(args[1:])
 	case "mcp":
 		return runMCP(args[1:])
 	default:
@@ -61,6 +73,9 @@ Usage:
 
 Commands:
   ingest <file>  Ingest a file into the vault (one-shot)
+  watch <dir>    Watch a directory for new/modified files and ingest in the background
+  jobs           List ingestion jobs in the queue
+  retry <id>     Retry a failed job by ID
   mcp            Start the MCP server
   version        Print version
   help           Show this help`)
@@ -211,5 +226,231 @@ func runMCP(args []string) error {
 		return exitcodes.Wrap(err, exitcodes.ExitSoftware, exitcodes.KindInternal,
 			"mcp server failed")
 	}
+	return nil
+}
+
+func runWatch(args []string) error {
+	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
+	ocrLang := fs.String("ocr-lang", "", "Tesseract language override")
+	vaultFlag := fs.String("vault", "", "Target vault directory")
+	dbFlag := fs.String("db", "", "SQLite database path")
+	if err := fs.Parse(args); err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
+			"invalid watch flags")
+	}
+	remaining := fs.Args()
+	if len(remaining) == 0 || remaining[0] == "--help" || remaining[0] == "-h" {
+		fmt.Fprintln(stdout, `Usage: symingest watch [flags] <dir>
+
+Watch a directory for new or modified files and ingest them in the background.`)
+		return nil
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
+			"failed to load configuration")
+	}
+
+	if *ocrLang == "" {
+		*ocrLang = cfg.OCRLang
+	}
+	if *ocrLang == "" {
+		*ocrLang = "eng"
+	}
+	if *vaultFlag == "" {
+		*vaultFlag = cfg.Vault
+	}
+	if *vaultFlag == "" {
+		return exitcodes.Wrapf(nil, exitcodes.ExitConfig, exitcodes.KindConfig,
+			"no vault configured; use --vault, SYMINGEST_VAULT env, or set vault in ~/.config/symingest/config.toml")
+	}
+	if *dbFlag == "" {
+		*dbFlag = cfg.DBPath
+	}
+	if *dbFlag == "" {
+		path, err := defaultDBPath()
+		if err != nil {
+			return err
+		}
+		*dbFlag = path
+	}
+
+	inboxDir, err := filepath.Abs(remaining[0])
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
+			"invalid inbox directory path")
+	}
+
+	st, err := store.Open(*dbFlag)
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
+			"failed to open document store")
+	}
+	defer st.Close()
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	// Reset any running jobs to pending on startup
+	if err := st.ResetRunningJobs(ctx); err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindInternal,
+			"failed to reset running jobs")
+	}
+
+	watcher, err := ingest.NewWatcher(st, inboxDir)
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindInternal,
+			"failed to initialize watcher")
+	}
+	defer watcher.Close()
+
+	engine := ocr.DefaultRunner(*ocrLang)
+	pipeline := &ingest.Pipeline{
+		Engine: engine,
+		Store:  st,
+		Writer: &writer.NoteWriter{Vault: *vaultFlag},
+	}
+
+	if err := watcher.Start(ctx); err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindInternal,
+			"failed to start watcher")
+	}
+
+	go ingest.StartWorker(ctx, pipeline)
+
+	log.Printf("Watching directory: %s", inboxDir)
+	log.Printf("Vault directory:    %s", *vaultFlag)
+	log.Printf("Database:           %s", *dbFlag)
+	log.Println("Press Ctrl+C to stop.")
+
+	<-ctx.Done()
+	log.Println("Shutting down watch command...")
+	return nil
+}
+
+func runJobs(args []string) error {
+	fs := flag.NewFlagSet("jobs", flag.ContinueOnError)
+	jsonFlag := fs.Bool("json", false, "Output jobs in JSON format")
+	dbFlag := fs.String("db", "", "SQLite database path")
+	if err := fs.Parse(args); err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
+			"invalid jobs flags")
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
+			"failed to load configuration")
+	}
+
+	if *dbFlag == "" {
+		*dbFlag = cfg.DBPath
+	}
+	if *dbFlag == "" {
+		path, err := defaultDBPath()
+		if err != nil {
+			return err
+		}
+		*dbFlag = path
+	}
+
+	st, err := store.Open(*dbFlag)
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
+			"failed to open document store")
+	}
+	defer st.Close()
+
+	ctx := context.Background()
+	jobs, err := st.ListJobs(ctx)
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
+			"failed to list jobs")
+	}
+
+	if *jsonFlag {
+		if jobs == nil {
+			// Ensure we output empty array instead of null
+			fmt.Fprintln(stdout, "[]")
+			return nil
+		}
+		data, err := json.MarshalIndent(jobs, "", "  ")
+		if err != nil {
+			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
+				"failed to marshal jobs to JSON")
+		}
+		fmt.Fprintln(stdout, string(data))
+		return nil
+	}
+
+	if len(jobs) == 0 {
+		fmt.Fprintln(stdout, "No jobs in queue.")
+		return nil
+	}
+
+	w := tabwriter.NewWriter(stdout, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(w, "ID\tDOCUMENT ID\tSTATUS\tATTEMPTS\tKIND\tSOURCE PATH")
+	for _, j := range jobs {
+		fmt.Fprintf(w, "%d\t%d\t%s\t%d\t%s\t%s\n",
+			j.ID, j.DocumentID, j.Status, j.Attempts, j.Kind, j.SourcePath)
+	}
+	w.Flush()
+	return nil
+}
+
+func runRetry(args []string) error {
+	fs := flag.NewFlagSet("retry", flag.ContinueOnError)
+	dbFlag := fs.String("db", "", "SQLite database path")
+	if err := fs.Parse(args); err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
+			"invalid retry flags")
+	}
+	remaining := fs.Args()
+	if len(remaining) == 0 || remaining[0] == "--help" || remaining[0] == "-h" {
+		fmt.Fprintln(stdout, `Usage: symingest retry [flags] <job-id>
+
+Retry a failed job by resetting its status to pending.`)
+		return nil
+	}
+
+	jobIDStr := remaining[0]
+	jobID, err := strconv.ParseInt(jobIDStr, 10, 64)
+	if err != nil {
+		return exitcodes.Wrapf(err, exitcodes.ExitData, exitcodes.KindValidation,
+			"invalid job ID %q; must be an integer", jobIDStr)
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
+			"failed to load configuration")
+	}
+
+	if *dbFlag == "" {
+		*dbFlag = cfg.DBPath
+	}
+	if *dbFlag == "" {
+		path, err := defaultDBPath()
+		if err != nil {
+			return err
+		}
+		*dbFlag = path
+	}
+
+	st, err := store.Open(*dbFlag)
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
+			"failed to open document store")
+	}
+	defer st.Close()
+
+	ctx := context.Background()
+	if err := st.RetryJob(ctx, jobID); err != nil {
+		return exitcodes.Wrapf(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
+			"failed to retry job %d", jobID)
+	}
+
+	fmt.Fprintf(stdout, "Job %d status set to pending. Background workers will process it shortly.\n", jobID)
 	return nil
 }

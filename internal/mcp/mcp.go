@@ -78,4 +78,110 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 		}, nil
 		},
 	})
+
+	server.RegisterTool(&mcpserver.Tool{
+		Name:        "list_jobs",
+		Description: "List all jobs in the ingestion queue, including their status, attempts, error messages, and source path.",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {}
+		}`),
+		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
+			jobs, err := st.ListJobs(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("list jobs: %w", err)
+			}
+			return map[string]any{
+				"status": "success",
+				"jobs":   jobs,
+			}, nil
+		},
+	})
+
+	server.RegisterTool(&mcpserver.Tool{
+		Name:        "retry_job",
+		Description: "Reset a failed job's status to pending and its attempts count to 0 so that it gets retried.",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"job_id": {"type": "integer", "description": "The ID of the job to retry"}
+			},
+			"required": ["job_id"]
+		}`),
+		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
+			var args struct {
+				JobID int64 `json:"job_id"`
+			}
+			if err := json.Unmarshal(input, &args); err != nil {
+				return nil, fmt.Errorf("invalid arguments: %w", err)
+			}
+
+			if err := st.RetryJob(ctx, args.JobID); err != nil {
+				return nil, fmt.Errorf("retry job %d: %w", args.JobID, err)
+			}
+
+			return map[string]any{
+				"status":  "success",
+				"message": fmt.Sprintf("job %d reset to pending status", args.JobID),
+			}, nil
+		},
+	})
+
+	server.RegisterTool(&mcpserver.Tool{
+		Name:        "start_watch",
+		Description: "Start recursively watching a directory for new or modified files and process them automatically in the background.",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"directory": {"type": "string", "description": "Absolute path to the directory to watch"},
+				"vault_path": {"type": "string", "description": "Optional vault directory path override"}
+			},
+			"required": ["directory"]
+		}`),
+		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
+			var args struct {
+				Directory string `json:"directory"`
+				VaultPath string `json:"vault_path"`
+			}
+			if err := json.Unmarshal(input, &args); err != nil {
+				return nil, fmt.Errorf("invalid arguments: %w", err)
+			}
+
+			dir, err := filepath.Abs(args.Directory)
+			if err != nil {
+				return nil, fmt.Errorf("invalid directory path: %w", err)
+			}
+
+			vault := args.VaultPath
+			if vault == "" {
+				vault = defaultVault
+			}
+			if vault == "" {
+				return nil, fmt.Errorf("no vault configured")
+			}
+
+			watcher, err := ingest.NewWatcher(st, dir)
+			if err != nil {
+				return nil, fmt.Errorf("initialize watcher: %w", err)
+			}
+
+			pipeline := &ingest.Pipeline{
+				Engine: engine,
+				Store:  st,
+				Writer: &writer.NoteWriter{Vault: vault},
+			}
+
+			bgCtx := context.Background()
+			if err := watcher.Start(bgCtx); err != nil {
+				watcher.Close()
+				return nil, fmt.Errorf("start watcher: %w", err)
+			}
+			go ingest.StartWorker(bgCtx, pipeline)
+
+			return map[string]any{
+				"status":  "success",
+				"message": fmt.Sprintf("started watching directory %s with vault %s", dir, vault),
+			}, nil
+		},
+	})
 }
