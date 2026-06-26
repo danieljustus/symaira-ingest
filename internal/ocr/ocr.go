@@ -81,11 +81,82 @@ func (r *Runner) Extract(ctx context.Context, path string, kind extract.Kind) (*
 	}
 }
 
+func (r *Runner) validateLanguages(ctx context.Context) (string, error) {
+	lang := r.OCRLang
+	if lang == "" {
+		lang = "eng"
+	}
+
+	path, err := cleanToolPath("tesseract", r.Tesseract)
+	if err != nil {
+		return "", err
+	}
+	execPath, err := exec.LookPath(path)
+	if err != nil {
+		return "", fmt.Errorf("tesseract not found on PATH: %w", err)
+	}
+
+	// We capture stdout and stderr separately
+	cmd := exec.CommandContext(ctx, execPath, "--list-langs")
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+	if err := cmd.Run(); err != nil {
+		// If tesseract --list-langs fails, we cannot validate, so just return the original lang
+		return lang, nil
+	}
+
+	available := make(map[string]bool)
+	lines := strings.Split(stdoutBuf.String(), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.Contains(line, ":") || strings.Contains(line, "available") {
+			continue
+		}
+		available[line] = true
+	}
+
+	parts := strings.Split(lang, "+")
+	var installed []string
+	var missing []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if available[p] {
+			installed = append(installed, p)
+		} else {
+			missing = append(missing, p)
+		}
+	}
+
+	if len(missing) > 0 {
+		if len(installed) > 0 {
+			fallback := strings.Join(installed, "+")
+			fmt.Fprintf(os.Stderr, "Warning: tesseract language(s) %v not installed; falling back to %q\n", missing, fallback)
+			return fallback, nil
+		}
+		var availList []string
+		for a := range available {
+			availList = append(availList, a)
+		}
+		sort.Strings(availList)
+		return "", fmt.Errorf("none of the configured OCR languages %q are installed (available: %v)", lang, availList)
+	}
+
+	return lang, nil
+}
+
 func (r *Runner) extractImage(ctx context.Context, path string) (*extract.Result, error) {
 	if err := r.Available(); err != nil {
 		return nil, err
 	}
-	out, err := r.runTool(ctx, r.Tesseract, "-l", r.OCRLang, path, "stdout")
+	lang, err := r.validateLanguages(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out, err := r.runTool(ctx, r.Tesseract, "-l", lang, path, "stdout")
 	if err != nil {
 		return nil, fmt.Errorf("tesseract failed: %w", err)
 	}
@@ -98,6 +169,10 @@ func (r *Runner) extractImage(ctx context.Context, path string) (*extract.Result
 
 func (r *Runner) extractPDF(ctx context.Context, path string) (*extract.Result, error) {
 	if err := r.AvailableForPDF(); err != nil {
+		return nil, err
+	}
+	lang, err := r.validateLanguages(ctx)
+	if err != nil {
 		return nil, err
 	}
 
@@ -137,7 +212,7 @@ func (r *Runner) extractPDF(ctx context.Context, path string) (*extract.Result, 
 	for i, p := range pages {
 		i, p := i, p
 		g.Go(func() error {
-			out, err := r.runTool(ctx, r.Tesseract, "-l", r.OCRLang, p, "stdout")
+			out, err := r.runTool(ctx, r.Tesseract, "-l", lang, p, "stdout")
 			if err != nil {
 				return fmt.Errorf("tesseract failed for page %s: %w", filepath.Base(p), err)
 			}
