@@ -12,7 +12,7 @@ func TestWriteNote(t *testing.T) {
 	vault := t.TempDir()
 	source := "/tmp/scans/invoice.pdf"
 	w := &NoteWriter{Vault: vault}
-	path, err := w.WriteNote(source, "deadbeef", "application/pdf", "tesseract", "hello", "", time.Unix(0, 0).UTC())
+	path, err := w.WriteNote(source, "deadbeef", "application/pdf", "tesseract", "hello", "", time.Unix(0, 0).UTC(), "invoice", []string{"financial"}, "Acme Corp", "Invoice")
 	if err != nil {
 		t.Fatalf("WriteNote: %v", err)
 	}
@@ -28,7 +28,7 @@ func TestWriteNote(t *testing.T) {
 	if !strings.HasPrefix(out, "---\n") {
 		t.Fatal("missing frontmatter start")
 	}
-	for _, needle := range []string{"source_path:", "sha256: deadbeef", "ocr_engine: tesseract", "hello"} {
+	for _, needle := range []string{"source_path:", "sha256: deadbeef", "ocr_engine: tesseract", "category: invoice", "tags:", "- financial", "correspondent: Acme Corp", "document_type: Invoice", "hello"} {
 		if !strings.Contains(out, needle) {
 			t.Fatalf("output missing %q", needle)
 		}
@@ -38,7 +38,7 @@ func TestWriteNote(t *testing.T) {
 func TestWriteNote_Atomic(t *testing.T) {
 	vault := t.TempDir()
 	w := &NoteWriter{Vault: vault}
-	path, err := w.WriteNote("/tmp/a.txt", "abc", "text/plain", "", "body", "", time.Now().UTC())
+	path, err := w.WriteNote("/tmp/a.txt", "abc", "text/plain", "", "body", "", time.Now().UTC(), "", nil, "", "")
 	if err != nil {
 		t.Fatalf("WriteNote: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestWriteNote_Golden(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			path, err := w.WriteNote(tc.sourcePath, tc.sha256, tc.mime, tc.ocrEngine, tc.text, "", fixedTime)
+			path, err := w.WriteNote(tc.sourcePath, tc.sha256, tc.mime, tc.ocrEngine, tc.text, "", fixedTime, "", nil, "", "")
 			if err != nil {
 				t.Fatalf("WriteNote failed: %v", err)
 			}

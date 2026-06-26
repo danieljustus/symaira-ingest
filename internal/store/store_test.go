@@ -47,7 +47,7 @@ func TestSetVaultAndArchivePath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetVaultAndArchivePath(ctx, d.ID, "/vault/a.pdf.md", "/archive/abc.pdf"); err != nil {
+	if err := s.SetVaultAndArchivePath(ctx, d.ID, "/vault/a.pdf.md", "/archive/abc.pdf", "invoices", []string{"tax", "2026"}, "Internal Revenue Service", "Tax Form"); err != nil {
 		t.Fatalf("SetVaultAndArchivePath: %v", err)
 	}
 	got, err := s.ByHash(ctx, "abc")
@@ -62,6 +62,18 @@ func TestSetVaultAndArchivePath(t *testing.T) {
 	}
 	if got.ArchivePath == nil || *got.ArchivePath != "/archive/abc.pdf" {
 		t.Fatalf("archive_path mismatch: got %v, want /archive/abc.pdf", got.ArchivePath)
+	}
+	if got.Category != "invoices" {
+		t.Fatalf("category = %q, want invoices", got.Category)
+	}
+	if len(got.Tags) != 2 || got.Tags[0] != "tax" || got.Tags[1] != "2026" {
+		t.Fatalf("tags = %v, want [tax, 2026]", got.Tags)
+	}
+	if got.Correspondent != "Internal Revenue Service" {
+		t.Fatalf("correspondent = %q, want Internal Revenue Service", got.Correspondent)
+	}
+	if got.DocumentType != "Tax Form" {
+		t.Fatalf("document_type = %q, want Tax Form", got.DocumentType)
 	}
 }
 
@@ -238,6 +250,72 @@ func TestStore_JobsQueue(t *testing.T) {
 	}
 	if len(allJobs) != 2 {
 		t.Fatalf("expected 2 jobs, got %d", len(allJobs))
+	}
+}
+
+func TestStore_Rules(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+
+	// 1. Initially empty
+	rules, err := s.ListRules(ctx)
+	if err != nil {
+		t.Fatalf("ListRules: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Fatalf("expected 0 rules, got %d", len(rules))
+	}
+
+	// 2. Add rule
+	r1, err := s.AddRule(ctx, "acme", "category", "invoices")
+	if err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+	if r1.Pattern != "acme" || r1.Kind != "category" || r1.Value != "invoices" {
+		t.Fatalf("unexpected rule values: %+v", r1)
+	}
+
+	// 3. Add second rule
+	r2, err := s.AddRule(ctx, "tax", "tag", "financial")
+	if err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	// 4. List rules
+	rules, err = s.ListRules(ctx)
+	if err != nil {
+		t.Fatalf("ListRules: %v", err)
+	}
+	if len(rules) != 2 {
+		t.Fatalf("expected 2 rules, got %d", len(rules))
+	}
+	if rules[0].ID != r1.ID || rules[1].ID != r2.ID {
+		t.Fatalf("rule order/ID mismatch")
+	}
+
+	// 5. Delete rule
+	if err := s.DeleteRule(ctx, r1.ID); err != nil {
+		t.Fatalf("DeleteRule: %v", err)
+	}
+
+	// 6. Verify deletion
+	rules, err = s.ListRules(ctx)
+	if err != nil {
+		t.Fatalf("ListRules: %v", err)
+	}
+	if len(rules) != 1 || rules[0].ID != r2.ID {
+		t.Fatalf("expected only r2 rule to remain, got: %+v", rules)
+	}
+
+	// 7. Delete non-existent rule should fail
+	if err := s.DeleteRule(ctx, 9999); err == nil {
+		t.Fatal("expected error deleting non-existent rule, got nil")
 	}
 }
 

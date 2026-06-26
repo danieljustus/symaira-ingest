@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/danieljustus/symaira-ingest/internal/extract"
@@ -110,7 +112,7 @@ func (p *Pipeline) Ingest(ctx context.Context, source string) (*Result, error) {
 	}
 
 	// Complete the job
-	if err := p.Store.SetVaultAndArchivePath(ctx, doc.ID, res.VaultPath, res.ArchivePath); err != nil {
+	if err := p.Store.SetVaultAndArchivePath(ctx, doc.ID, res.VaultPath, res.ArchivePath, res.Category, res.Tags, res.Correspondent, res.DocumentType); err != nil {
 		return nil, fmt.Errorf("set vault path: %w", err)
 	}
 	if err := p.Store.CompleteJob(ctx, claimed.ID); err != nil {
@@ -152,6 +154,51 @@ func (p *Pipeline) processJob(ctx context.Context, job *store.Job) (*Result, err
 		}
 	}
 
+	// Classify based on rules
+	var category string
+	var tags []string
+	var correspondent string
+	var documentType string
+
+	rules, rErr := p.Store.ListRules(ctx)
+	if rErr != nil {
+		// Classification failures do not block basic OCR/text ingestion
+		log.Printf("Failed to load classification rules: %v", rErr)
+	} else {
+		lowerText := strings.ToLower(extractRes.Text)
+		for _, rule := range rules {
+			patternLower := strings.ToLower(rule.Pattern)
+			if strings.Contains(lowerText, patternLower) {
+				switch rule.Kind {
+				case "category":
+					if category == "" {
+						category = rule.Value
+					}
+				case "tag":
+					// Avoid duplicates
+					found := false
+					for _, t := range tags {
+						if t == rule.Value {
+							found = true
+							break
+						}
+					}
+					if !found {
+						tags = append(tags, rule.Value)
+					}
+				case "correspondent":
+					if correspondent == "" {
+						correspondent = rule.Value
+					}
+				case "document_type":
+					if documentType == "" {
+						documentType = rule.Value
+					}
+				}
+			}
+		}
+	}
+
 	vaultPath, err := p.Writer.WriteNote(
 		doc.SourcePath,
 		doc.SHA256,
@@ -160,17 +207,25 @@ func (p *Pipeline) processJob(ctx context.Context, job *store.Job) (*Result, err
 		extractRes.Text,
 		archivePath,
 		time.Now().UTC(),
+		category,
+		tags,
+		correspondent,
+		documentType,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("write note: %w", err)
 	}
 
 	return &Result{
-		SourcePath:  doc.SourcePath,
-		Kind:        kind,
-		Extract:     extractRes,
-		VaultPath:   vaultPath,
-		ArchivePath: archivePath,
+		SourcePath:    doc.SourcePath,
+		Kind:          kind,
+		Extract:       extractRes,
+		VaultPath:     vaultPath,
+		ArchivePath:   archivePath,
+		Category:      category,
+		Tags:          tags,
+		Correspondent: correspondent,
+		DocumentType:  documentType,
 	}, nil
 }
 

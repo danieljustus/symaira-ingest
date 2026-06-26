@@ -13,14 +13,16 @@ import (
 )
 
 type Note struct {
-	SourcePath  string    `yaml:"source_path"`
-	IngestedAt  time.Time `yaml:"ingested_at"`
-	SHA256      string    `yaml:"sha256"`
-	MIME        string    `yaml:"mime"`
-	Tags        []string  `yaml:"tags"`
-	Category    string    `yaml:"category"`
-	OCREngine   string    `yaml:"ocr_engine,omitempty"`
-	ArchivePath string    `yaml:"archive_path"`
+	SourcePath    string    `yaml:"source_path"`
+	IngestedAt    time.Time `yaml:"ingested_at"`
+	SHA256        string    `yaml:"sha256"`
+	MIME          string    `yaml:"mime"`
+	Tags          []string  `yaml:"tags"`
+	Category      string    `yaml:"category"`
+	Correspondent string    `yaml:"correspondent,omitempty"`
+	DocumentType  string    `yaml:"document_type,omitempty"`
+	OCREngine     string    `yaml:"ocr_engine,omitempty"`
+	ArchivePath   string    `yaml:"archive_path"`
 }
 
 // NoteWriter writes deduplicated Markdown sidecars into a vault.
@@ -36,20 +38,25 @@ func SidecarPath(vault, source string) string {
 // WriteNote writes a Markdown note with YAML frontmatter atomically.
 // It returns the vault path and any error. A write failure must not leave
 // a partially written file behind.
-func (w *NoteWriter) WriteNote(sourcePath, sha256, mime, ocrEngine, text, archivePath string, ingestedAt time.Time) (string, error) {
+func (w *NoteWriter) WriteNote(sourcePath, sha256, mime, ocrEngine, text, archivePath string, ingestedAt time.Time, category string, tags []string, correspondent, documentType string) (string, error) {
 	if err := os.MkdirAll(w.Vault, 0o755); err != nil {
 		return "", fmt.Errorf("create vault directory: %w", err)
 	}
 
 	meta := Note{
-		SourcePath:  sourcePath,
-		IngestedAt:  ingestedAt,
-		SHA256:      sha256,
-		MIME:        mime,
-		Tags:        []string{},
-		Category:    "",
-		OCREngine:   ocrEngine,
-		ArchivePath: archivePath,
+		SourcePath:    sourcePath,
+		IngestedAt:    ingestedAt,
+		SHA256:        sha256,
+		MIME:          mime,
+		Tags:          tags,
+		Category:      category,
+		Correspondent: correspondent,
+		DocumentType:  documentType,
+		OCREngine:     ocrEngine,
+		ArchivePath:   archivePath,
+	}
+	if meta.Tags == nil {
+		meta.Tags = []string{}
 	}
 
 	yamlBytes, err := yaml.Marshal(meta)

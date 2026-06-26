@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -20,13 +21,26 @@ var migrationsFS embed.FS
 
 // Document represents a row in the documents table.
 type Document struct {
-	ID          int64
-	SourcePath  string
-	SHA256      string
-	MIME        string
-	Status      string
-	VaultPath   *string
-	ArchivePath *string
+	ID            int64
+	SourcePath    string
+	SHA256        string
+	MIME          string
+	Status        string
+	VaultPath     *string
+	ArchivePath   *string
+	Category      string
+	Tags          []string
+	Correspondent string
+	DocumentType  string
+}
+
+// ClassificationRule represents a row in the classification_rules table.
+type ClassificationRule struct {
+	ID        int64  `json:"id"`
+	Pattern   string `json:"pattern"`
+	Kind      string `json:"kind"` // 'category', 'tag', 'correspondent', 'document_type'
+	Value     string `json:"value"`
+	CreatedAt string `json:"created_at"`
 }
 
 // Store provides document persistence.
@@ -86,9 +100,13 @@ func (s *Store) ByHash(ctx context.Context, sha256 string) (*Document, error) {
 	var d Document
 	var vaultPath sql.NullString
 	var archivePath sql.NullString
+	var category sql.NullString
+	var tags sql.NullString
+	var correspondent sql.NullString
+	var documentType sql.NullString
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, source_path, sha256, mime, status, vault_path, archive_path FROM documents WHERE sha256 = ?`,
-		sha256).Scan(&d.ID, &d.SourcePath, &d.SHA256, &d.MIME, &d.Status, &vaultPath, &archivePath)
+		`SELECT id, source_path, sha256, mime, status, vault_path, archive_path, category, tags, correspondent, document_type FROM documents WHERE sha256 = ?`,
+		sha256).Scan(&d.ID, &d.SourcePath, &d.SHA256, &d.MIME, &d.Status, &vaultPath, &archivePath, &category, &tags, &correspondent, &documentType)
 	if err != nil {
 		return nil, err
 	}
@@ -98,14 +116,52 @@ func (s *Store) ByHash(ctx context.Context, sha256 string) (*Document, error) {
 	if archivePath.Valid {
 		d.ArchivePath = &archivePath.String
 	}
+	if category.Valid {
+		d.Category = category.String
+	}
+	if tags.Valid && tags.String != "" {
+		_ = json.Unmarshal([]byte(tags.String), &d.Tags)
+	}
+	if correspondent.Valid {
+		d.Correspondent = correspondent.String
+	}
+	if documentType.Valid {
+		d.DocumentType = documentType.String
+	}
 	return &d, nil
 }
 
-// SetVaultAndArchivePath marks a document as done and records its vault and archive paths.
-func (s *Store) SetVaultAndArchivePath(ctx context.Context, id int64, vaultPath, archivePath string) error {
+// SetVaultAndArchivePath marks a document as done and records its vault, archive paths, and metadata.
+func (s *Store) SetVaultAndArchivePath(ctx context.Context, id int64, vaultPath, archivePath string, category string, tags []string, correspondent, documentType string) error {
+	var tagsJSON []byte
+	if len(tags) > 0 {
+		var err error
+		tagsJSON, err = json.Marshal(tags)
+		if err != nil {
+			return fmt.Errorf("marshal tags: %w", err)
+		}
+	}
+	var tagsVal sql.NullString
+	if len(tagsJSON) > 0 {
+		tagsVal = sql.NullString{String: string(tagsJSON), Valid: true}
+	}
+
+	var catVal sql.NullString
+	if category != "" {
+		catVal = sql.NullString{String: category, Valid: true}
+	}
+	var corrVal sql.NullString
+	if correspondent != "" {
+		corrVal = sql.NullString{String: correspondent, Valid: true}
+	}
+	var dtVal sql.NullString
+	if documentType != "" {
+		dtVal = sql.NullString{String: documentType, Valid: true}
+	}
+
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE documents SET vault_path = ?, archive_path = ?, status = 'done', updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		vaultPath, archivePath, id)
+		`UPDATE documents SET vault_path = ?, archive_path = ?, category = ?, tags = ?, correspondent = ?, document_type = ?, status = 'done', updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		vaultPath, archivePath, catVal, tagsVal, corrVal, dtVal, id)
 	if err != nil {
 		return fmt.Errorf("update document: %w", err)
 	}
@@ -117,9 +173,13 @@ func (s *Store) ByID(ctx context.Context, id int64) (*Document, error) {
 	var d Document
 	var vaultPath sql.NullString
 	var archivePath sql.NullString
+	var category sql.NullString
+	var tags sql.NullString
+	var correspondent sql.NullString
+	var documentType sql.NullString
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, source_path, sha256, mime, status, vault_path, archive_path FROM documents WHERE id = ?`,
-		id).Scan(&d.ID, &d.SourcePath, &d.SHA256, &d.MIME, &d.Status, &vaultPath, &archivePath)
+		`SELECT id, source_path, sha256, mime, status, vault_path, archive_path, category, tags, correspondent, document_type FROM documents WHERE id = ?`,
+		id).Scan(&d.ID, &d.SourcePath, &d.SHA256, &d.MIME, &d.Status, &vaultPath, &archivePath, &category, &tags, &correspondent, &documentType)
 	if err != nil {
 		return nil, err
 	}
@@ -128,6 +188,18 @@ func (s *Store) ByID(ctx context.Context, id int64) (*Document, error) {
 	}
 	if archivePath.Valid {
 		d.ArchivePath = &archivePath.String
+	}
+	if category.Valid {
+		d.Category = category.String
+	}
+	if tags.Valid && tags.String != "" {
+		_ = json.Unmarshal([]byte(tags.String), &d.Tags)
+	}
+	if correspondent.Valid {
+		d.Correspondent = correspondent.String
+	}
+	if documentType.Valid {
+		d.DocumentType = documentType.String
 	}
 	return &d, nil
 }
@@ -350,6 +422,83 @@ func (s *Store) ResetRunningJobs(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET status = 'pending' WHERE status = 'running'`)
 	if err != nil {
 		return fmt.Errorf("reset running jobs: %w", err)
+	}
+	return nil
+}
+
+// AddRule adds a new classification rule to the store.
+func (s *Store) AddRule(ctx context.Context, pattern, kind, value string) (*ClassificationRule, error) {
+	if pattern == "" {
+		return nil, errors.New("pattern cannot be empty")
+	}
+	switch kind {
+	case "category", "tag", "correspondent", "document_type":
+	default:
+		return nil, fmt.Errorf("invalid rule kind: %q", kind)
+	}
+	if value == "" {
+		return nil, errors.New("value cannot be empty")
+	}
+
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO classification_rules (pattern, kind, value) VALUES (?, ?, ?)`,
+		pattern, kind, value)
+	if err != nil {
+		return nil, fmt.Errorf("insert rule: %w", err)
+	}
+	id, _ := res.LastInsertId()
+
+	var createdAt string
+	err = s.db.QueryRowContext(ctx, `SELECT created_at FROM classification_rules WHERE id = ?`, id).Scan(&createdAt)
+	if err != nil {
+		return nil, fmt.Errorf("get rule created_at: %w", err)
+	}
+
+	return &ClassificationRule{
+		ID:        id,
+		Pattern:   pattern,
+		Kind:      kind,
+		Value:     value,
+		CreatedAt: createdAt,
+	}, nil
+}
+
+// ListRules lists all classification rules ordered by ID.
+func (s *Store) ListRules(ctx context.Context) ([]*ClassificationRule, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, pattern, kind, value, created_at
+		FROM classification_rules
+		ORDER BY id ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query rules: %w", err)
+	}
+	defer rows.Close()
+
+	var rules []*ClassificationRule
+	for rows.Next() {
+		var r ClassificationRule
+		err := rows.Scan(&r.ID, &r.Pattern, &r.Kind, &r.Value, &r.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("scan rule: %w", err)
+		}
+		rules = append(rules, &r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return rules, nil
+}
+
+// DeleteRule deletes a classification rule by ID.
+func (s *Store) DeleteRule(ctx context.Context, id int64) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM classification_rules WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete rule: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return fmt.Errorf("rule not found with ID %d", id)
 	}
 	return nil
 }
