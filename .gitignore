@@ -21,4 +21,5 @@ vendor/
 *.swp
 
 # Local working docs — NOT published (design notes, research, diagrams)
-docs/
+docs/*
+!docs/FRONTMATTER.md

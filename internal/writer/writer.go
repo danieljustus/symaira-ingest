@@ -13,11 +13,14 @@ import (
 )
 
 type Note struct {
-	SourcePath string    `yaml:"source_path"`
-	IngestedAt time.Time `yaml:"ingested_at"`
-	SHA256     string    `yaml:"sha256"`
-	MIME       string    `yaml:"mime"`
-	OCREngine  string    `yaml:"ocr_engine,omitempty"`
+	SourcePath  string    `yaml:"source_path"`
+	IngestedAt  time.Time `yaml:"ingested_at"`
+	SHA256      string    `yaml:"sha256"`
+	MIME        string    `yaml:"mime"`
+	Tags        []string  `yaml:"tags"`
+	Category    string    `yaml:"category"`
+	OCREngine   string    `yaml:"ocr_engine,omitempty"`
+	ArchivePath string    `yaml:"archive_path"`
 }
 
 // NoteWriter writes deduplicated Markdown sidecars into a vault.
@@ -39,11 +42,14 @@ func (w *NoteWriter) WriteNote(sourcePath, sha256, mime, ocrEngine, text string,
 	}
 
 	meta := Note{
-		SourcePath: sourcePath,
-		IngestedAt: ingestedAt,
-		SHA256:     sha256,
-		MIME:       mime,
-		OCREngine:  ocrEngine,
+		SourcePath:  sourcePath,
+		IngestedAt:  ingestedAt,
+		SHA256:      sha256,
+		MIME:        mime,
+		Tags:        []string{},
+		Category:    "",
+		OCREngine:   ocrEngine,
+		ArchivePath: "",
 	}
 
 	yamlBytes, err := yaml.Marshal(meta)
