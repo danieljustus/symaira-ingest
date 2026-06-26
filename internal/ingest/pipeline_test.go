@@ -196,3 +196,142 @@ func TestPipeline_ClassifiesWithRules(t *testing.T) {
 		t.Errorf("db tags = %v, want [financial, year2026]", doc.Tags)
 	}
 }
+
+func TestAtomicCopy_SourceNotExist(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "nonexistent.txt")
+	dst := filepath.Join(dir, "dst.txt")
+
+	err := atomicCopy(src, dst)
+	if err == nil {
+		t.Fatal("expected error for nonexistent source, got nil")
+	}
+}
+
+func TestAtomicCopy_SourcePermDenied(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("skipping permission test when running as root")
+	}
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "readonly.txt")
+	if err := os.WriteFile(src, []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(src, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(src, 0o644)
+
+	dst := filepath.Join(dir, "dst.txt")
+	err := atomicCopy(src, dst)
+	if err == nil {
+		t.Fatal("expected error for permission denied source, got nil")
+	}
+}
+
+func TestAtomicCopy_DirCreateFail(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("skipping permission test when running as root")
+	}
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "file.txt")
+	if err := os.WriteFile(src, []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(blocker, "subdir", "file.txt")
+
+	err := atomicCopy(src, dst)
+	if err == nil {
+		t.Fatal("expected error when destination dir creation fails, got nil")
+	}
+}
+
+func TestAtomicCopy_RenameFail(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "file.txt")
+	if err := os.WriteFile(src, []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dstDir := filepath.Join(dir, "dst")
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dstDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dstDir, 0o755)
+
+	dst := filepath.Join(dstDir, "file.txt")
+	err := atomicCopy(src, dst)
+	if err == nil {
+		t.Fatal("expected error when rename fails, got nil")
+	}
+}
+
+func TestAtomicCopy_AlreadyExists(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "file.txt")
+	if err := os.WriteFile(src, []byte("new content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dst := filepath.Join(dir, "existing.txt")
+	if err := os.WriteFile(dst, []byte("old content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := atomicCopy(src, dst)
+	if err != nil {
+		t.Fatalf("expected nil when destination exists, got: %v", err)
+	}
+
+	data, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "old content" {
+		t.Errorf("content = %q, want %q", string(data), "old content")
+	}
+}
+
+func TestPipeline_EnqueueSkippedJobFailure(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "docs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	vault := filepath.Join(dir, "vault")
+	archive := filepath.Join(dir, "archive")
+	p := &Pipeline{
+		Engine:     nil,
+		Store:      s,
+		Writer:     &writer.NoteWriter{Vault: vault},
+		ArchiveDir: archive,
+	}
+
+	path := filepath.Join(dir, "note.txt")
+	if err := os.WriteFile(path, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = p.Ingest(context.Background(), path)
+	if err != nil {
+		t.Fatalf("first ingest: %v", err)
+	}
+
+	s.Close()
+
+	_, err = p.Ingest(context.Background(), path)
+	if err == nil {
+		t.Fatal("expected error on second ingest with closed DB, got nil")
+	}
+}
