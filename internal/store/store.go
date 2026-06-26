@@ -20,12 +20,13 @@ var migrationsFS embed.FS
 
 // Document represents a row in the documents table.
 type Document struct {
-	ID         int64
-	SourcePath string
-	SHA256     string
-	MIME       string
-	Status     string
-	VaultPath  *string
+	ID          int64
+	SourcePath  string
+	SHA256      string
+	MIME        string
+	Status      string
+	VaultPath   *string
+	ArchivePath *string
 }
 
 // Store provides document persistence.
@@ -84,23 +85,27 @@ func (s *Store) CreateOrGet(ctx context.Context, sourcePath, sha256, mime string
 func (s *Store) ByHash(ctx context.Context, sha256 string) (*Document, error) {
 	var d Document
 	var vaultPath sql.NullString
+	var archivePath sql.NullString
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, source_path, sha256, mime, status, vault_path FROM documents WHERE sha256 = ?`,
-		sha256).Scan(&d.ID, &d.SourcePath, &d.SHA256, &d.MIME, &d.Status, &vaultPath)
+		`SELECT id, source_path, sha256, mime, status, vault_path, archive_path FROM documents WHERE sha256 = ?`,
+		sha256).Scan(&d.ID, &d.SourcePath, &d.SHA256, &d.MIME, &d.Status, &vaultPath, &archivePath)
 	if err != nil {
 		return nil, err
 	}
 	if vaultPath.Valid {
 		d.VaultPath = &vaultPath.String
 	}
+	if archivePath.Valid {
+		d.ArchivePath = &archivePath.String
+	}
 	return &d, nil
 }
 
-// SetVaultPath marks a document as done and records its vault path.
-func (s *Store) SetVaultPath(ctx context.Context, id int64, vaultPath string) error {
+// SetVaultAndArchivePath marks a document as done and records its vault and archive paths.
+func (s *Store) SetVaultAndArchivePath(ctx context.Context, id int64, vaultPath, archivePath string) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE documents SET vault_path = ?, status = 'done', updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		vaultPath, id)
+		`UPDATE documents SET vault_path = ?, archive_path = ?, status = 'done', updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		vaultPath, archivePath, id)
 	if err != nil {
 		return fmt.Errorf("update document: %w", err)
 	}
@@ -111,14 +116,18 @@ func (s *Store) SetVaultPath(ctx context.Context, id int64, vaultPath string) er
 func (s *Store) ByID(ctx context.Context, id int64) (*Document, error) {
 	var d Document
 	var vaultPath sql.NullString
+	var archivePath sql.NullString
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, source_path, sha256, mime, status, vault_path FROM documents WHERE id = ?`,
-		id).Scan(&d.ID, &d.SourcePath, &d.SHA256, &d.MIME, &d.Status, &vaultPath)
+		`SELECT id, source_path, sha256, mime, status, vault_path, archive_path FROM documents WHERE id = ?`,
+		id).Scan(&d.ID, &d.SourcePath, &d.SHA256, &d.MIME, &d.Status, &vaultPath, &archivePath)
 	if err != nil {
 		return nil, err
 	}
 	if vaultPath.Valid {
 		d.VaultPath = &vaultPath.String
+	}
+	if archivePath.Valid {
+		d.ArchivePath = &archivePath.String
 	}
 	return &d, nil
 }

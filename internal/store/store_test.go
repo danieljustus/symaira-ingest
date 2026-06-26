@@ -34,7 +34,7 @@ func TestCreateOrGet_Deduplicates(t *testing.T) {
 	}
 }
 
-func TestSetVaultPath(t *testing.T) {
+func TestSetVaultAndArchivePath(t *testing.T) {
 	dir := t.TempDir()
 	s, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -47,8 +47,8 @@ func TestSetVaultPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetVaultPath(ctx, d.ID, "/vault/a.pdf.md"); err != nil {
-		t.Fatalf("SetVaultPath: %v", err)
+	if err := s.SetVaultAndArchivePath(ctx, d.ID, "/vault/a.pdf.md", "/archive/abc.pdf"); err != nil {
+		t.Fatalf("SetVaultAndArchivePath: %v", err)
 	}
 	got, err := s.ByHash(ctx, "abc")
 	if err != nil {
@@ -59,6 +59,9 @@ func TestSetVaultPath(t *testing.T) {
 	}
 	if got.VaultPath == nil || *got.VaultPath != "/vault/a.pdf.md" {
 		t.Fatalf("vault_path mismatch")
+	}
+	if got.ArchivePath == nil || *got.ArchivePath != "/archive/abc.pdf" {
+		t.Fatalf("archive_path mismatch: got %v, want /archive/abc.pdf", got.ArchivePath)
 	}
 }
 

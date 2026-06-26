@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/danieljustus/symaira-ingest/internal/extract"
@@ -16,13 +18,29 @@ import (
 
 // Pipeline orchestrates extraction, persistence, and Markdown output.
 type Pipeline struct {
-	Engine extract.Engine
-	Store  *store.Store
-	Writer *writer.NoteWriter
+	Engine     extract.Engine
+	Store      *store.Store
+	Writer     *writer.NoteWriter
+	ArchiveDir string
 }
 
 // ErrDuplicate is returned when a source has already been ingested.
-var ErrDuplicate = fmt.Errorf("source already ingested")
+var ErrDuplicate = errors.New("source already ingested")
+
+// DuplicateError holds details of a duplicate document that was already ingested.
+type DuplicateError struct {
+	SourcePath  string
+	VaultPath   string
+	ArchivePath string
+}
+
+func (e *DuplicateError) Error() string {
+	return fmt.Sprintf("source already ingested: %s (vault: %s, archive: %s)", e.SourcePath, e.VaultPath, e.ArchivePath)
+}
+
+func (e *DuplicateError) Is(target error) bool {
+	return target == ErrDuplicate
+}
 
 // Ingest processes a single source file through the full one-shot pipeline.
 func (p *Pipeline) Ingest(ctx context.Context, source string) (*Result, error) {
@@ -52,7 +70,18 @@ func (p *Pipeline) Ingest(ctx context.Context, source string) (*Result, error) {
 		if _, err := p.Store.EnqueueSkippedJob(ctx, doc.ID, string(kind), "duplicate"); err != nil {
 			return nil, fmt.Errorf("enqueue skipped job: %w", err)
 		}
-		return nil, ErrDuplicate
+		var vPath, aPath string
+		if doc.VaultPath != nil {
+			vPath = *doc.VaultPath
+		}
+		if doc.ArchivePath != nil {
+			aPath = *doc.ArchivePath
+		}
+		return nil, &DuplicateError{
+			SourcePath:  source,
+			VaultPath:   vPath,
+			ArchivePath: aPath,
+		}
 	}
 
 	// Enqueue the job
@@ -81,7 +110,7 @@ func (p *Pipeline) Ingest(ctx context.Context, source string) (*Result, error) {
 	}
 
 	// Complete the job
-	if err := p.Store.SetVaultPath(ctx, doc.ID, res.VaultPath); err != nil {
+	if err := p.Store.SetVaultAndArchivePath(ctx, doc.ID, res.VaultPath, res.ArchivePath); err != nil {
 		return nil, fmt.Errorf("set vault path: %w", err)
 	}
 	if err := p.Store.CompleteJob(ctx, claimed.ID); err != nil {
@@ -114,12 +143,22 @@ func (p *Pipeline) processJob(ctx context.Context, job *store.Job) (*Result, err
 		return nil, err
 	}
 
+	var archivePath string
+	if p.ArchiveDir != "" {
+		ext := filepath.Ext(doc.SourcePath)
+		archivePath = filepath.Join(p.ArchiveDir, doc.SHA256+ext)
+		if err := atomicCopy(doc.SourcePath, archivePath); err != nil {
+			return nil, fmt.Errorf("archive file: %w", err)
+		}
+	}
+
 	vaultPath, err := p.Writer.WriteNote(
 		doc.SourcePath,
 		doc.SHA256,
 		extractRes.MIME,
 		extractRes.Engine,
 		extractRes.Text,
+		archivePath,
 		time.Now().UTC(),
 	)
 	if err != nil {
@@ -127,10 +166,11 @@ func (p *Pipeline) processJob(ctx context.Context, job *store.Job) (*Result, err
 	}
 
 	return &Result{
-		SourcePath: doc.SourcePath,
-		Kind:       kind,
-		Extract:    extractRes,
-		VaultPath:  vaultPath,
+		SourcePath:  doc.SourcePath,
+		Kind:        kind,
+		Extract:     extractRes,
+		VaultPath:   vaultPath,
+		ArchivePath: archivePath,
 	}, nil
 }
 
@@ -146,4 +186,53 @@ func hashFile(path string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func atomicCopy(src, dst string) error {
+	// If it already exists, do nothing (no conflicting copies)
+	if _, err := os.Stat(dst); err == nil {
+		return nil
+	}
+
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+
+	dstDir := filepath.Dir(dst)
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		return err
+	}
+
+	tmpFile, err := os.CreateTemp(dstDir, "symingest-archive-tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmpFile.Name()
+	defer func() {
+		if tmpFile != nil {
+			tmpFile.Close()
+		}
+		os.Remove(tmpName)
+	}()
+
+	if _, err := io.Copy(tmpFile, srcFile); err != nil {
+		return err
+	}
+
+	if err := tmpFile.Sync(); err != nil {
+		return err
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+	tmpFile = nil
+
+	if err := os.Rename(tmpName, dst); err != nil {
+		return err
+	}
+
+	return nil
 }

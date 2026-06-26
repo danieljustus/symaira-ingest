@@ -86,6 +86,7 @@ func runIngest(args []string) error {
 	fs := flag.NewFlagSet("ingest", flag.ContinueOnError)
 	ocrLang := fs.String("ocr-lang", "", "Tesseract language override")
 	vaultFlag := fs.String("vault", "", "Target vault directory")
+	archiveFlag := fs.String("archive", "", "Target archive directory")
 	dbFlag := fs.String("db", "", "SQLite database path")
 	if err := fs.Parse(args); err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
@@ -94,6 +95,12 @@ func runIngest(args []string) error {
 	remaining := fs.Args()
 	if len(remaining) == 0 || remaining[0] == "--help" || remaining[0] == "-h" {
 		fmt.Fprintln(stdout, `Usage: symingest ingest [flags] <file>
+
+Flags:
+  --ocr-lang string   Tesseract language override (default "eng")
+  --vault string      Target vault directory
+  --archive string    Target archive directory
+  --db string         SQLite database path
 
 Ingest a single file into the configured vault.`)
 		return nil
@@ -117,6 +124,16 @@ Ingest a single file into the configured vault.`)
 	if *vaultFlag == "" {
 		return exitcodes.Wrapf(nil, exitcodes.ExitConfig, exitcodes.KindConfig,
 			"no vault configured; use --vault, SYMINGEST_VAULT env, or set vault in ~/.config/symingest/config.toml")
+	}
+	if *archiveFlag == "" {
+		*archiveFlag = cfg.ArchivePath
+	}
+	if *archiveFlag == "" {
+		path, err := defaultArchivePath()
+		if err != nil {
+			return err
+		}
+		*archiveFlag = path
 	}
 	if *dbFlag == "" {
 		*dbFlag = cfg.DBPath
@@ -144,16 +161,28 @@ Ingest a single file into the configured vault.`)
 
 	engine := ocr.DefaultRunner(*ocrLang)
 	pipeline := &ingest.Pipeline{
-		Engine: engine,
-		Store:  st,
-		Writer: &writer.NoteWriter{Vault: *vaultFlag},
+		Engine:     engine,
+		Store:      st,
+		Writer:     &writer.NoteWriter{Vault: *vaultFlag},
+		ArchiveDir: *archiveFlag,
 	}
 
 	ctx := context.Background()
 	res, err := pipeline.Ingest(ctx, source)
 	if err != nil {
 		if errors.Is(err, ingest.ErrDuplicate) {
+			var vPath, aPath string
+			if dupErr, ok := err.(*ingest.DuplicateError); ok {
+				vPath = dupErr.VaultPath
+				aPath = dupErr.ArchivePath
+			}
 			fmt.Fprintf(stdout, "already ingested: %s\n", source)
+			if vPath != "" {
+				fmt.Fprintf(stdout, "existing vault path: %s\n", vPath)
+			}
+			if aPath != "" {
+				fmt.Fprintf(stdout, "existing archive path: %s\n", aPath)
+			}
 			return nil
 		}
 		return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
@@ -174,10 +203,20 @@ func defaultDBPath() (string, error) {
 	return filepath.Join(home, ".local", "share", "symingest", "symingest.db"), nil
 }
 
+func defaultArchivePath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", exitcodes.Wrapf(err, exitcodes.ExitConfig, exitcodes.KindConfig,
+			"cannot determine home directory; use --archive to specify an archive path explicitly")
+	}
+	return filepath.Join(home, ".local", "share", "symingest", "archive"), nil
+}
+
 func runMCP(args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	ocrLang := fs.String("ocr-lang", "", "Tesseract language override")
 	vaultFlag := fs.String("vault", "", "Target vault directory")
+	archiveFlag := fs.String("archive", "", "Target archive directory")
 	dbFlag := fs.String("db", "", "SQLite database path")
 	if err := fs.Parse(args); err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
@@ -199,6 +238,16 @@ func runMCP(args []string) error {
 	if *vaultFlag == "" {
 		*vaultFlag = cfg.Vault
 	}
+	if *archiveFlag == "" {
+		*archiveFlag = cfg.ArchivePath
+	}
+	if *archiveFlag == "" {
+		path, err := defaultArchivePath()
+		if err != nil {
+			return err
+		}
+		*archiveFlag = path
+	}
 	if *dbFlag == "" {
 		*dbFlag = cfg.DBPath
 	}
@@ -219,7 +268,7 @@ func runMCP(args []string) error {
 
 	engine := ocr.DefaultRunner(*ocrLang)
 	server := mcpserver.New("symingest", version.Version)
-	mcp.Register(server, st, engine, *vaultFlag)
+	mcp.Register(server, st, engine, *vaultFlag, *archiveFlag)
 
 	ctx := context.Background()
 	if err := server.ServeStdio(ctx); err != nil {
@@ -233,6 +282,7 @@ func runWatch(args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 	ocrLang := fs.String("ocr-lang", "", "Tesseract language override")
 	vaultFlag := fs.String("vault", "", "Target vault directory")
+	archiveFlag := fs.String("archive", "", "Target archive directory")
 	dbFlag := fs.String("db", "", "SQLite database path")
 	if err := fs.Parse(args); err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
@@ -241,6 +291,12 @@ func runWatch(args []string) error {
 	remaining := fs.Args()
 	if len(remaining) == 0 || remaining[0] == "--help" || remaining[0] == "-h" {
 		fmt.Fprintln(stdout, `Usage: symingest watch [flags] <dir>
+
+Flags:
+  --ocr-lang string   Tesseract language override (default "eng")
+  --vault string      Target vault directory
+  --archive string    Target archive directory
+  --db string         SQLite database path
 
 Watch a directory for new or modified files and ingest them in the background.`)
 		return nil
@@ -264,6 +320,16 @@ Watch a directory for new or modified files and ingest them in the background.`)
 	if *vaultFlag == "" {
 		return exitcodes.Wrapf(nil, exitcodes.ExitConfig, exitcodes.KindConfig,
 			"no vault configured; use --vault, SYMINGEST_VAULT env, or set vault in ~/.config/symingest/config.toml")
+	}
+	if *archiveFlag == "" {
+		*archiveFlag = cfg.ArchivePath
+	}
+	if *archiveFlag == "" {
+		path, err := defaultArchivePath()
+		if err != nil {
+			return err
+		}
+		*archiveFlag = path
 	}
 	if *dbFlag == "" {
 		*dbFlag = cfg.DBPath
@@ -307,9 +373,10 @@ Watch a directory for new or modified files and ingest them in the background.`)
 
 	engine := ocr.DefaultRunner(*ocrLang)
 	pipeline := &ingest.Pipeline{
-		Engine: engine,
-		Store:  st,
-		Writer: &writer.NoteWriter{Vault: *vaultFlag},
+		Engine:     engine,
+		Store:      st,
+		Writer:     &writer.NoteWriter{Vault: *vaultFlag},
+		ArchiveDir: *archiveFlag,
 	}
 
 	if err := watcher.Start(ctx); err != nil {
@@ -321,6 +388,7 @@ Watch a directory for new or modified files and ingest them in the background.`)
 
 	log.Printf("Watching directory: %s", inboxDir)
 	log.Printf("Vault directory:    %s", *vaultFlag)
+	log.Printf("Archive directory:  %s", *archiveFlag)
 	log.Printf("Database:           %s", *dbFlag)
 	log.Println("Press Ctrl+C to stop.")
 

@@ -9,17 +9,19 @@ import (
 // Values are loaded from ~/.config/symingest/config.toml, ./.symingest.toml,
 // and environment variables prefixed with SYMINGEST_.
 type Config struct {
-	Vault   string `json:"vault"`
-	OCRLang string `json:"ocr_lang"`
-	DBPath  string `json:"db_path"`
+	Vault       string `json:"vault"`
+	OCRLang     string `json:"ocr_lang"`
+	DBPath      string `json:"db_path"`
+	ArchivePath string `json:"archive_path"`
 }
 
 // Defaults returns the default configuration.
 func Defaults() *Config {
 	return &Config{
-		Vault:   "",
-		OCRLang: "eng",
-		DBPath:  "",
+		Vault:       "",
+		OCRLang:     "eng",
+		DBPath:      "",
+		ArchivePath: "",
 	}
 }
 
