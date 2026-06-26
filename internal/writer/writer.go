@@ -36,7 +36,7 @@ func SidecarPath(vault, source string) string {
 // WriteNote writes a Markdown note with YAML frontmatter atomically.
 // It returns the vault path and any error. A write failure must not leave
 // a partially written file behind.
-func (w *NoteWriter) WriteNote(sourcePath, sha256, mime, ocrEngine, text string, ingestedAt time.Time) (string, error) {
+func (w *NoteWriter) WriteNote(sourcePath, sha256, mime, ocrEngine, text, archivePath string, ingestedAt time.Time) (string, error) {
 	if err := os.MkdirAll(w.Vault, 0o755); err != nil {
 		return "", fmt.Errorf("create vault directory: %w", err)
 	}
@@ -49,7 +49,7 @@ func (w *NoteWriter) WriteNote(sourcePath, sha256, mime, ocrEngine, text string,
 		Tags:        []string{},
 		Category:    "",
 		OCREngine:   ocrEngine,
-		ArchivePath: "",
+		ArchivePath: archivePath,
 	}
 
 	yamlBytes, err := yaml.Marshal(meta)
@@ -64,6 +64,10 @@ func (w *NoteWriter) WriteNote(sourcePath, sha256, mime, ocrEngine, text string,
 	sb.WriteString(text)
 	if !strings.HasSuffix(text, "\n") {
 		sb.WriteByte('\n')
+	}
+	if archivePath != "" {
+		sb.WriteString("\n---\n")
+		sb.WriteString(fmt.Sprintf("[Archived Original](file://%s)\n", filepath.ToSlash(archivePath)))
 	}
 
 	vaultPath := SidecarPath(w.Vault, sourcePath)

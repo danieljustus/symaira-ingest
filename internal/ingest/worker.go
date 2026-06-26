@@ -57,10 +57,10 @@ func StartWorker(ctx context.Context, p *Pipeline) {
 				continue
 			}
 
-			// Save vault path and complete the job
-			if err := p.Store.SetVaultPath(ctx, job.DocumentID, res.VaultPath); err != nil {
-				fmt.Fprintf(os.Stderr, "[Worker] Failed to set vault path for job %d: %v\n", job.ID, err)
-				if failErr := p.Store.FailJob(ctx, job.ID, fmt.Sprintf("set vault path: %v", err)); failErr != nil {
+			// Save vault and archive paths and complete the job
+			if err := p.Store.SetVaultAndArchivePath(ctx, job.DocumentID, res.VaultPath, res.ArchivePath); err != nil {
+				fmt.Fprintf(os.Stderr, "[Worker] Failed to set vault/archive paths for job %d: %v\n", job.ID, err)
+				if failErr := p.Store.FailJob(ctx, job.ID, fmt.Sprintf("set vault/archive paths: %v", err)); failErr != nil {
 					fmt.Fprintf(os.Stderr, "[Worker] Failed to record failure for job %d: %v\n", job.ID, failErr)
 				}
 				time.Sleep(10 * time.Millisecond)

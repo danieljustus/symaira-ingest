@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/danieljustus/symaira-corekit/mcpserver"
@@ -17,7 +18,7 @@ import (
 )
 
 // Register adds the ingest_file tool to the MCP server.
-func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, defaultVault string) {
+func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, defaultVault, defaultArchive string) {
 	server.RegisterTool(&mcpserver.Tool{
 		Name:        "ingest_file",
 		Description: "Ingest a single file into the vault, returning metadata about the generated Markdown note including the vault_path where it was written.",
@@ -25,14 +26,16 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 			"type": "object",
 			"properties": {
 				"path": {"type": "string", "description": "Absolute or relative path to the source file"},
-				"vault_path": {"type": "string", "description": "Optional vault directory override"}
+				"vault_path": {"type": "string", "description": "Optional vault directory override"},
+				"archive_path": {"type": "string", "description": "Optional archive directory override"}
 			},
 			"required": ["path"]
 		}`),
 		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
 			var args struct {
-				Path      string `json:"path"`
-				VaultPath string `json:"vault_path"`
+				Path        string `json:"path"`
+				VaultPath   string `json:"vault_path"`
+				ArchivePath string `json:"archive_path"`
 			}
 			if err := json.Unmarshal(input, &args); err != nil {
 				return nil, fmt.Errorf("invalid arguments: %w", err)
@@ -51,31 +54,51 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 				return nil, fmt.Errorf("no vault configured")
 			}
 
+			archive := args.ArchivePath
+			if archive == "" {
+				archive = defaultArchive
+			}
+			if archive == "" {
+				home, err := os.UserHomeDir()
+				if err == nil {
+					archive = filepath.Join(home, ".local", "share", "symingest", "archive")
+				}
+			}
+
 			pipeline := &ingest.Pipeline{
-				Engine: engine,
-				Store:  st,
-				Writer: &writer.NoteWriter{Vault: vault},
+				Engine:     engine,
+				Store:      st,
+				Writer:     &writer.NoteWriter{Vault: vault},
+				ArchiveDir: archive,
 			}
 
 			res, err := pipeline.Ingest(ctx, source)
 			if errors.Is(err, ingest.ErrDuplicate) {
+				var vPath, aPath string
+				if dupErr, ok := err.(*ingest.DuplicateError); ok {
+					vPath = dupErr.VaultPath
+					aPath = dupErr.ArchivePath
+				}
 				return map[string]any{
-					"status": "duplicate",
-					"source": source,
+					"status":       "duplicate",
+					"source":       source,
+					"vault_path":   vPath,
+					"archive_path": aPath,
 				}, nil
 			}
 			if err != nil {
 				return nil, err
 			}
 
-		return map[string]any{
-			"status":      "success",
-			"source":      source,
-			"vault_path":  res.VaultPath,
-			"mime":        res.Extract.MIME,
-			"engine":      res.Extract.Engine,
-			"text_length": len(res.Extract.Text),
-		}, nil
+			return map[string]any{
+				"status":       "success",
+				"source":       source,
+				"vault_path":   res.VaultPath,
+				"archive_path": res.ArchivePath,
+				"mime":         res.Extract.MIME,
+				"engine":       res.Extract.Engine,
+				"text_length":  len(res.Extract.Text),
+			}, nil
 		},
 	})
 
@@ -134,14 +157,16 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 			"type": "object",
 			"properties": {
 				"directory": {"type": "string", "description": "Absolute path to the directory to watch"},
-				"vault_path": {"type": "string", "description": "Optional vault directory path override"}
+				"vault_path": {"type": "string", "description": "Optional vault directory path override"},
+				"archive_path": {"type": "string", "description": "Optional archive directory path override"}
 			},
 			"required": ["directory"]
 		}`),
 		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
 			var args struct {
-				Directory string `json:"directory"`
-				VaultPath string `json:"vault_path"`
+				Directory   string `json:"directory"`
+				VaultPath   string `json:"vault_path"`
+				ArchivePath string `json:"archive_path"`
 			}
 			if err := json.Unmarshal(input, &args); err != nil {
 				return nil, fmt.Errorf("invalid arguments: %w", err)
@@ -160,15 +185,27 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 				return nil, fmt.Errorf("no vault configured")
 			}
 
+			archive := args.ArchivePath
+			if archive == "" {
+				archive = defaultArchive
+			}
+			if archive == "" {
+				home, err := os.UserHomeDir()
+				if err == nil {
+					archive = filepath.Join(home, ".local", "share", "symingest", "archive")
+				}
+			}
+
 			watcher, err := ingest.NewWatcher(st, dir)
 			if err != nil {
 				return nil, fmt.Errorf("initialize watcher: %w", err)
 			}
 
 			pipeline := &ingest.Pipeline{
-				Engine: engine,
-				Store:  st,
-				Writer: &writer.NoteWriter{Vault: vault},
+				Engine:     engine,
+				Store:      st,
+				Writer:     &writer.NoteWriter{Vault: vault},
+				ArchiveDir: archive,
 			}
 
 			bgCtx := context.Background()
@@ -180,7 +217,7 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 
 			return map[string]any{
 				"status":  "success",
-				"message": fmt.Sprintf("started watching directory %s with vault %s", dir, vault),
+				"message": fmt.Sprintf("started watching directory %s with vault %s and archive %s", dir, vault, archive),
 			}, nil
 		},
 	})

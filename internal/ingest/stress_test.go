@@ -56,9 +56,10 @@ func TestStressIngest(t *testing.T) {
 	}
 
 	p := &Pipeline{
-		Engine: nil,
-		Store:  s,
-		Writer: &writer.NoteWriter{Vault: vaultPath},
+		Engine:     nil,
+		Store:      s,
+		Writer:     &writer.NoteWriter{Vault: vaultPath},
+		ArchiveDir: filepath.Join(dir, "archive"),
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

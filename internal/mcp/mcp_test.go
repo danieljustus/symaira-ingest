@@ -41,7 +41,7 @@ func TestRegister_IngestFile(t *testing.T) {
 	}
 
 	server := mcpserver.New("symingest", "0.1.0")
-	Register(server, st, fakeEngine{}, vault)
+	Register(server, st, fakeEngine{}, vault, filepath.Join(dir, "archive"))
 
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
