@@ -162,3 +162,105 @@ func atoi(s string) int {
 	}
 	return n
 }
+
+func TestRegister_Rules(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "mcp.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	server := mcpserver.New("symingest", "0.1.0")
+	Register(server, st, fakeEngine{}, filepath.Join(dir, "vault"), filepath.Join(dir, "archive"))
+
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	defer outR.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = server.ServeIO(ctx, inR, outW)
+	}()
+
+	// initialize
+	writeFramed(t, inW, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+	})
+	readResp(t, outR)
+
+	// tools/call add_rule
+	writeFramed(t, inW, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "add_rule",
+			"arguments": map[string]any{
+				"pattern": "test-pattern",
+				"kind":    "category",
+				"value":   "test-value",
+			},
+		},
+	})
+	resp := readResp(t, outR)
+	result, _ := resp.Result.(map[string]any)
+	content, _ := result["content"].([]any)
+	first, _ := content[0].(map[string]any)
+	raw, _ := first["text"].(map[string]any)
+	if raw["status"] != "success" {
+		t.Fatalf("status = %v, want success", raw["status"])
+	}
+	rule, _ := raw["rule"].(map[string]any)
+	if rule["pattern"] != "test-pattern" || rule["kind"] != "category" || rule["value"] != "test-value" {
+		t.Fatalf("unexpected rule result: %v", rule)
+	}
+
+	// tools/call list_rules
+	writeFramed(t, inW, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      3,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      "list_rules",
+			"arguments": map[string]any{},
+		},
+	})
+	resp = readResp(t, outR)
+	result, _ = resp.Result.(map[string]any)
+	content, _ = result["content"].([]any)
+	first, _ = content[0].(map[string]any)
+	raw, _ = first["text"].(map[string]any)
+	if raw["status"] != "success" {
+		t.Fatalf("status = %v, want success", raw["status"])
+	}
+	rules, _ := raw["rules"].([]any)
+	if len(rules) != 1 {
+		t.Fatalf("len(rules) = %d, want 1", len(rules))
+	}
+
+	// tools/call delete_rule
+	ruleID := int64(rule["id"].(float64))
+	writeFramed(t, inW, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      4,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "delete_rule",
+			"arguments": map[string]any{
+				"rule_id": ruleID,
+			},
+		},
+	})
+	resp = readResp(t, outR)
+	result, _ = resp.Result.(map[string]any)
+	content, _ = result["content"].([]any)
+	first, _ = content[0].(map[string]any)
+	raw, _ = first["text"].(map[string]any)
+	if raw["status"] != "success" {
+		t.Fatalf("status = %v, want success", raw["status"])
+	}
+}

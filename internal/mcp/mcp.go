@@ -221,4 +221,86 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 			}, nil
 		},
 	})
+
+	server.RegisterTool(&mcpserver.Tool{
+		Name:        "list_rules",
+		Description: "List all document classification rules configured in the system.",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {}
+		}`),
+		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
+			rules, err := st.ListRules(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("list rules: %w", err)
+			}
+			return map[string]any{
+				"status": "success",
+				"rules":  rules,
+			}, nil
+		},
+	})
+
+	server.RegisterTool(&mcpserver.Tool{
+		Name:        "add_rule",
+		Description: "Add a new classification rule to automatically categorize, tag, or assign correspondent/document type to ingested documents matching a pattern.",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"pattern": {"type": "string", "description": "Case-insensitive substring text pattern to match in document"},
+				"kind": {"type": "string", "enum": ["category", "tag", "correspondent", "document_type"], "description": "Metadata type to apply"},
+				"value": {"type": "string", "description": "The metadata value to set or tag to add"}
+			},
+			"required": ["pattern", "kind", "value"]
+		}`),
+		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
+			var args struct {
+				Pattern string `json:"pattern"`
+				Kind    string `json:"kind"`
+				Value   string `json:"value"`
+			}
+			if err := json.Unmarshal(input, &args); err != nil {
+				return nil, fmt.Errorf("invalid arguments: %w", err)
+			}
+
+			rule, err := st.AddRule(ctx, args.Pattern, args.Kind, args.Value)
+			if err != nil {
+				return nil, fmt.Errorf("add rule: %w", err)
+			}
+
+			return map[string]any{
+				"status": "success",
+				"rule":   rule,
+			}, nil
+		},
+	})
+
+	server.RegisterTool(&mcpserver.Tool{
+		Name:        "delete_rule",
+		Description: "Delete a document classification rule by ID.",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"rule_id": {"type": "integer", "description": "The ID of the rule to delete"}
+			},
+			"required": ["rule_id"]
+		}`),
+		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
+			var args struct {
+				RuleID int64 `json:"rule_id"`
+			}
+			if err := json.Unmarshal(input, &args); err != nil {
+				return nil, fmt.Errorf("invalid arguments: %w", err)
+			}
+
+			if err := st.DeleteRule(ctx, args.RuleID); err != nil {
+				return nil, fmt.Errorf("delete rule %d: %w", args.RuleID, err)
+			}
+
+			return map[string]any{
+				"status":  "success",
+				"message": fmt.Sprintf("rule %d deleted successfully", args.RuleID),
+			}, nil
+		},
+	})
 }

@@ -57,6 +57,8 @@ func run(args []string) error {
 		return runJobs(args[1:])
 	case "retry":
 		return runRetry(args[1:])
+	case "rules":
+		return runRules(args[1:])
 	case "mcp":
 		return runMCP(args[1:])
 	default:
@@ -67,7 +69,7 @@ func run(args []string) error {
 
 func printUsage() error {
 	fmt.Fprintln(stdout, `symingest — document ingestion + OCR for the Symaira ecosystem
-
+ 
 Usage:
   symingest [command]
 
@@ -76,6 +78,7 @@ Commands:
   watch <dir>    Watch a directory for new/modified files and ingest in the background
   jobs           List ingestion jobs in the queue
   retry <id>     Retry a failed job by ID
+  rules          Manage classification rules (list, add, delete)
   mcp            Start the MCP server
   version        Print version
   help           Show this help`)
@@ -520,5 +523,138 @@ Retry a failed job by resetting its status to pending.`)
 	}
 
 	fmt.Fprintf(stdout, "Job %d status set to pending. Background workers will process it shortly.\n", jobID)
+	return nil
+}
+
+func runRules(args []string) error {
+	fs := flag.NewFlagSet("rules", flag.ContinueOnError)
+	dbFlag := fs.String("db", "", "SQLite database path")
+	if err := fs.Parse(args); err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
+			"invalid rules flags")
+	}
+
+	remaining := fs.Args()
+	if len(remaining) == 0 || remaining[0] == "--help" || remaining[0] == "-h" {
+		return printRulesUsage()
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
+			"failed to load configuration")
+	}
+
+	if *dbFlag == "" {
+		*dbFlag = cfg.DBPath
+	}
+	if *dbFlag == "" {
+		path, err := defaultDBPath()
+		if err != nil {
+			return err
+		}
+		*dbFlag = path
+	}
+
+	st, err := store.Open(*dbFlag)
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
+			"failed to open document store")
+	}
+	defer st.Close()
+
+	ctx := context.Background()
+
+	switch remaining[0] {
+	case "list":
+		return listRules(ctx, st)
+	case "add":
+		return addRule(ctx, st, remaining[1:])
+	case "delete":
+		return deleteRule(ctx, st, remaining[1:])
+	default:
+		return exitcodes.Wrapf(nil, exitcodes.ExitNoInput, exitcodes.KindValidation,
+			"unknown rules subcommand %q", remaining[0])
+	}
+}
+
+func printRulesUsage() error {
+	fmt.Fprintln(stdout, `Usage: symingest rules [flags] [command]
+
+Flags:
+  --db string   SQLite database path
+
+Commands:
+  list                          List all classification rules
+  add <pattern> <kind> <value>  Add a classification rule
+  delete <id>                   Delete a classification rule by ID
+
+Kinds for add command:
+  category, tag, correspondent, document_type`)
+	return nil
+}
+
+func listRules(ctx context.Context, st *store.Store) error {
+	rules, err := st.ListRules(ctx)
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
+			"failed to list rules")
+	}
+
+	if len(rules) == 0 {
+		fmt.Fprintln(stdout, "No classification rules defined.")
+		return nil
+	}
+
+	w := tabwriter.NewWriter(stdout, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(w, "ID\tPATTERN\tKIND\tVALUE\tCREATED AT")
+	for _, r := range rules {
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n",
+			r.ID, r.Pattern, r.Kind, r.Value, r.CreatedAt)
+	}
+	w.Flush()
+	return nil
+}
+
+func addRule(ctx context.Context, st *store.Store, args []string) error {
+	if len(args) < 3 {
+		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation,
+			"missing arguments; usage: symingest rules add <pattern> <kind> <value>")
+	}
+
+	pattern := args[0]
+	kind := args[1]
+	value := args[2]
+
+	rule, err := st.AddRule(ctx, pattern, kind, value)
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
+			"failed to add rule")
+	}
+
+	fmt.Fprintf(stdout, "Added classification rule %d: pattern=%q, kind=%q, value=%q\n",
+		rule.ID, rule.Pattern, rule.Kind, rule.Value)
+	return nil
+}
+
+func deleteRule(ctx context.Context, st *store.Store, args []string) error {
+	if len(args) < 1 {
+		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation,
+			"missing rule ID; usage: symingest rules delete <id>")
+	}
+
+	idStr := args[0]
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		return exitcodes.Wrapf(err, exitcodes.ExitData, exitcodes.KindValidation,
+			"invalid rule ID %q; must be an integer", idStr)
+	}
+
+	if err := st.DeleteRule(ctx, id); err != nil {
+		return exitcodes.Wrapf(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
+			"failed to delete rule %d", id)
+	}
+
+	fmt.Fprintf(stdout, "Deleted classification rule %d.\n", id)
 	return nil
 }

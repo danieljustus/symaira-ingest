@@ -58,7 +58,7 @@ func StartWorker(ctx context.Context, p *Pipeline) {
 			}
 
 			// Save vault and archive paths and complete the job
-			if err := p.Store.SetVaultAndArchivePath(ctx, job.DocumentID, res.VaultPath, res.ArchivePath); err != nil {
+			if err := p.Store.SetVaultAndArchivePath(ctx, job.DocumentID, res.VaultPath, res.ArchivePath, res.Category, res.Tags, res.Correspondent, res.DocumentType); err != nil {
 				fmt.Fprintf(os.Stderr, "[Worker] Failed to set vault/archive paths for job %d: %v\n", job.ID, err)
 				if failErr := p.Store.FailJob(ctx, job.ID, fmt.Sprintf("set vault/archive paths: %v", err)); failErr != nil {
 					fmt.Fprintf(os.Stderr, "[Worker] Failed to record failure for job %d: %v\n", job.ID, failErr)
