@@ -46,7 +46,7 @@ func TestPipeline_Deduplicates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := p.Ingest(context.Background(), path)
+	res, err := p.Ingest(context.Background(), path, nil)
 	if err != nil {
 		t.Fatalf("first ingest: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestPipeline_Deduplicates(t *testing.T) {
 	}
 
 	// Test re-ingesting the exact same file path
-	_, err = p.Ingest(context.Background(), path)
+	_, err = p.Ingest(context.Background(), path, nil)
 	if err == nil {
 		t.Fatal("expected duplicate error, got nil")
 	}
@@ -78,7 +78,7 @@ func TestPipeline_Deduplicates(t *testing.T) {
 	if err := os.WriteFile(otherPath, []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err = p.Ingest(context.Background(), otherPath)
+	_, err = p.Ingest(context.Background(), otherPath, nil)
 	if err == nil {
 		t.Fatal("expected duplicate error for different path, got nil")
 	}
@@ -123,7 +123,7 @@ func TestPipeline_ExtractsWithEngine(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := p.Ingest(context.Background(), path)
+	res, err := p.Ingest(context.Background(), path, nil)
 	if err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestPipeline_ClassifiesWithRules(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := p.Ingest(ctx, path)
+	res, err := p.Ingest(ctx, path, nil)
 	if err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}
@@ -323,15 +323,155 @@ func TestPipeline_EnqueueSkippedJobFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = p.Ingest(context.Background(), path)
+	_, err = p.Ingest(context.Background(), path, nil)
 	if err != nil {
 		t.Fatalf("first ingest: %v", err)
 	}
 
 	s.Close()
 
-	_, err = p.Ingest(context.Background(), path)
+	_, err = p.Ingest(context.Background(), path, nil)
 	if err == nil {
 		t.Fatal("expected error on second ingest with closed DB, got nil")
+	}
+}
+
+func TestPipeline_PresetOverridesClassification(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "docs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	_, _ = s.AddRule(ctx, "acme", "category", "invoices")
+	_, _ = s.AddRule(ctx, "tax", "tag", "financial")
+	_, _ = s.AddRule(ctx, "irs", "correspondent", "Internal Revenue Service")
+	_, _ = s.AddRule(ctx, "form", "document_type", "Tax Form")
+
+	vault := filepath.Join(dir, "vault")
+	eng := extract.Engine(&fakePipelineEngine{result: &extract.Result{Text: "Acme Tax return form for 2026 to the IRS"}})
+	p := &Pipeline{
+		Engine:     eng,
+		Store:      s,
+		Writer:     &writer.NoteWriter{Vault: vault},
+		ArchiveDir: filepath.Join(dir, "archive"),
+	}
+
+	path := filepath.Join(dir, "scan.png")
+	if err := os.WriteFile(path, []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := &IngestOptions{
+		PresetCategory:      "custom-category",
+		PresetTags:          []string{"custom-tag-1", "custom-tag-2"},
+		PresetCorrespondent: "Custom Corp",
+		PresetDocumentType:  "Custom Doc Type",
+	}
+
+	res, err := p.Ingest(ctx, path, opts)
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	if res.Category != "custom-category" {
+		t.Errorf("res.Category = %q, want custom-category", res.Category)
+	}
+	if len(res.Tags) != 2 || res.Tags[0] != "custom-tag-1" || res.Tags[1] != "custom-tag-2" {
+		t.Errorf("res.Tags = %v, want [custom-tag-1, custom-tag-2]", res.Tags)
+	}
+	if res.Correspondent != "Custom Corp" {
+		t.Errorf("res.Correspondent = %q, want Custom Corp", res.Correspondent)
+	}
+	if res.DocumentType != "Custom Doc Type" {
+		t.Errorf("res.DocumentType = %q, want Custom Doc Type", res.DocumentType)
+	}
+}
+
+func TestPipeline_PresetOnlyOverridesSetFields(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "docs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	_, _ = s.AddRule(ctx, "acme", "category", "invoices")
+	_, _ = s.AddRule(ctx, "tax", "tag", "financial")
+	_, _ = s.AddRule(ctx, "irs", "correspondent", "Internal Revenue Service")
+	_, _ = s.AddRule(ctx, "form", "document_type", "Tax Form")
+
+	vault := filepath.Join(dir, "vault")
+	eng := extract.Engine(&fakePipelineEngine{result: &extract.Result{Text: "Acme Tax return form for 2026 to the IRS"}})
+	p := &Pipeline{
+		Engine:     eng,
+		Store:      s,
+		Writer:     &writer.NoteWriter{Vault: vault},
+		ArchiveDir: filepath.Join(dir, "archive"),
+	}
+
+	path := filepath.Join(dir, "scan.png")
+	if err := os.WriteFile(path, []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := &IngestOptions{
+		PresetCategory: "override-category",
+	}
+
+	res, err := p.Ingest(ctx, path, opts)
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	if res.Category != "override-category" {
+		t.Errorf("res.Category = %q, want override-category", res.Category)
+	}
+	if len(res.Tags) != 1 || res.Tags[0] != "financial" {
+		t.Errorf("res.Tags = %v, want [financial] (rule preserved)", res.Tags)
+	}
+	if res.Correspondent != "Internal Revenue Service" {
+		t.Errorf("res.Correspondent = %q, want Internal Revenue Service (rule preserved)", res.Correspondent)
+	}
+	if res.DocumentType != "Tax Form" {
+		t.Errorf("res.DocumentType = %q, want Tax Form (rule preserved)", res.DocumentType)
+	}
+}
+
+func TestPipeline_NilOptsBackwardCompatible(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "docs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	_, _ = s.AddRule(ctx, "acme", "category", "invoices")
+
+	vault := filepath.Join(dir, "vault")
+	eng := extract.Engine(&fakePipelineEngine{result: &extract.Result{Text: "Acme document"}})
+	p := &Pipeline{
+		Engine:     eng,
+		Store:      s,
+		Writer:     &writer.NoteWriter{Vault: vault},
+		ArchiveDir: filepath.Join(dir, "archive"),
+	}
+
+	path := filepath.Join(dir, "doc.txt")
+	if err := os.WriteFile(path, []byte("Acme invoice document"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := p.Ingest(ctx, path, nil)
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	if res.Category != "invoices" {
+		t.Errorf("res.Category = %q, want invoices", res.Category)
 	}
 }

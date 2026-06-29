@@ -136,7 +136,7 @@ Ingest a single file into the configured vault.`)
 	}
 
 	ctx := context.Background()
-	res, err := pipeline.Ingest(ctx, source)
+	res, err := pipeline.Ingest(ctx, source, nil)
 	if err != nil {
 		if errors.Is(err, ingest.ErrDuplicate) {
 			var vPath, aPath string

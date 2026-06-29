@@ -8,6 +8,15 @@ import (
 	"github.com/danieljustus/symaira-ingest/internal/extract"
 )
 
+// IngestOptions holds optional preset metadata that overrides classification rule results.
+// When set, preset values take precedence over any matching rules (first wins: Preset > Rules).
+type IngestOptions struct {
+	PresetCategory      string
+	PresetTags          []string
+	PresetCorrespondent string
+	PresetDocumentType  string
+}
+
 // Result is the outcome of a one-shot ingest.
 type Result struct {
 	SourcePath    string
