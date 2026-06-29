@@ -79,18 +79,22 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 					vPath = dupErr.VaultPath
 					aPath = dupErr.ArchivePath
 				}
-				return map[string]any{
+				data, mErr := json.Marshal(map[string]any{
 					"status":       "duplicate",
 					"source":       source,
 					"vault_path":   vPath,
 					"archive_path": aPath,
-				}, nil
+				})
+				if mErr != nil {
+					return nil, fmt.Errorf("marshal duplicate result: %w", mErr)
+				}
+				return string(data), nil
 			}
 			if err != nil {
 				return nil, err
 			}
 
-			return map[string]any{
+			data, mErr := json.Marshal(map[string]any{
 				"status":       "success",
 				"source":       source,
 				"vault_path":   res.VaultPath,
@@ -98,7 +102,11 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 				"mime":         res.Extract.MIME,
 				"engine":       res.Extract.Engine,
 				"text_length":  len(res.Extract.Text),
-			}, nil
+			})
+			if mErr != nil {
+				return nil, fmt.Errorf("marshal ingest result: %w", mErr)
+			}
+			return string(data), nil
 		},
 	})
 
@@ -114,10 +122,14 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 			if err != nil {
 				return nil, fmt.Errorf("list jobs: %w", err)
 			}
-			return map[string]any{
+			data, err := json.Marshal(map[string]any{
 				"status": "success",
 				"jobs":   jobs,
-			}, nil
+			})
+			if err != nil {
+				return nil, fmt.Errorf("marshal list_jobs result: %w", err)
+			}
+			return string(data), nil
 		},
 	})
 
@@ -143,10 +155,14 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 				return nil, fmt.Errorf("retry job %d: %w", args.JobID, err)
 			}
 
-			return map[string]any{
+			data, err := json.Marshal(map[string]any{
 				"status":  "success",
 				"message": fmt.Sprintf("job %d reset to pending status", args.JobID),
-			}, nil
+			})
+			if err != nil {
+				return nil, fmt.Errorf("marshal retry result: %w", err)
+			}
+			return string(data), nil
 		},
 	})
 
@@ -215,10 +231,14 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 			}
 			go ingest.StartWorker(bgCtx, pipeline)
 
-			return map[string]any{
+			data, err := json.Marshal(map[string]any{
 				"status":  "success",
 				"message": fmt.Sprintf("started watching directory %s with vault %s and archive %s", dir, vault, archive),
-			}, nil
+			})
+			if err != nil {
+				return nil, fmt.Errorf("marshal start_watch result: %w", err)
+			}
+			return string(data), nil
 		},
 	})
 
@@ -234,10 +254,14 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 			if err != nil {
 				return nil, fmt.Errorf("list rules: %w", err)
 			}
-			return map[string]any{
+			data, err := json.Marshal(map[string]any{
 				"status": "success",
 				"rules":  rules,
-			}, nil
+			})
+			if err != nil {
+				return nil, fmt.Errorf("marshal list_rules result: %w", err)
+			}
+			return string(data), nil
 		},
 	})
 
@@ -268,10 +292,14 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 				return nil, fmt.Errorf("add rule: %w", err)
 			}
 
-			return map[string]any{
+			data, err := json.Marshal(map[string]any{
 				"status": "success",
 				"rule":   rule,
-			}, nil
+			})
+			if err != nil {
+				return nil, fmt.Errorf("marshal add_rule result: %w", err)
+			}
+			return string(data), nil
 		},
 	})
 
@@ -297,10 +325,14 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 				return nil, fmt.Errorf("delete rule %d: %w", args.RuleID, err)
 			}
 
-			return map[string]any{
+			data, err := json.Marshal(map[string]any{
 				"status":  "success",
 				"message": fmt.Sprintf("rule %d deleted successfully", args.RuleID),
-			}, nil
+			})
+			if err != nil {
+				return nil, fmt.Errorf("marshal delete_rule result: %w", err)
+			}
+			return string(data), nil
 		},
 	})
 }

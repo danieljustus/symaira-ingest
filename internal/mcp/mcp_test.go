@@ -76,22 +76,7 @@ func TestRegister_IngestFile(t *testing.T) {
 	if id, ok := resp.ID.(float64); !ok || id != 2 {
 		t.Fatalf("response id = %v, want 2", resp.ID)
 	}
-	result, ok := resp.Result.(map[string]any)
-	if !ok {
-		t.Fatalf("result type = %T, want map", resp.Result)
-	}
-	content, ok := result["content"].([]any)
-	if !ok || len(content) == 0 {
-		t.Fatalf("missing content in result: %v", result)
-	}
-	first, ok := content[0].(map[string]any)
-	if !ok {
-		t.Fatalf("content[0] type = %T", content[0])
-	}
-	raw, ok := first["text"].(map[string]any)
-	if !ok {
-		t.Fatalf("content text type = %T", first["text"])
-	}
+	raw := parseToolText(t, resp)
 	if raw["status"] != "success" {
 		t.Fatalf("status = %v, want success", raw["status"])
 	}
@@ -161,6 +146,34 @@ func atoi(s string) int {
 		return 0
 	}
 	return n
+}
+
+// parseToolText extracts the JSON-encoded result from an MCP tool response's
+// content[0].text field. The handler returns JSON-encoded strings per the MCP
+// spec (TextContent.text must be a string), so this helper unmarshals them.
+func parseToolText(t *testing.T, resp jsonRPCResponse) map[string]any {
+	t.Helper()
+	result, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result type = %T, want map", resp.Result)
+	}
+	content, ok := result["content"].([]any)
+	if !ok || len(content) == 0 {
+		t.Fatalf("missing content in result: %v", result)
+	}
+	first, ok := content[0].(map[string]any)
+	if !ok {
+		t.Fatalf("content[0] type = %T", content[0])
+	}
+	text, ok := first["text"].(string)
+	if !ok {
+		t.Fatalf("content text type = %T, want string", first["text"])
+	}
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(text), &raw); err != nil {
+		t.Fatalf("failed to unmarshal tool text: %v", err)
+	}
+	return raw
 }
 
 func TestRegister_IngestFile_InvalidInput(t *testing.T) {
@@ -348,22 +361,7 @@ func TestRegister_IngestFile_Duplicate(t *testing.T) {
 	if resp.Error != nil {
 		t.Fatalf("expected no error for duplicate, got: %v", resp.Error)
 	}
-	result, ok := resp.Result.(map[string]any)
-	if !ok {
-		t.Fatalf("result type = %T, want map", resp.Result)
-	}
-	content, ok := result["content"].([]any)
-	if !ok || len(content) == 0 {
-		t.Fatalf("missing content in result: %v", result)
-	}
-	first, ok := content[0].(map[string]any)
-	if !ok {
-		t.Fatalf("content[0] type = %T", content[0])
-	}
-	raw, ok := first["text"].(map[string]any)
-	if !ok {
-		t.Fatalf("content text type = %T", first["text"])
-	}
+	raw := parseToolText(t, resp)
 	if raw["status"] != "duplicate" {
 		t.Fatalf("status = %v, want duplicate", raw["status"])
 	}
@@ -658,22 +656,7 @@ func TestRegister_ListJobs_Empty(t *testing.T) {
 	if resp.Error != nil {
 		t.Fatalf("expected no error, got: %v", resp.Error)
 	}
-	result, ok := resp.Result.(map[string]any)
-	if !ok {
-		t.Fatalf("result type = %T, want map", resp.Result)
-	}
-	content, ok := result["content"].([]any)
-	if !ok || len(content) == 0 {
-		t.Fatalf("missing content in result: %v", result)
-	}
-	first, ok := content[0].(map[string]any)
-	if !ok {
-		t.Fatalf("content[0] type = %T", content[0])
-	}
-	raw, ok := first["text"].(map[string]any)
-	if !ok {
-		t.Fatalf("content text type = %T", first["text"])
-	}
+	raw := parseToolText(t, resp)
 	if raw["status"] != "success" {
 		t.Fatalf("status = %v, want success", raw["status"])
 	}
@@ -723,10 +706,7 @@ func TestRegister_Rules(t *testing.T) {
 		},
 	})
 	resp := readResp(t, outR)
-	result, _ := resp.Result.(map[string]any)
-	content, _ := result["content"].([]any)
-	first, _ := content[0].(map[string]any)
-	raw, _ := first["text"].(map[string]any)
+	raw := parseToolText(t, resp)
 	if raw["status"] != "success" {
 		t.Fatalf("status = %v, want success", raw["status"])
 	}
@@ -746,10 +726,7 @@ func TestRegister_Rules(t *testing.T) {
 		},
 	})
 	resp = readResp(t, outR)
-	result, _ = resp.Result.(map[string]any)
-	content, _ = result["content"].([]any)
-	first, _ = content[0].(map[string]any)
-	raw, _ = first["text"].(map[string]any)
+	raw = parseToolText(t, resp)
 	if raw["status"] != "success" {
 		t.Fatalf("status = %v, want success", raw["status"])
 	}
@@ -772,10 +749,7 @@ func TestRegister_Rules(t *testing.T) {
 		},
 	})
 	resp = readResp(t, outR)
-	result, _ = resp.Result.(map[string]any)
-	content, _ = result["content"].([]any)
-	first, _ = content[0].(map[string]any)
-	raw, _ = first["text"].(map[string]any)
+	raw = parseToolText(t, resp)
 	if raw["status"] != "success" {
 		t.Fatalf("status = %v, want success", raw["status"])
 	}
