@@ -122,13 +122,22 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 
 	server.RegisterTool(&mcpserver.Tool{
 		Name:        "list_jobs",
-		Description: "List all jobs in the ingestion queue, including their status, attempts, error messages, and source path.",
+		Description: "List jobs in the ingestion queue, including their status, attempts, error messages, and source path.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
-			"properties": {}
+			"properties": {
+				"limit": {"type": "integer", "description": "Maximum number of jobs to return (default: all)"}
+			}
 		}`),
 		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
-			jobs, err := st.ListJobs(ctx)
+			var args struct {
+				Limit int `json:"limit"`
+			}
+			if err := json.Unmarshal(input, &args); err != nil {
+				return nil, fmt.Errorf("invalid arguments: %w", err)
+			}
+
+			jobs, err := st.ListJobs(ctx, args.Limit)
 			if err != nil {
 				return nil, fmt.Errorf("list jobs: %w", err)
 			}

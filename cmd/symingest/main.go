@@ -367,6 +367,7 @@ Watch a directory for new or modified files and ingest them in the background.`)
 func runJobs(args []string) error {
 	fs := flag.NewFlagSet("jobs", flag.ContinueOnError)
 	jsonFlag := fs.Bool("json", false, "Output jobs in JSON format")
+	limitFlag := fs.Int("limit", 100, "Maximum number of jobs to return")
 	cfg, err := resolveConfig(fs)
 	if err != nil {
 		return err
@@ -384,7 +385,7 @@ func runJobs(args []string) error {
 	defer st.Close()
 
 	ctx := context.Background()
-	jobs, err := st.ListJobs(ctx)
+	jobs, err := st.ListJobs(ctx, *limitFlag)
 	if err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
 			"failed to list jobs")

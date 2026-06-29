@@ -140,7 +140,7 @@ func TestStressIngest(t *testing.T) {
 
 	// Wait until all jobs in the database queue are no longer pending/running
 	for {
-		jobs, err := s.ListJobs(ctx)
+		jobs, err := s.ListJobs(ctx, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -163,7 +163,7 @@ func TestStressIngest(t *testing.T) {
 	wg.Wait()
 
 	// 5. Verify results
-	jobs, err := s.ListJobs(ctx)
+	jobs, err := s.ListJobs(ctx, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

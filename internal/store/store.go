@@ -396,14 +396,18 @@ func (s *Store) FailJob(ctx context.Context, jobID int64, errStr string) error {
 	return tx.Commit()
 }
 
-// ListJobs lists all jobs in the queue ordered by creation date (newest first).
-func (s *Store) ListJobs(ctx context.Context) ([]*Job, error) {
-	rows, err := s.db.QueryContext(ctx, `
+// ListJobs lists jobs in the queue ordered by creation date (newest first).
+// A limit of 0 or negative returns all jobs; a positive limit caps the result set.
+func (s *Store) ListJobs(ctx context.Context, limit int) ([]*Job, error) {
+	query := `
 		SELECT j.id, j.document_id, j.kind, j.status, j.attempts, j.last_error, j.created_at, j.updated_at, d.source_path
 		FROM jobs j
 		JOIN documents d ON j.document_id = d.id
-		ORDER BY j.id DESC
-	`)
+		ORDER BY j.id DESC`
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("query jobs: %w", err)
 	}

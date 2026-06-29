@@ -66,7 +66,7 @@ func TestWatcher_DebouncesAndEnqueues(t *testing.T) {
 	time.Sleep(1500 * time.Millisecond)
 
 	// Check if the job was enqueued in the store.
-	jobs, err := s.ListJobs(ctx)
+	jobs, err := s.ListJobs(ctx, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

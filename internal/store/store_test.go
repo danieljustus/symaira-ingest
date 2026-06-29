@@ -144,7 +144,7 @@ func TestStore_JobsQueue(t *testing.T) {
 	}
 
 	// Check status has reset to pending, and attempts is 0.
-	jobs, err := s.ListJobs(ctx)
+	jobs, err := s.ListJobs(ctx, 0)
 	if err != nil {
 		t.Fatalf("ListJobs: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestStore_JobsQueue(t *testing.T) {
 	}
 
 	// 12. List jobs and check.
-	allJobs, err := s.ListJobs(ctx)
+	allJobs, err := s.ListJobs(ctx, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
