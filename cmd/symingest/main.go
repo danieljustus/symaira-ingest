@@ -247,6 +247,19 @@ func runMCP(args []string) error {
 		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
 			"invalid mcp flags")
 	}
+	remaining := fs.Args()
+	if len(remaining) > 0 && (remaining[0] == "--help" || remaining[0] == "-h") {
+		fmt.Fprintln(stdout, `Usage: symingest mcp [flags]
+
+Flags:
+  --ocr-lang string   Tesseract language override (default "eng")
+  --vault string      Target vault directory
+  --archive string    Target archive directory
+  --db string         SQLite database path
+
+Start the MCP server for AI-powered document processing.`)
+		return nil
+	}
 
 	st, err := store.Open(cfg.db)
 	if err != nil {
