@@ -515,7 +515,9 @@ func StopAllWatchers() {
 	activeWatchers.Range(func(key, value any) bool {
 		if entry, ok := value.(*watcherEntry); ok && entry != nil {
 			entry.cancel()
-			entry.watcher.Close()
+			if entry.watcher != nil {
+				entry.watcher.Close()
+			}
 		}
 		activeWatchers.Delete(key)
 		return true

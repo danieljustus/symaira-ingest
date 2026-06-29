@@ -754,3 +754,20 @@ func TestRegister_Rules(t *testing.T) {
 		t.Fatalf("status = %v, want success", raw["status"])
 	}
 }
+
+func TestStopAllWatchers(t *testing.T) {
+	cancelled := false
+	activeWatchers.Store("test-dir", &watcherEntry{
+		cancel: func() { cancelled = true },
+		watcher: nil,
+	})
+
+	StopAllWatchers()
+
+	if _, loaded := activeWatchers.Load("test-dir"); loaded {
+		t.Fatal("expected watcher to be removed from activeWatchers")
+	}
+	if !cancelled {
+		t.Fatal("expected cancel to be called")
+	}
+}
