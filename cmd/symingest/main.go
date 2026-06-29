@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"syscall"
 	"text/tabwriter"
+	"time"
 
 	"github.com/danieljustus/symaira-corekit/exitcodes"
 	"github.com/danieljustus/symaira-corekit/logkit"
@@ -23,6 +24,7 @@ import (
 	"github.com/danieljustus/symaira-ingest/internal/ingest"
 	"github.com/danieljustus/symaira-ingest/internal/mcp"
 	"github.com/danieljustus/symaira-ingest/internal/ocr"
+	"github.com/danieljustus/symaira-ingest/internal/paperlessimport"
 	"github.com/danieljustus/symaira-ingest/internal/store"
 	"github.com/danieljustus/symaira-ingest/internal/version"
 	"github.com/danieljustus/symaira-ingest/internal/writer"
@@ -59,6 +61,8 @@ func run(args []string) error {
 		return runRetry(args[1:])
 	case "rules":
 		return runRules(args[1:])
+	case "import":
+		return runImport(args[1:])
 	case "mcp":
 		return runMCP(args[1:])
 	default:
@@ -74,14 +78,15 @@ Usage:
   symingest [command]
 
 Commands:
-  ingest <file>  Ingest a file into the vault (one-shot)
-  watch <dir>    Watch a directory for new/modified files and ingest in the background
-  jobs           List ingestion jobs in the queue
-  retry <id>     Retry a failed job by ID
-  rules          Manage classification rules (list, add, delete)
-  mcp            Start the MCP server
-  version        Print version
-  help           Show this help`)
+  ingest <file>       Ingest a file into the vault (one-shot)
+  watch <dir>         Watch a directory for new/modified files and ingest in the background
+  import paperless    Import documents from a Paperless-ngx instance
+  jobs                List ingestion jobs in the queue
+  retry <id>          Retry a failed job by ID
+  rules               Manage classification rules (list, add, delete)
+  mcp                 Start the MCP server
+  version             Print version
+  help                Show this help`)
 	return nil
 }
 
@@ -159,6 +164,101 @@ Ingest a single file into the configured vault.`)
 
 	fmt.Fprintf(stdout, "ingested: %s\nengine: %s\ntext length: %d\n",
 		source, res.Extract.Engine, len(res.Extract.Text))
+	return nil
+}
+
+func runImport(args []string) error {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
+		fmt.Fprintln(stdout, `Usage: symingest import paperless [flags]
+
+Flags:
+  --base-url string   Paperless-ngx instance URL (or PAPERLESS_URL env)
+  --token string      API token (or PAPERLESS_TOKEN env)
+  --since string      Only import documents created after this date (YYYY-MM-DD)
+  --vault string      Target vault directory
+  --archive string    Target archive directory
+  --db string         SQLite database path
+  --dry-run           List what would be imported without writing
+
+Import documents from a Paperless-ngx instance into the vault.`)
+		return nil
+	}
+
+	if args[0] != "paperless" {
+		return exitcodes.Wrapf(nil, exitcodes.ExitNoInput, exitcodes.KindValidation,
+			"unknown import subcommand %q; supported: paperless", args[0])
+	}
+
+	fs := flag.NewFlagSet("import paperless", flag.ContinueOnError)
+	baseURL := fs.String("base-url", "", "Paperless-ngx instance URL")
+	token := fs.String("token", "", "API token")
+	sinceStr := fs.String("since", "", "Only import documents created after this date (YYYY-MM-DD)")
+	dryRun := fs.Bool("dry-run", false, "List what would be imported without writing")
+	cfg, err := resolveConfig(fs)
+	if err != nil {
+		return err
+	}
+	if err := fs.Parse(args[1:]); err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
+			"invalid import flags")
+	}
+
+	if *baseURL == "" {
+		*baseURL = os.Getenv("PAPERLESS_URL")
+	}
+	if *token == "" {
+		*token = os.Getenv("PAPERLESS_TOKEN")
+	}
+	if *baseURL == "" || *token == "" {
+		return exitcodes.Wrapf(nil, exitcodes.ExitConfig, exitcodes.KindConfig,
+			"base-url and token are required (use flags or PAPERLESS_URL/PAPERLESS_TOKEN env vars)")
+	}
+
+	if cfg.vault == "" {
+		return exitcodes.Wrapf(nil, exitcodes.ExitConfig, exitcodes.KindConfig,
+			"no vault configured; use --vault, SYMINGEST_VAULT env, or set vault in ~/.config/symingest/config.toml")
+	}
+
+	var since time.Time
+	if *sinceStr != "" {
+		since, err = time.Parse("2006-01-02", *sinceStr)
+		if err != nil {
+			return exitcodes.Wrapf(err, exitcodes.ExitData, exitcodes.KindValidation,
+				"invalid since date %q; expected YYYY-MM-DD", *sinceStr)
+		}
+	}
+
+	st, err := store.Open(cfg.db)
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
+			"failed to open document store")
+	}
+	defer st.Close()
+
+	engine := ocr.DefaultRunner(cfg.ocrLang)
+	pipeline := &ingest.Pipeline{
+		Engine:     engine,
+		Store:      st,
+		Writer:     &writer.NoteWriter{Vault: cfg.vault},
+		ArchiveDir: cfg.archive,
+	}
+
+	opts := paperlessimport.Options{
+		BaseURL: *baseURL,
+		Token:   *token,
+		Since:   since,
+		DryRun:  *dryRun,
+	}
+
+	ctx := context.Background()
+	stats, err := paperlessimport.Run(ctx, opts, pipeline)
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
+			"import failed")
+	}
+
+	fmt.Fprintf(stdout, "Import complete: %d imported, %d skipped, %d failed (of %d total)\n",
+		stats.Imported, stats.Skipped, stats.Failed, stats.Total)
 	return nil
 }
 

@@ -9,11 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/danieljustus/symaira-corekit/mcpserver"
 
 	"github.com/danieljustus/symaira-ingest/internal/extract"
 	"github.com/danieljustus/symaira-ingest/internal/ingest"
+	"github.com/danieljustus/symaira-ingest/internal/paperlessimport"
 	"github.com/danieljustus/symaira-ingest/internal/store"
 	"github.com/danieljustus/symaira-ingest/internal/writer"
 )
@@ -422,6 +424,85 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 			})
 			if err != nil {
 				return nil, fmt.Errorf("marshal delete_rule result: %w", err)
+			}
+			return string(data), nil
+		},
+	})
+
+	server.RegisterTool(&mcpserver.Tool{
+		Name:        "import_paperless",
+		Description: "Import documents from a Paperless-ngx instance into the vault. Downloads original files and ingests them with preset metadata from Paperless (tags, correspondent, document type).",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"base_url": {"type": "string", "description": "Paperless-ngx instance URL (or set PAPERLESS_URL env)"},
+				"token": {"type": "string", "description": "API token (or set PAPERLESS_TOKEN env)"},
+				"since": {"type": "string", "description": "Only import documents created after this date (YYYY-MM-DD)"},
+				"dry_run": {"type": "boolean", "description": "List what would be imported without writing"}
+			},
+			"required": ["base_url", "token"]
+		}`),
+		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
+			var args struct {
+				BaseURL string `json:"base_url"`
+				Token   string `json:"token"`
+				Since   string `json:"since"`
+				DryRun  bool   `json:"dry_run"`
+			}
+			if err := json.Unmarshal(input, &args); err != nil {
+				return nil, fmt.Errorf("invalid arguments: %w", err)
+			}
+
+			vault := defaultVault
+			if vault == "" {
+				return nil, fmt.Errorf("no vault configured")
+			}
+
+			archive := defaultArchive
+			if archive == "" {
+				home, err := os.UserHomeDir()
+				if err == nil {
+					archive = filepath.Join(home, ".local", "share", "symingest", "archive")
+				}
+			}
+
+			var since time.Time
+			if args.Since != "" {
+				var err error
+				since, err = time.Parse("2006-01-02", args.Since)
+				if err != nil {
+					return nil, fmt.Errorf("invalid since date: %w", err)
+				}
+			}
+
+			pipeline := &ingest.Pipeline{
+				Engine:     engine,
+				Store:      st,
+				Writer:     &writer.NoteWriter{Vault: vault},
+				ArchiveDir: archive,
+			}
+
+			opts := paperlessimport.Options{
+				BaseURL: args.BaseURL,
+				Token:   args.Token,
+				Since:   since,
+				DryRun:  args.DryRun,
+			}
+
+			stats, err := paperlessimport.Run(ctx, opts, pipeline)
+			if err != nil {
+				return nil, err
+			}
+
+			data, mErr := json.Marshal(map[string]any{
+				"status":   "success",
+				"imported": stats.Imported,
+				"skipped":  stats.Skipped,
+				"failed":   stats.Failed,
+				"total":    stats.Total,
+			})
+			if mErr != nil {
+				return nil, fmt.Errorf("marshal import result: %w", mErr)
 			}
 			return string(data), nil
 		},
