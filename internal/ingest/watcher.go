@@ -28,6 +28,7 @@ type Watcher struct {
 type fileState struct {
 	lastSize    int64
 	lastModTime time.Time
+	createdAt   time.Time
 	timer       *time.Timer
 }
 
@@ -184,6 +185,7 @@ func (w *Watcher) debounceFile(ctx context.Context, path string) {
 		w.pending[path] = &fileState{
 			lastSize:    info.Size(),
 			lastModTime: info.ModTime(),
+			createdAt:   time.Now(),
 		}
 	}
 
@@ -198,6 +200,21 @@ func (w *Watcher) checkStability(ctx context.Context, path string) {
 	state, exists := w.pending[path]
 	if !exists {
 		w.mu.Unlock()
+		return
+	}
+
+	const maxPendingAge = 5 * time.Minute
+	if time.Since(state.createdAt) > maxPendingAge {
+		delete(w.pending, path)
+		if state.timer != nil {
+			state.timer.Stop()
+		}
+		w.mu.Unlock()
+
+		log.Printf("[Watcher] File pending longer than %v, force-enqueuing: %s", maxPendingAge, path)
+		if err := w.enqueueFile(ctx, path); err != nil {
+			log.Printf("[Watcher] Error force-enqueuing file %s: %v", path, err)
+		}
 		return
 	}
 
