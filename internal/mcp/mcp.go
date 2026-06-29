@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/danieljustus/symaira-corekit/mcpserver"
 
@@ -16,6 +17,15 @@ import (
 	"github.com/danieljustus/symaira-ingest/internal/store"
 	"github.com/danieljustus/symaira-ingest/internal/writer"
 )
+
+// activeWatchers tracks running watchers by directory path to prevent leaks.
+// Each entry stores a cancel function to stop the watcher and its worker.
+var activeWatchers sync.Map
+
+type watcherEntry struct {
+	cancel  context.CancelFunc
+	watcher *ingest.Watcher
+}
 
 // Register adds the ingest_file tool to the MCP server.
 func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, defaultVault, defaultArchive string) {
@@ -193,11 +203,16 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 				return nil, fmt.Errorf("invalid directory path: %w", err)
 			}
 
+			if _, loaded := activeWatchers.LoadOrStore(dir, nil); loaded {
+				return nil, fmt.Errorf("directory %s is already being watched", dir)
+			}
+
 			vault := args.VaultPath
 			if vault == "" {
 				vault = defaultVault
 			}
 			if vault == "" {
+				activeWatchers.Delete(dir)
 				return nil, fmt.Errorf("no vault configured")
 			}
 
@@ -214,9 +229,11 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 
 			watcher, err := ingest.NewWatcher(st, dir)
 			if err != nil {
+				activeWatchers.Delete(dir)
 				return nil, fmt.Errorf("initialize watcher: %w", err)
 			}
 
+			watchCtx, cancel := context.WithCancel(context.Background())
 			pipeline := &ingest.Pipeline{
 				Engine:     engine,
 				Store:      st,
@@ -224,12 +241,15 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 				ArchiveDir: archive,
 			}
 
-			bgCtx := context.Background()
-			if err := watcher.Start(bgCtx); err != nil {
+			if err := watcher.Start(watchCtx); err != nil {
+				cancel()
 				watcher.Close()
+				activeWatchers.Delete(dir)
 				return nil, fmt.Errorf("start watcher: %w", err)
 			}
-			go ingest.StartWorker(bgCtx, pipeline)
+			go ingest.StartWorker(watchCtx, pipeline)
+
+			activeWatchers.Store(dir, &watcherEntry{cancel: cancel, watcher: watcher})
 
 			data, err := json.Marshal(map[string]any{
 				"status":  "success",
@@ -237,6 +257,50 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 			})
 			if err != nil {
 				return nil, fmt.Errorf("marshal start_watch result: %w", err)
+			}
+			return string(data), nil
+		},
+	})
+
+	server.RegisterTool(&mcpserver.Tool{
+		Name:        "stop_watch",
+		Description: "Stop watching a directory that was previously started with start_watch.",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"directory": {"type": "string", "description": "Absolute path to the directory to stop watching"}
+			},
+			"required": ["directory"]
+		}`),
+		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
+			var args struct {
+				Directory string `json:"directory"`
+			}
+			if err := json.Unmarshal(input, &args); err != nil {
+				return nil, fmt.Errorf("invalid arguments: %w", err)
+			}
+
+			dir, err := filepath.Abs(args.Directory)
+			if err != nil {
+				return nil, fmt.Errorf("invalid directory path: %w", err)
+			}
+
+			entry, loaded := activeWatchers.LoadAndDelete(dir)
+			if !loaded {
+				return nil, fmt.Errorf("directory %s is not being watched", dir)
+			}
+
+			if w := entry.(*watcherEntry); w != nil {
+				w.cancel()
+				w.watcher.Close()
+			}
+
+			data, err := json.Marshal(map[string]any{
+				"status":  "success",
+				"message": fmt.Sprintf("stopped watching directory %s", dir),
+			})
+			if err != nil {
+				return nil, fmt.Errorf("marshal stop_watch result: %w", err)
 			}
 			return string(data), nil
 		},
@@ -334,5 +398,18 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 			}
 			return string(data), nil
 		},
+	})
+}
+
+// StopAllWatchers cancels all active watchers and closes their resources.
+// Call this during MCP server shutdown to prevent goroutine leaks.
+func StopAllWatchers() {
+	activeWatchers.Range(func(key, value any) bool {
+		if entry, ok := value.(*watcherEntry); ok && entry != nil {
+			entry.cancel()
+			entry.watcher.Close()
+		}
+		activeWatchers.Delete(key)
+		return true
 	})
 }
