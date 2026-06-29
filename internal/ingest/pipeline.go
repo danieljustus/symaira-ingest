@@ -88,13 +88,13 @@ func (p *Pipeline) Ingest(ctx context.Context, source string) (*Result, error) {
 
 	// Enqueue the job
 	var enqueueErr error
-	_, enqueueErr = p.Store.EnqueueJob(ctx, doc.ID, string(kind))
+	enqueued, enqueueErr := p.Store.EnqueueJob(ctx, doc.ID, string(kind))
 	if enqueueErr != nil {
 		return nil, fmt.Errorf("enqueue job: %w", enqueueErr)
 	}
 
-	// Claim the job immediately for synchronous processing
-	claimed, err := p.Store.ClaimJob(ctx)
+	// Claim the exact job we just enqueued to avoid racing with background workers
+	claimed, err := p.Store.ClaimJobByID(ctx, enqueued.ID)
 	if err != nil {
 		return nil, fmt.Errorf("claim job: %w", err)
 	}
