@@ -256,7 +256,7 @@ func atomicCopy(src, dst string) error {
 	defer srcFile.Close()
 
 	dstDir := filepath.Dir(dst)
-	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+	if err := os.MkdirAll(dstDir, 0o700); err != nil {
 		return err
 	}
 
