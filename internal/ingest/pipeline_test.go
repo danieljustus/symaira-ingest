@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/danieljustus/symaira-ingest/internal/extract"
@@ -473,5 +474,116 @@ func TestPipeline_NilOptsBackwardCompatible(t *testing.T) {
 
 	if res.Category != "invoices" {
 		t.Errorf("res.Category = %q, want invoices", res.Category)
+	}
+}
+
+func TestPipeline_ArchiveDirectoryFailure(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "docs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	vault := filepath.Join(dir, "vault")
+	eng := extract.Engine(&fakePipelineEngine{result: &extract.Result{Text: "test"}})
+
+	archiveDir := filepath.Join(dir, "archive")
+	if err := os.WriteFile(archiveDir, []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &Pipeline{
+		Engine:     eng,
+		Store:      s,
+		Writer:     &writer.NoteWriter{Vault: vault},
+		ArchiveDir: archiveDir,
+	}
+
+	path := filepath.Join(dir, "doc.txt")
+	if err := os.WriteFile(path, []byte("test content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = p.Ingest(context.Background(), path, nil)
+	if err == nil {
+		t.Fatal("expected error when archive directory is a file, got nil")
+	}
+	if !strings.Contains(err.Error(), "archive") {
+		t.Errorf("expected archive-related error, got: %v", err)
+	}
+}
+
+func TestPipeline_AtomicCopySourceReadError(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "docs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	vault := filepath.Join(dir, "vault")
+	eng := extract.Engine(&fakePipelineEngine{result: &extract.Result{Text: "test"}})
+	p := &Pipeline{
+		Engine:     eng,
+		Store:      s,
+		Writer:     &writer.NoteWriter{Vault: vault},
+		ArchiveDir: filepath.Join(dir, "archive"),
+	}
+
+	path := filepath.Join(dir, "doc.txt")
+	if err := os.WriteFile(path, []byte("test content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(path, 0o644)
+
+	_, err = p.Ingest(context.Background(), path, nil)
+	if err == nil {
+		t.Fatal("expected error when source file is unreadable, got nil")
+	}
+}
+
+func TestPipeline_ClassificationRuleLoadingError(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "docs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	vault := filepath.Join(dir, "vault")
+	eng := extract.Engine(&fakePipelineEngine{result: &extract.Result{Text: "test"}})
+	p := &Pipeline{
+		Engine:     eng,
+		Store:      s,
+		Writer:     &writer.NoteWriter{Vault: vault},
+		ArchiveDir: filepath.Join(dir, "archive"),
+	}
+
+	path := filepath.Join(dir, "doc.txt")
+	if err := os.WriteFile(path, []byte("test content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s.Close()
+
+	s2, err := store.Open(filepath.Join(dir, "docs2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+
+	p.Store = s2
+
+	res, err := p.Ingest(context.Background(), path, nil)
+	if err != nil {
+		t.Fatalf("Ingest should succeed even with classification error: %v", err)
+	}
+	if res == nil {
+		t.Fatal("expected non-nil result")
 	}
 }
