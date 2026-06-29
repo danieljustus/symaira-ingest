@@ -256,6 +256,51 @@ func (s *Store) EnqueueSkippedJob(ctx context.Context, docID int64, kind string,
 	}, nil
 }
 
+// ClaimJobByID atomically claims a specific job by ID and marks it as running.
+// This eliminates the race condition when the synchronous ingest path needs to
+// claim the exact job it just enqueued, instead of grabbing whichever pending
+// job has the oldest created_at.
+func (s *Store) ClaimJobByID(ctx context.Context, jobID int64) (*Job, error) {
+	var job Job
+	var lastErr sql.NullString
+	query := `
+		UPDATE jobs
+		SET status = 'running',
+			attempts = attempts + 1,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+		  AND (status = 'pending'
+		       OR (status = 'failed' AND attempts < 3 AND updated_at <= datetime('now', '-10 seconds')))
+		RETURNING id, document_id, kind, status, attempts, last_error, created_at, updated_at
+	`
+	err := s.db.QueryRowContext(ctx, query, jobID).Scan(
+		&job.ID,
+		&job.DocumentID,
+		&job.Kind,
+		&job.Status,
+		&job.Attempts,
+		&lastErr,
+		&job.CreatedAt,
+		&job.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("claim job by id: %w", err)
+	}
+	if lastErr.Valid {
+		job.LastError = &lastErr.String
+	}
+
+	doc, err := s.ByID(ctx, job.DocumentID)
+	if err != nil {
+		return nil, fmt.Errorf("get document for claimed job: %w", err)
+	}
+	job.SourcePath = doc.SourcePath
+	return &job, nil
+}
+
 // ClaimJob atomically finds a job to claim and marks it as running.
 func (s *Store) ClaimJob(ctx context.Context) (*Job, error) {
 	var job Job

@@ -253,6 +253,70 @@ func TestStore_JobsQueue(t *testing.T) {
 	}
 }
 
+func TestStore_ClaimJobByID(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+
+	d1, _, err := s.CreateOrGet(ctx, "/tmp/doc1.txt", "hash1", "text/plain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d2, _, err := s.CreateOrGet(ctx, "/tmp/doc2.txt", "hash2", "text/plain")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	job1, err := s.EnqueueJob(ctx, d1.ID, "text")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job2, err := s.EnqueueJob(ctx, d2.ID, "text")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	claimed, err := s.ClaimJobByID(ctx, job2.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed == nil || claimed.ID != job2.ID {
+		t.Fatalf("expected to claim job2, got %+v", claimed)
+	}
+	if claimed.Status != "running" || claimed.Attempts != 1 {
+		t.Fatalf("unexpected state: status=%s attempts=%d", claimed.Status, claimed.Attempts)
+	}
+
+	other, err := s.ClaimJobByID(ctx, job1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other == nil || other.ID != job1.ID {
+		t.Fatalf("expected to claim job1, got %+v", other)
+	}
+
+	claimedAgain, err := s.ClaimJobByID(ctx, job2.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimedAgain != nil {
+		t.Fatalf("expected nil when re-claiming running job, got %+v", claimedAgain)
+	}
+
+	nonexistent, err := s.ClaimJobByID(ctx, 99999)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nonexistent != nil {
+		t.Fatalf("expected nil for nonexistent job, got %+v", nonexistent)
+	}
+}
+
 func TestStore_Rules(t *testing.T) {
 	dir := t.TempDir()
 	s, err := Open(filepath.Join(dir, "test.db"))
