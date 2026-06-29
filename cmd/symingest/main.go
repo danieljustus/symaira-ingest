@@ -87,10 +87,10 @@ Commands:
 
 func runIngest(args []string) error {
 	fs := flag.NewFlagSet("ingest", flag.ContinueOnError)
-	ocrLang := fs.String("ocr-lang", "", "Tesseract language override")
-	vaultFlag := fs.String("vault", "", "Target vault directory")
-	archiveFlag := fs.String("archive", "", "Target archive directory")
-	dbFlag := fs.String("db", "", "SQLite database path")
+	cfg, err := resolveConfig(fs)
+	if err != nil {
+		return err
+	}
 	if err := fs.Parse(args); err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
 			"invalid ingest flags")
@@ -109,44 +109,9 @@ Ingest a single file into the configured vault.`)
 		return nil
 	}
 
-	cfg, err := config.Load()
-	if err != nil {
-		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
-			"failed to load configuration")
-	}
-
-	if *ocrLang == "" {
-		*ocrLang = cfg.OCRLang
-	}
-	if *ocrLang == "" {
-		*ocrLang = "eng"
-	}
-	if *vaultFlag == "" {
-		*vaultFlag = cfg.Vault
-	}
-	if *vaultFlag == "" {
+	if cfg.vault == "" {
 		return exitcodes.Wrapf(nil, exitcodes.ExitConfig, exitcodes.KindConfig,
 			"no vault configured; use --vault, SYMINGEST_VAULT env, or set vault in ~/.config/symingest/config.toml")
-	}
-	if *archiveFlag == "" {
-		*archiveFlag = cfg.ArchivePath
-	}
-	if *archiveFlag == "" {
-		path, err := defaultArchivePath()
-		if err != nil {
-			return err
-		}
-		*archiveFlag = path
-	}
-	if *dbFlag == "" {
-		*dbFlag = cfg.DBPath
-	}
-	if *dbFlag == "" {
-		path, err := defaultDBPath()
-		if err != nil {
-			return err
-		}
-		*dbFlag = path
 	}
 
 	source, err := filepath.Abs(remaining[0])
@@ -155,19 +120,19 @@ Ingest a single file into the configured vault.`)
 			"invalid source path")
 	}
 
-	st, err := store.Open(*dbFlag)
+	st, err := store.Open(cfg.db)
 	if err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
 			"failed to open document store")
 	}
 	defer st.Close()
 
-	engine := ocr.DefaultRunner(*ocrLang)
+	engine := ocr.DefaultRunner(cfg.ocrLang)
 	pipeline := &ingest.Pipeline{
 		Engine:     engine,
 		Store:      st,
-		Writer:     &writer.NoteWriter{Vault: *vaultFlag},
-		ArchiveDir: *archiveFlag,
+		Writer:     &writer.NoteWriter{Vault: cfg.vault},
+		ArchiveDir: cfg.archive,
 	}
 
 	ctx := context.Background()
@@ -215,20 +180,22 @@ func defaultArchivePath() (string, error) {
 	return filepath.Join(home, ".local", "share", "symingest", "archive"), nil
 }
 
-func runMCP(args []string) error {
-	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
+type resolvedConfig struct {
+	vault   string
+	archive string
+	db      string
+	ocrLang string
+}
+
+func resolveConfig(fs *flag.FlagSet) (*resolvedConfig, error) {
 	ocrLang := fs.String("ocr-lang", "", "Tesseract language override")
 	vaultFlag := fs.String("vault", "", "Target vault directory")
 	archiveFlag := fs.String("archive", "", "Target archive directory")
 	dbFlag := fs.String("db", "", "SQLite database path")
-	if err := fs.Parse(args); err != nil {
-		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
-			"invalid mcp flags")
-	}
 
 	cfg, err := config.Load()
 	if err != nil {
-		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
+		return nil, exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
 			"failed to load configuration")
 	}
 
@@ -247,7 +214,7 @@ func runMCP(args []string) error {
 	if *archiveFlag == "" {
 		path, err := defaultArchivePath()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		*archiveFlag = path
 	}
@@ -257,21 +224,40 @@ func runMCP(args []string) error {
 	if *dbFlag == "" {
 		path, err := defaultDBPath()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		*dbFlag = path
 	}
 
-	st, err := store.Open(*dbFlag)
+	return &resolvedConfig{
+		vault:   *vaultFlag,
+		archive: *archiveFlag,
+		db:      *dbFlag,
+		ocrLang: *ocrLang,
+	}, nil
+}
+
+func runMCP(args []string) error {
+	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	cfg, err := resolveConfig(fs)
+	if err != nil {
+		return err
+	}
+	if err := fs.Parse(args); err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
+			"invalid mcp flags")
+	}
+
+	st, err := store.Open(cfg.db)
 	if err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
 			"failed to open document store")
 	}
 	defer st.Close()
 
-	engine := ocr.DefaultRunner(*ocrLang)
+	engine := ocr.DefaultRunner(cfg.ocrLang)
 	server := mcpserver.New("symingest", version.Version)
-	mcp.Register(server, st, engine, *vaultFlag, *archiveFlag)
+	mcp.Register(server, st, engine, cfg.vault, cfg.archive)
 
 	ctx := context.Background()
 	if err := server.ServeStdio(ctx); err != nil {
@@ -283,10 +269,10 @@ func runMCP(args []string) error {
 
 func runWatch(args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
-	ocrLang := fs.String("ocr-lang", "", "Tesseract language override")
-	vaultFlag := fs.String("vault", "", "Target vault directory")
-	archiveFlag := fs.String("archive", "", "Target archive directory")
-	dbFlag := fs.String("db", "", "SQLite database path")
+	cfg, err := resolveConfig(fs)
+	if err != nil {
+		return err
+	}
 	if err := fs.Parse(args); err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
 			"invalid watch flags")
@@ -305,44 +291,9 @@ Watch a directory for new or modified files and ingest them in the background.`)
 		return nil
 	}
 
-	cfg, err := config.Load()
-	if err != nil {
-		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
-			"failed to load configuration")
-	}
-
-	if *ocrLang == "" {
-		*ocrLang = cfg.OCRLang
-	}
-	if *ocrLang == "" {
-		*ocrLang = "eng"
-	}
-	if *vaultFlag == "" {
-		*vaultFlag = cfg.Vault
-	}
-	if *vaultFlag == "" {
+	if cfg.vault == "" {
 		return exitcodes.Wrapf(nil, exitcodes.ExitConfig, exitcodes.KindConfig,
 			"no vault configured; use --vault, SYMINGEST_VAULT env, or set vault in ~/.config/symingest/config.toml")
-	}
-	if *archiveFlag == "" {
-		*archiveFlag = cfg.ArchivePath
-	}
-	if *archiveFlag == "" {
-		path, err := defaultArchivePath()
-		if err != nil {
-			return err
-		}
-		*archiveFlag = path
-	}
-	if *dbFlag == "" {
-		*dbFlag = cfg.DBPath
-	}
-	if *dbFlag == "" {
-		path, err := defaultDBPath()
-		if err != nil {
-			return err
-		}
-		*dbFlag = path
 	}
 
 	inboxDir, err := filepath.Abs(remaining[0])
@@ -351,7 +302,7 @@ Watch a directory for new or modified files and ingest them in the background.`)
 			"invalid inbox directory path")
 	}
 
-	st, err := store.Open(*dbFlag)
+	st, err := store.Open(cfg.db)
 	if err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
 			"failed to open document store")
@@ -374,12 +325,12 @@ Watch a directory for new or modified files and ingest them in the background.`)
 	}
 	defer watcher.Close()
 
-	engine := ocr.DefaultRunner(*ocrLang)
+	engine := ocr.DefaultRunner(cfg.ocrLang)
 	pipeline := &ingest.Pipeline{
 		Engine:     engine,
 		Store:      st,
-		Writer:     &writer.NoteWriter{Vault: *vaultFlag},
-		ArchiveDir: *archiveFlag,
+		Writer:     &writer.NoteWriter{Vault: cfg.vault},
+		ArchiveDir: cfg.archive,
 	}
 
 	if err := watcher.Start(ctx); err != nil {
@@ -390,9 +341,9 @@ Watch a directory for new or modified files and ingest them in the background.`)
 	go ingest.StartWorker(ctx, pipeline)
 
 	log.Printf("Watching directory: %s", inboxDir)
-	log.Printf("Vault directory:    %s", *vaultFlag)
-	log.Printf("Archive directory:  %s", *archiveFlag)
-	log.Printf("Database:           %s", *dbFlag)
+	log.Printf("Vault directory:    %s", cfg.vault)
+	log.Printf("Archive directory:  %s", cfg.archive)
+	log.Printf("Database:           %s", cfg.db)
 	log.Println("Press Ctrl+C to stop.")
 
 	<-ctx.Done()
@@ -403,30 +354,16 @@ Watch a directory for new or modified files and ingest them in the background.`)
 func runJobs(args []string) error {
 	fs := flag.NewFlagSet("jobs", flag.ContinueOnError)
 	jsonFlag := fs.Bool("json", false, "Output jobs in JSON format")
-	dbFlag := fs.String("db", "", "SQLite database path")
+	cfg, err := resolveConfig(fs)
+	if err != nil {
+		return err
+	}
 	if err := fs.Parse(args); err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
 			"invalid jobs flags")
 	}
 
-	cfg, err := config.Load()
-	if err != nil {
-		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
-			"failed to load configuration")
-	}
-
-	if *dbFlag == "" {
-		*dbFlag = cfg.DBPath
-	}
-	if *dbFlag == "" {
-		path, err := defaultDBPath()
-		if err != nil {
-			return err
-		}
-		*dbFlag = path
-	}
-
-	st, err := store.Open(*dbFlag)
+	st, err := store.Open(cfg.db)
 	if err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
 			"failed to open document store")
@@ -472,7 +409,10 @@ func runJobs(args []string) error {
 
 func runRetry(args []string) error {
 	fs := flag.NewFlagSet("retry", flag.ContinueOnError)
-	dbFlag := fs.String("db", "", "SQLite database path")
+	cfg, err := resolveConfig(fs)
+	if err != nil {
+		return err
+	}
 	if err := fs.Parse(args); err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
 			"invalid retry flags")
@@ -492,24 +432,7 @@ Retry a failed job by resetting its status to pending.`)
 			"invalid job ID %q; must be an integer", jobIDStr)
 	}
 
-	cfg, err := config.Load()
-	if err != nil {
-		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
-			"failed to load configuration")
-	}
-
-	if *dbFlag == "" {
-		*dbFlag = cfg.DBPath
-	}
-	if *dbFlag == "" {
-		path, err := defaultDBPath()
-		if err != nil {
-			return err
-		}
-		*dbFlag = path
-	}
-
-	st, err := store.Open(*dbFlag)
+	st, err := store.Open(cfg.db)
 	if err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
 			"failed to open document store")
@@ -528,7 +451,10 @@ Retry a failed job by resetting its status to pending.`)
 
 func runRules(args []string) error {
 	fs := flag.NewFlagSet("rules", flag.ContinueOnError)
-	dbFlag := fs.String("db", "", "SQLite database path")
+	cfg, err := resolveConfig(fs)
+	if err != nil {
+		return err
+	}
 	if err := fs.Parse(args); err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
 			"invalid rules flags")
@@ -539,24 +465,7 @@ func runRules(args []string) error {
 		return printRulesUsage()
 	}
 
-	cfg, err := config.Load()
-	if err != nil {
-		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
-			"failed to load configuration")
-	}
-
-	if *dbFlag == "" {
-		*dbFlag = cfg.DBPath
-	}
-	if *dbFlag == "" {
-		path, err := defaultDBPath()
-		if err != nil {
-			return err
-		}
-		*dbFlag = path
-	}
-
-	st, err := store.Open(*dbFlag)
+	st, err := store.Open(cfg.db)
 	if err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
 			"failed to open document store")
