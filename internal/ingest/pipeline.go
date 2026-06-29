@@ -45,7 +45,8 @@ func (e *DuplicateError) Is(target error) bool {
 }
 
 // Ingest processes a single source file through the full one-shot pipeline.
-func (p *Pipeline) Ingest(ctx context.Context, source string) (*Result, error) {
+// opts may be nil; when non-nil, preset metadata overrides classification rule results.
+func (p *Pipeline) Ingest(ctx context.Context, source string, opts *IngestOptions) (*Result, error) {
 	info, err := os.Stat(source)
 	if err != nil {
 		return nil, fmt.Errorf("stat source: %w", err)
@@ -103,7 +104,7 @@ func (p *Pipeline) Ingest(ctx context.Context, source string) (*Result, error) {
 	}
 
 	// Run processJob
-	res, err := p.processJob(ctx, claimed)
+	res, err := p.processJob(ctx, claimed, opts)
 	if err != nil {
 		if failErr := p.Store.FailJob(ctx, claimed.ID, err.Error()); failErr != nil {
 			return nil, fmt.Errorf("process job failed: %v (failed to mark job as failed: %v)", err, failErr)
@@ -123,7 +124,7 @@ func (p *Pipeline) Ingest(ctx context.Context, source string) (*Result, error) {
 }
 
 // processJob performs the text extraction and writes the resulting note.
-func (p *Pipeline) processJob(ctx context.Context, job *store.Job) (*Result, error) {
+func (p *Pipeline) processJob(ctx context.Context, job *store.Job, opts *IngestOptions) (*Result, error) {
 	doc, err := p.Store.ByID(ctx, job.DocumentID)
 	if err != nil {
 		return nil, fmt.Errorf("get document: %w", err)
@@ -196,6 +197,21 @@ func (p *Pipeline) processJob(ctx context.Context, job *store.Job) (*Result, err
 					}
 				}
 			}
+		}
+	}
+
+	if opts != nil {
+		if opts.PresetCategory != "" {
+			category = opts.PresetCategory
+		}
+		if len(opts.PresetTags) > 0 {
+			tags = opts.PresetTags
+		}
+		if opts.PresetCorrespondent != "" {
+			correspondent = opts.PresetCorrespondent
+		}
+		if opts.PresetDocumentType != "" {
+			documentType = opts.PresetDocumentType
 		}
 	}
 

@@ -47,7 +47,7 @@ func StartWorker(ctx context.Context, p *Pipeline) {
 				job.ID, job.SourcePath, job.Kind, job.Attempts)
 
 			// Process the job
-			res, err := p.processJob(ctx, job)
+			res, err := p.processJob(ctx, job, nil)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "[Worker] Job %d failed: %v\n", job.ID, err)
 				if failErr := p.Store.FailJob(ctx, job.ID, err.Error()); failErr != nil {

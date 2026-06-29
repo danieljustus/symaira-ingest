@@ -37,15 +37,23 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 			"properties": {
 				"path": {"type": "string", "description": "Absolute or relative path to the source file"},
 				"vault_path": {"type": "string", "description": "Optional vault directory override"},
-				"archive_path": {"type": "string", "description": "Optional archive directory override"}
+				"archive_path": {"type": "string", "description": "Optional archive directory override"},
+				"category": {"type": "string", "description": "Preset category metadata (overrides classification rules)"},
+				"tags": {"type": "array", "items": {"type": "string"}, "description": "Preset tags (overrides classification rules)"},
+				"correspondent": {"type": "string", "description": "Preset correspondent metadata (overrides classification rules)"},
+				"document_type": {"type": "string", "description": "Preset document type metadata (overrides classification rules)"}
 			},
 			"required": ["path"]
 		}`),
 		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
 			var args struct {
-				Path        string `json:"path"`
-				VaultPath   string `json:"vault_path"`
-				ArchivePath string `json:"archive_path"`
+				Path        string   `json:"path"`
+				VaultPath   string   `json:"vault_path"`
+				ArchivePath string   `json:"archive_path"`
+				Category    string   `json:"category"`
+				Tags        []string `json:"tags"`
+				Correspondent string `json:"correspondent"`
+				DocumentType  string `json:"document_type"`
 			}
 			if err := json.Unmarshal(input, &args); err != nil {
 				return nil, fmt.Errorf("invalid arguments: %w", err)
@@ -82,7 +90,17 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 				ArchiveDir: archive,
 			}
 
-			res, err := pipeline.Ingest(ctx, source)
+			var opts *ingest.IngestOptions
+			if args.Category != "" || len(args.Tags) > 0 || args.Correspondent != "" || args.DocumentType != "" {
+				opts = &ingest.IngestOptions{
+					PresetCategory:      args.Category,
+					PresetTags:          args.Tags,
+					PresetCorrespondent: args.Correspondent,
+					PresetDocumentType:  args.DocumentType,
+				}
+			}
+
+			res, err := pipeline.Ingest(ctx, source, opts)
 			if errors.Is(err, ingest.ErrDuplicate) {
 				var vPath, aPath string
 				if dupErr, ok := err.(*ingest.DuplicateError); ok {
