@@ -151,3 +151,17 @@ func (c *Client) ListDocumentTypes() ([]DocumentType, error) {
 	}
 	return all, nil
 }
+
+func (c *Client) ListStoragePaths() ([]StoragePath, error) {
+	var all []StoragePath
+	url := c.baseURL + "/api/storage_paths/?format=json"
+	for url != "" {
+		var page listResponse[StoragePath]
+		if err := c.doRequest(url, &page); err != nil {
+			return nil, err
+		}
+		all = append(all, page.Results...)
+		url = page.Next
+	}
+	return all, nil
+}

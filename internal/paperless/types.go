@@ -120,6 +120,12 @@ type DocumentType struct {
 	Slug string `json:"slug"`
 }
 
+type StoragePath struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+	Slug string `json:"slug"`
+}
+
 type listResponse[T any] struct {
 	Count   int    `json:"count"`
 	Results []T    `json:"results"`

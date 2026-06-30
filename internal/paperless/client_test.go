@@ -172,6 +172,26 @@ func TestListDocumentTypes(t *testing.T) {
 	}
 }
 
+func TestListStoragePaths(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/storage_paths/", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(listResponse[StoragePath]{
+			Results: []StoragePath{{ID: 11, Name: "Finance/Invoices"}},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "test-token")
+	paths, err := c.ListStoragePaths()
+	if err != nil {
+		t.Fatalf("ListStoragePaths: %v", err)
+	}
+	if len(paths) != 1 || paths[0].Name != "Finance/Invoices" {
+		t.Errorf("paths = %+v, want [{ID:11 Name:Finance/Invoices}]", paths)
+	}
+}
+
 func TestListDocuments_RealAPIShape(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/documents/", func(w http.ResponseWriter, r *http.Request) {
