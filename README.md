@@ -34,6 +34,36 @@ go install github.com/danieljustus/symaira-ingest/cmd/symingest@latest
 symingest ingest /path/to/document.pdf
 ```
 
+```text
+$ symingest ingest -vault ~/vault -db ~/.local/share/symingest/jobs.db invoice.txt
+ingested: invoice.txt
+engine: text
+text length: 71
+```
+
+The resulting note in your vault carries YAML frontmatter plus the extracted text:
+
+```text
+---
+source_path: invoice.txt
+ingested_at: 2026-06-30T22:24:49.542837Z
+sha256: 39f4280386fd5df04e0e06d7d7fa1c5a2aaaa54b643e92ae9c859c0c6f1117d6
+mime: text/plain
+tags: []
+category: ""
+ocr_engine: text
+archive_path: ~/.local/share/symingest/archive/39f4280386fd5df04e0e06d7d7fa1c5a2aaaa54b643e92ae9c859c0c6f1117d6.txt
+---
+
+INVOICE #4471
+Acme Hardware Supply
+Date: 2026-03-12
+Total Due: $284.50
+
+---
+[Archived Original](file:///.../archive/39f4280386fd5df04e0e06d7d7fa1c5a2aaaa54b643e92ae9c859c0c6f1117d6.txt)
+```
+
 **Watch a directory for new files:**
 
 ```bash
