@@ -418,6 +418,98 @@ func TestRun_PreservesPaperlessMetadata(t *testing.T) {
 	}
 }
 
+func TestRun_ResumesAfterPartialFailure(t *testing.T) {
+	var failDownload bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/documents/":
+			json.NewEncoder(w).Encode(map[string]any{
+				"count": 2,
+				"results": []map[string]any{
+					{"id": 1, "title": "Good Doc", "created_date": "2026-01-15", "file_type": ".txt"},
+					{"id": 2, "title": "Bad Doc", "created_date": "2026-01-16", "file_type": ".txt"},
+				},
+				"next": nil,
+			})
+		case "/api/documents/1/download/":
+			w.Write([]byte("good content"))
+		case "/api/documents/2/download/":
+			if failDownload {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			w.Write([]byte("recovered content"))
+		case "/api/tags/", "/api/correspondents/", "/api/document_types/", "/api/storage_paths/":
+			json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []any{}, "next": nil})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	pipeline := &ingest.Pipeline{
+		Engine:     fakeEngine{},
+		Store:      s,
+		Writer:     &writer.NoteWriter{Vault: filepath.Join(dir, "vault")},
+		ArchiveDir: filepath.Join(dir, "archive"),
+	}
+
+	// First run: document 2's download fails.
+	failDownload = true
+	stats, err := Run(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, pipeline)
+	if err != nil {
+		t.Fatalf("Run (first): %v", err)
+	}
+	if stats.Imported != 1 || stats.Failed != 1 {
+		t.Fatalf("first run: imported=%d failed=%d, want imported=1 failed=1", stats.Imported, stats.Failed)
+	}
+
+	status, found, err := s.PaperlessImportStatus(context.Background(), srv.URL, 2)
+	if err != nil {
+		t.Fatalf("PaperlessImportStatus: %v", err)
+	}
+	if !found || status != "failed" {
+		t.Fatalf("document 2 status = %q, found = %v, want failed/true", status, found)
+	}
+
+	// Second run: download succeeds. Document 1 must not be re-downloaded
+	// or duplicated; only document 2 should be retried.
+	failDownload = false
+	stats, err = Run(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, pipeline)
+	if err != nil {
+		t.Fatalf("Run (second): %v", err)
+	}
+	if stats.Imported != 1 {
+		t.Errorf("second run: imported = %d, want 1 (only the retried document)", stats.Imported)
+	}
+	if stats.Skipped != 1 {
+		t.Errorf("second run: skipped = %d, want 1 (already-imported document 1)", stats.Skipped)
+	}
+	if stats.Failed != 0 {
+		t.Errorf("second run: failed = %d, want 0", stats.Failed)
+	}
+
+	matches, _ := filepath.Glob(filepath.Join(dir, "vault") + "/*.md")
+	if len(matches) != 2 {
+		t.Fatalf("expected 2 notes total after resume, got %d", len(matches))
+	}
+
+	status, found, err = s.PaperlessImportStatus(context.Background(), srv.URL, 2)
+	if err != nil {
+		t.Fatalf("PaperlessImportStatus: %v", err)
+	}
+	if !found || status != "imported" {
+		t.Fatalf("document 2 status after retry = %q, found = %v, want imported/true", status, found)
+	}
+}
+
 func TestRun_SinceFilter(t *testing.T) {
 	var requestedURL string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

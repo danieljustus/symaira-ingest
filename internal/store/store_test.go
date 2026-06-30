@@ -383,3 +383,88 @@ func TestStore_Rules(t *testing.T) {
 	}
 }
 
+func TestPaperlessImportState_UpsertAndStatus(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+
+	const baseURL = "https://paperless.local"
+
+	// No status recorded yet.
+	_, found, err := s.PaperlessImportStatus(ctx, baseURL, 1)
+	if err != nil {
+		t.Fatalf("PaperlessImportStatus: %v", err)
+	}
+	if found {
+		t.Fatal("expected found=false before any upsert")
+	}
+
+	// Record a failure.
+	if err := s.UpsertPaperlessImportState(ctx, baseURL, 1, "failed", "download timeout"); err != nil {
+		t.Fatalf("UpsertPaperlessImportState: %v", err)
+	}
+	status, found, err := s.PaperlessImportStatus(ctx, baseURL, 1)
+	if err != nil {
+		t.Fatalf("PaperlessImportStatus: %v", err)
+	}
+	if !found || status != "failed" {
+		t.Fatalf("status = %q, found = %v, want failed/true", status, found)
+	}
+
+	// A retry overwrites the previous status (resumability).
+	if err := s.UpsertPaperlessImportState(ctx, baseURL, 1, "imported", ""); err != nil {
+		t.Fatalf("UpsertPaperlessImportState retry: %v", err)
+	}
+	status, found, err = s.PaperlessImportStatus(ctx, baseURL, 1)
+	if err != nil {
+		t.Fatalf("PaperlessImportStatus: %v", err)
+	}
+	if !found || status != "imported" {
+		t.Fatalf("status = %q, found = %v, want imported/true", status, found)
+	}
+
+	// A different base URL is tracked independently.
+	if err := s.UpsertPaperlessImportState(ctx, "https://other.local", 1, "failed", "auth error"); err != nil {
+		t.Fatalf("UpsertPaperlessImportState other base: %v", err)
+	}
+	status, _, err = s.PaperlessImportStatus(ctx, baseURL, 1)
+	if err != nil {
+		t.Fatalf("PaperlessImportStatus: %v", err)
+	}
+	if status != "imported" {
+		t.Fatalf("status for original base URL changed unexpectedly: %q", status)
+	}
+
+	if err := s.UpsertPaperlessImportState(ctx, baseURL, 2, "failed", "ocr error"); err != nil {
+		t.Fatalf("UpsertPaperlessImportState doc 2: %v", err)
+	}
+
+	// Invalid status is rejected.
+	if err := s.UpsertPaperlessImportState(ctx, baseURL, 3, "bogus", ""); err == nil {
+		t.Fatal("expected error for invalid status")
+	}
+
+	all, err := s.ListPaperlessImportState(ctx, baseURL, "")
+	if err != nil {
+		t.Fatalf("ListPaperlessImportState: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("expected 2 states for %s, got %d", baseURL, len(all))
+	}
+	if all[0].PaperlessDocumentID != 1 || all[1].PaperlessDocumentID != 2 {
+		t.Fatalf("expected ordering by document ID, got %+v", all)
+	}
+
+	failedOnly, err := s.ListPaperlessImportState(ctx, baseURL, "failed")
+	if err != nil {
+		t.Fatalf("ListPaperlessImportState filtered: %v", err)
+	}
+	if len(failedOnly) != 1 || failedOnly[0].PaperlessDocumentID != 2 || failedOnly[0].LastError != "ocr error" {
+		t.Fatalf("expected only document 2 with failed status, got %+v", failedOnly)
+	}
+}
+

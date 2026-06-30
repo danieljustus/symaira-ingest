@@ -133,12 +133,24 @@ func Run(ctx context.Context, opts Options, pipeline *ingest.Pipeline) (*Stats, 
 	for i, doc := range docs {
 		fmt.Fprintf(os.Stderr, "[%d/%d] %s\n", i+1, stats.Total, doc.Title)
 
+		if status, found, serr := pipeline.Store.PaperlessImportStatus(ctx, opts.BaseURL, doc.ID); serr == nil && found && status == "imported" {
+			fmt.Fprintf(os.Stderr, "  skipped (already imported in a previous run)\n")
+			stats.Skipped++
+			continue
+		}
+
 		warnings, err := importOne(ctx, client, doc, lu, pipeline)
 		stats.Warnings = append(stats.Warnings, warnings...)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  failed: %v\n", err)
 			stats.Failed++
+			if serr := pipeline.Store.UpsertPaperlessImportState(ctx, opts.BaseURL, doc.ID, "failed", err.Error()); serr != nil {
+				stats.Warnings = append(stats.Warnings, fmt.Sprintf("document %d: record import state: %v", doc.ID, serr))
+			}
 			continue
+		}
+		if serr := pipeline.Store.UpsertPaperlessImportState(ctx, opts.BaseURL, doc.ID, "imported", ""); serr != nil {
+			stats.Warnings = append(stats.Warnings, fmt.Sprintf("document %d: record import state: %v", doc.ID, serr))
 		}
 		stats.Imported++
 	}
