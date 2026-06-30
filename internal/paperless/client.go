@@ -78,6 +78,12 @@ func (c *Client) ListDocuments(since time.Time, filters ...string) ([]Document, 
 	return all, nil
 }
 
+// DocumentURL returns the Paperless-ngx web UI link for a document, for use
+// as an audit backlink to the original record.
+func (c *Client) DocumentURL(id int) string {
+	return c.baseURL + "/documents/" + strconv.Itoa(id)
+}
+
 func (c *Client) GetDocument(id int) (*Document, error) {
 	url := c.baseURL + "/api/documents/" + strconv.Itoa(id) + "/?format=json"
 	var doc Document

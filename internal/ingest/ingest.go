@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/danieljustus/symaira-ingest/internal/extract"
+	"github.com/danieljustus/symaira-ingest/internal/writer"
 )
 
 // IngestOptions holds optional preset metadata that overrides classification rule results.
@@ -15,6 +16,9 @@ type IngestOptions struct {
 	PresetTags          []string
 	PresetCorrespondent string
 	PresetDocumentType  string
+	// Paperless carries traceability metadata when the source originates
+	// from a Paperless-ngx migration. Nil for ordinary ingests.
+	Paperless *writer.PaperlessMeta
 }
 
 // Result is the outcome of a one-shot ingest.

@@ -13,16 +13,34 @@ import (
 )
 
 type Note struct {
-	SourcePath    string    `yaml:"source_path"`
-	IngestedAt    time.Time `yaml:"ingested_at"`
-	SHA256        string    `yaml:"sha256"`
-	MIME          string    `yaml:"mime"`
-	Tags          []string  `yaml:"tags"`
-	Category      string    `yaml:"category"`
-	Correspondent string    `yaml:"correspondent,omitempty"`
-	DocumentType  string    `yaml:"document_type,omitempty"`
-	OCREngine     string    `yaml:"ocr_engine,omitempty"`
-	ArchivePath   string    `yaml:"archive_path"`
+	SourcePath    string         `yaml:"source_path"`
+	IngestedAt    time.Time      `yaml:"ingested_at"`
+	SHA256        string         `yaml:"sha256"`
+	MIME          string         `yaml:"mime"`
+	Tags          []string       `yaml:"tags"`
+	Category      string         `yaml:"category"`
+	Correspondent string         `yaml:"correspondent,omitempty"`
+	DocumentType  string         `yaml:"document_type,omitempty"`
+	OCREngine     string         `yaml:"ocr_engine,omitempty"`
+	ArchivePath   string         `yaml:"archive_path"`
+	Paperless     *PaperlessMeta `yaml:"paperless,omitempty"`
+}
+
+// PaperlessMeta carries traceability metadata from a migrated Paperless-ngx
+// document so a generated note can be traced back to the original record and
+// migration completeness can be audited. Fields are omitted individually
+// when Paperless did not provide them.
+type PaperlessMeta struct {
+	DocumentID       int       `yaml:"document_id"`
+	Title            string    `yaml:"title,omitempty"`
+	Created          time.Time `yaml:"created,omitempty"`
+	Added            time.Time `yaml:"added,omitempty"`
+	Modified         time.Time `yaml:"modified,omitempty"`
+	StoragePath      string    `yaml:"storage_path,omitempty"`
+	OriginalFileName string    `yaml:"original_file_name,omitempty"`
+	ArchivedFileName string    `yaml:"archived_file_name,omitempty"`
+	PageCount        int       `yaml:"page_count,omitempty"`
+	URL              string    `yaml:"url,omitempty"`
 }
 
 // NoteWriter writes deduplicated Markdown sidecars into a vault.
@@ -38,7 +56,7 @@ func SidecarPath(vault, source string) string {
 // WriteNote writes a Markdown note with YAML frontmatter atomically.
 // It returns the vault path and any error. A write failure must not leave
 // a partially written file behind.
-func (w *NoteWriter) WriteNote(sourcePath, sha256, mime, ocrEngine, text, archivePath string, ingestedAt time.Time, category string, tags []string, correspondent, documentType string) (string, error) {
+func (w *NoteWriter) WriteNote(sourcePath, sha256, mime, ocrEngine, text, archivePath string, ingestedAt time.Time, category string, tags []string, correspondent, documentType string, paperless *PaperlessMeta) (string, error) {
 	if err := os.MkdirAll(w.Vault, 0o755); err != nil {
 		return "", fmt.Errorf("create vault directory: %w", err)
 	}
@@ -54,6 +72,7 @@ func (w *NoteWriter) WriteNote(sourcePath, sha256, mime, ocrEngine, text, archiv
 		DocumentType:  documentType,
 		OCREngine:     ocrEngine,
 		ArchivePath:   archivePath,
+		Paperless:     paperless,
 	}
 	if meta.Tags == nil {
 		meta.Tags = []string{}
