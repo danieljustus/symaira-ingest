@@ -438,32 +438,54 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 				"base_url": {"type": "string", "description": "Paperless-ngx instance URL (or set PAPERLESS_URL env)"},
 				"token": {"type": "string", "description": "API token (or set PAPERLESS_TOKEN env)"},
 				"since": {"type": "string", "description": "Only import documents created after this date (YYYY-MM-DD)"},
-				"dry_run": {"type": "boolean", "description": "List what would be imported without writing"}
+				"dry_run": {"type": "boolean", "description": "List what would be imported without writing"},
+				"vault_path": {"type": "string", "description": "Optional vault directory override; required if no default vault is configured"},
+				"archive_path": {"type": "string", "description": "Optional archive directory override"},
+				"db_path": {"type": "string", "description": "Optional SQLite database path override, for an isolated import run that does not touch the default document store"}
 			},
 			"required": ["base_url", "token"]
 		}`),
 		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
 			var args struct {
-				BaseURL string `json:"base_url"`
-				Token   string `json:"token"`
-				Since   string `json:"since"`
-				DryRun  bool   `json:"dry_run"`
+				BaseURL     string `json:"base_url"`
+				Token       string `json:"token"`
+				Since       string `json:"since"`
+				DryRun      bool   `json:"dry_run"`
+				VaultPath   string `json:"vault_path"`
+				ArchivePath string `json:"archive_path"`
+				DBPath      string `json:"db_path"`
 			}
 			if err := json.Unmarshal(input, &args); err != nil {
 				return nil, fmt.Errorf("invalid arguments: %w", err)
 			}
 
-			vault := defaultVault
+			vault := args.VaultPath
+			if vault == "" {
+				vault = defaultVault
+			}
 			if vault == "" {
 				return nil, fmt.Errorf("no vault configured")
 			}
 
-			archive := defaultArchive
+			archive := args.ArchivePath
+			if archive == "" {
+				archive = defaultArchive
+			}
 			if archive == "" {
 				home, err := os.UserHomeDir()
 				if err == nil {
 					archive = filepath.Join(home, ".local", "share", "symingest", "archive")
 				}
+			}
+
+			pipelineStore := st
+			if args.DBPath != "" {
+				overrideStore, err := store.Open(args.DBPath)
+				if err != nil {
+					return nil, fmt.Errorf("open db_path: %w", err)
+				}
+				defer overrideStore.Close()
+				pipelineStore = overrideStore
 			}
 
 			var since time.Time
@@ -477,7 +499,7 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 
 			pipeline := &ingest.Pipeline{
 				Engine:     engine,
-				Store:      st,
+				Store:      pipelineStore,
 				Writer:     &writer.NoteWriter{Vault: vault},
 				ArchiveDir: archive,
 			}
