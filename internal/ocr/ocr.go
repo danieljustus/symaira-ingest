@@ -156,7 +156,11 @@ func (r *Runner) extractImage(ctx context.Context, path string) (*extract.Result
 	if err != nil {
 		return nil, err
 	}
-	out, err := r.runTool(ctx, r.Tesseract, "-l", lang, path, "stdout")
+	// Run tesseract with its working directory set to the image's directory
+	// and pass a relative file name. Leptonica (tesseract's image library) can
+	// fail to open an absolute path when invoked from an unrelated cwd; running
+	// from the image's own directory avoids that failure mode.
+	out, err := r.runToolInDir(ctx, filepath.Dir(path), r.Tesseract, "-l", lang, filepath.Base(path), "stdout")
 	if err != nil {
 		return nil, fmt.Errorf("tesseract failed: %w", err)
 	}
@@ -242,7 +246,15 @@ func (r *Runner) extractPDF(ctx context.Context, path string) (*extract.Result, 
 // runTool runs a command with stdout/stderr captured away from the process stdout.
 // On error the captured stderr is included.
 func (r *Runner) runTool(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return r.runToolInDir(ctx, "", name, args...)
+}
+
+// runToolInDir runs a command with its working directory set to dir (the
+// process's current directory when dir is empty), capturing stdout/stderr
+// away from the process stdout. On error the captured stderr is included.
+func (r *Runner) runToolInDir(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr

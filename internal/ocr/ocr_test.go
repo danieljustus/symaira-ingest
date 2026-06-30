@@ -91,6 +91,59 @@ func TestRunner_ExtractImage(t *testing.T) {
 	}
 }
 
+// TestRunner_ExtractImage_DifferentWorkingDirectory reproduces the Leptonica
+// failure mode observed when tesseract is invoked with an absolute image path
+// from a process working directory unrelated to the image. The fix runs
+// tesseract with its cwd set to the image's directory and a relative file
+// name; this fake tesseract rejects absolute paths to simulate that failure.
+func TestRunner_ExtractImage_DifferentWorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	tess := writeFakeBin(t, dir, "tesseract", `
+if [ "$1" = "--list-langs" ]; then
+	echo "List of available languages (1):"
+	echo "eng"
+	exit 0
+fi
+case "$3" in
+	/*) echo "Leptonica Error in findFileFormat: image file not found" >&2; exit 1;;
+esac
+echo "extracted from $3"
+`)
+
+	imgDir := filepath.Join(dir, "images")
+	if err := os.MkdirAll(imgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	img := filepath.Join(imgDir, "scan.png")
+	if err := os.WriteFile(img, []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run from a working directory unrelated to the image.
+	otherDir := t.TempDir()
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(otherDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(oldWD); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	r := &Runner{Tesseract: tess, OCRLang: "eng"}
+	res, err := r.Extract(context.Background(), img, extract.KindPNG)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if !strings.Contains(res.Text, "scan.png") {
+		t.Fatalf("text = %q, want it to contain the relative image name", res.Text)
+	}
+}
+
 func TestRunner_ExtractPDF(t *testing.T) {
 	dir := t.TempDir()
 	pdfppm := writeFakeBin(t, dir, "pdftoppm", `echo "page-1.png" > "$5-page-1.png"`)
