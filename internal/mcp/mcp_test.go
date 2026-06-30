@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -752,6 +754,162 @@ func TestRegister_Rules(t *testing.T) {
 	raw = parseToolText(t, resp)
 	if raw["status"] != "success" {
 		t.Fatalf("status = %v, want success", raw["status"])
+	}
+}
+
+// paperlessFixtureServer serves a single Paperless-ngx document fixture.
+func paperlessFixtureServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/documents/":
+			json.NewEncoder(w).Encode(map[string]any{
+				"count": 1,
+				"results": []map[string]any{
+					{"id": 1, "title": "MCP Override Doc", "created_date": "2026-01-15", "file_type": ".txt"},
+				},
+				"next": nil,
+			})
+		case "/api/documents/1/download/":
+			w.Write([]byte("mcp override test content"))
+		case "/api/tags/", "/api/correspondents/", "/api/document_types/", "/api/storage_paths/":
+			json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []any{}, "next": nil})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestRegister_ImportPaperless_NoVaultWithoutOverride(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "mcp.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	// No default vault configured for the server.
+	server := mcpserver.New("symingest", "0.1.0")
+	Register(server, st, fakeEngine{}, "", "")
+
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	defer outR.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = server.ServeIO(ctx, inR, outW) }()
+
+	writeFramed(t, inW, map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+	readResp(t, outR)
+
+	writeFramed(t, inW, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      "import_paperless",
+			"arguments": map[string]any{"base_url": "http://example.invalid", "token": "x"},
+		},
+	})
+	resp := readResp(t, outR)
+	if resp.Error != nil {
+		return
+	}
+	result, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result type = %T, want map", resp.Result)
+	}
+	content, ok := result["content"].([]any)
+	if !ok || len(content) == 0 {
+		t.Fatalf("missing content in result: %v", result)
+	}
+	first, ok := content[0].(map[string]any)
+	if !ok {
+		t.Fatalf("content[0] type = %T", content[0])
+	}
+	text, ok := first["text"].(string)
+	if !ok {
+		t.Fatalf("content text type = %T", first["text"])
+	}
+	if !strings.Contains(text, "vault") {
+		t.Fatalf("expected vault error message, got: %s", text)
+	}
+}
+
+func TestRegister_ImportPaperless_PathOverrides(t *testing.T) {
+	srv := paperlessFixtureServer(t)
+
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "mcp.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	// The MCP server itself has no default vault/archive configured, so a
+	// successful import here proves the per-call overrides are used.
+	server := mcpserver.New("symingest", "0.1.0")
+	Register(server, st, fakeEngine{}, "", "")
+
+	overrideVault := filepath.Join(dir, "override-vault")
+	overrideArchive := filepath.Join(dir, "override-archive")
+	overrideDB := filepath.Join(dir, "override.db")
+
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	defer outR.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = server.ServeIO(ctx, inR, outW) }()
+
+	writeFramed(t, inW, map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+	readResp(t, outR)
+
+	writeFramed(t, inW, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "import_paperless",
+			"arguments": map[string]any{
+				"base_url":     srv.URL,
+				"token":        "test-token",
+				"vault_path":   overrideVault,
+				"archive_path": overrideArchive,
+				"db_path":      overrideDB,
+			},
+		},
+	})
+	resp := readResp(t, outR)
+	raw := parseToolText(t, resp)
+	if raw["status"] != "success" {
+		t.Fatalf("status = %v, want success (full response: %v)", raw["status"], raw)
+	}
+	if raw["imported"] != float64(1) {
+		t.Fatalf("imported = %v, want 1", raw["imported"])
+	}
+
+	notes, err := filepath.Glob(filepath.Join(overrideVault, "*.md"))
+	if err != nil || len(notes) != 1 {
+		t.Fatalf("expected 1 note in override vault, got %v (err=%v)", notes, err)
+	}
+	archived, _ := filepath.Glob(filepath.Join(overrideArchive, "*"))
+	if len(archived) != 1 {
+		t.Fatalf("expected 1 archived file in override archive, got %v", archived)
+	}
+	if _, err := os.Stat(overrideDB); err != nil {
+		t.Fatalf("expected override db_path to be created: %v", err)
+	}
+
+	// The shared default store must remain untouched by the override.
+	defaultDocs, err := st.ListJobs(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("ListJobs on default store: %v", err)
+	}
+	if len(defaultDocs) != 0 {
+		t.Fatalf("expected the default store to stay empty, got %d jobs", len(defaultDocs))
 	}
 }
 
