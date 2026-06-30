@@ -215,6 +215,11 @@ func (p *Pipeline) processJob(ctx context.Context, job *store.Job, opts *IngestO
 		}
 	}
 
+	var paperlessMeta *writer.PaperlessMeta
+	if opts != nil {
+		paperlessMeta = opts.Paperless
+	}
+
 	vaultPath, err := p.Writer.WriteNote(
 		doc.SourcePath,
 		doc.SHA256,
@@ -227,6 +232,7 @@ func (p *Pipeline) processJob(ctx context.Context, job *store.Job, opts *IngestO
 		tags,
 		correspondent,
 		documentType,
+		paperlessMeta,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("write note: %w", err)

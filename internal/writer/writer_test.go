@@ -12,7 +12,7 @@ func TestWriteNote(t *testing.T) {
 	vault := t.TempDir()
 	source := "/tmp/scans/invoice.pdf"
 	w := &NoteWriter{Vault: vault}
-	path, err := w.WriteNote(source, "deadbeef", "application/pdf", "tesseract", "hello", "", time.Unix(0, 0).UTC(), "invoice", []string{"financial"}, "Acme Corp", "Invoice")
+	path, err := w.WriteNote(source, "deadbeef", "application/pdf", "tesseract", "hello", "", time.Unix(0, 0).UTC(), "invoice", []string{"financial"}, "Acme Corp", "Invoice", nil)
 	if err != nil {
 		t.Fatalf("WriteNote: %v", err)
 	}
@@ -35,10 +35,80 @@ func TestWriteNote(t *testing.T) {
 	}
 }
 
+func TestWriteNote_PaperlessMeta(t *testing.T) {
+	vault := t.TempDir()
+	source := "/tmp/scans/migrated-invoice.pdf"
+	w := &NoteWriter{Vault: vault}
+
+	created := time.Date(2024, 3, 1, 9, 0, 0, 0, time.UTC)
+	added := time.Date(2024, 3, 2, 10, 0, 0, 0, time.UTC)
+	modified := time.Date(2024, 3, 5, 11, 30, 0, 0, time.UTC)
+
+	pm := &PaperlessMeta{
+		DocumentID:       42,
+		Title:            "Migrated Invoice",
+		Created:          created,
+		Added:            added,
+		Modified:         modified,
+		StoragePath:      "Invoices/2024",
+		OriginalFileName: "invoice-original.pdf",
+		ArchivedFileName: "invoice-archived.pdf",
+		PageCount:        3,
+		URL:              "https://paperless.local/documents/42",
+	}
+
+	path, err := w.WriteNote(source, "deadbeef", "application/pdf", "tesseract", "hello", "", time.Unix(0, 0).UTC(), "invoice", []string{"financial"}, "Acme Corp", "Invoice", pm)
+	if err != nil {
+		t.Fatalf("WriteNote: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(data)
+
+	for _, needle := range []string{
+		"paperless:",
+		"document_id: 42",
+		"title: Migrated Invoice",
+		"created: 2024-03-01T09:00:00Z",
+		"added: 2024-03-02T10:00:00Z",
+		"modified: 2024-03-05T11:30:00Z",
+		"storage_path: Invoices/2024",
+		"original_file_name: invoice-original.pdf",
+		"archived_file_name: invoice-archived.pdf",
+		"page_count: 3",
+		"url: https://paperless.local/documents/42",
+	} {
+		if !strings.Contains(out, needle) {
+			t.Fatalf("output missing %q\n%s", needle, out)
+		}
+	}
+}
+
+func TestWriteNote_NoPaperlessMeta_OmitsBlock(t *testing.T) {
+	vault := t.TempDir()
+	w := &NoteWriter{Vault: vault}
+
+	path, err := w.WriteNote("/tmp/plain.txt", "abc", "text/plain", "", "body", "", time.Now().UTC(), "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("WriteNote: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "paperless:") {
+		t.Fatalf("expected no paperless block for a non-migrated note:\n%s", string(data))
+	}
+}
+
 func TestWriteNote_Atomic(t *testing.T) {
 	vault := t.TempDir()
 	w := &NoteWriter{Vault: vault}
-	path, err := w.WriteNote("/tmp/a.txt", "abc", "text/plain", "", "body", "", time.Now().UTC(), "", nil, "", "")
+	path, err := w.WriteNote("/tmp/a.txt", "abc", "text/plain", "", "body", "", time.Now().UTC(), "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("WriteNote: %v", err)
 	}
@@ -95,7 +165,7 @@ func TestWriteNote_Golden(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			path, err := w.WriteNote(tc.sourcePath, tc.sha256, tc.mime, tc.ocrEngine, tc.text, "", fixedTime, "", nil, "", "")
+			path, err := w.WriteNote(tc.sourcePath, tc.sha256, tc.mime, tc.ocrEngine, tc.text, "", fixedTime, "", nil, "", "", nil)
 			if err != nil {
 				t.Fatalf("WriteNote failed: %v", err)
 			}

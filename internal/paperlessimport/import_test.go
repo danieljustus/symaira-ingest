@@ -237,6 +237,90 @@ func TestRun_ResolvesIDsViaLookups(t *testing.T) {
 	}
 }
 
+func TestRun_PreservesPaperlessMetadata(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/documents/":
+			json.NewEncoder(w).Encode(map[string]any{
+				"count": 1,
+				"results": []map[string]any{
+					{
+						"id": 7, "title": "Migrated Invoice",
+						"created_date": "2024-03-01", "created": "2024-03-01T09:00:00Z",
+						"added": "2024-03-02T10:00:00Z", "modified": "2024-03-05T11:30:00Z",
+						"file_type":          ".pdf",
+						"original_file_name": "invoice-original.pdf",
+						"archived_file_name": "invoice-archived.pdf",
+						"page_count":         3,
+						"storage_path":       map[string]any{"id": 7, "name": "Invoices/2024"},
+					},
+				},
+				"next": nil,
+			})
+		case "/api/documents/7/download/":
+			w.Write([]byte("invoice content"))
+		case "/api/tags/", "/api/correspondents/", "/api/document_types/", "/api/storage_paths/":
+			json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []any{}, "next": nil})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	pipeline := &ingest.Pipeline{
+		Engine:     fakeEngine{},
+		Store:      s,
+		Writer:     &writer.NoteWriter{Vault: filepath.Join(dir, "vault")},
+		ArchiveDir: filepath.Join(dir, "archive"),
+	}
+
+	stats, err := Run(context.Background(), Options{
+		BaseURL: srv.URL,
+		Token:   "test-token",
+	}, pipeline)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if stats.Imported != 1 {
+		t.Fatalf("stats.Imported = %d, want 1", stats.Imported)
+	}
+
+	matches, _ := filepath.Glob(filepath.Join(dir, "vault") + "/*.md")
+	if len(matches) != 1 {
+		t.Fatalf("expected 1 note, got %d", len(matches))
+	}
+	contentBytes, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(contentBytes)
+
+	for _, needle := range []string{
+		"paperless:",
+		"document_id: 7",
+		"title: Migrated Invoice",
+		"created: 2024-03-01T09:00:00Z",
+		"added: 2024-03-02T10:00:00Z",
+		"modified: 2024-03-05T11:30:00Z",
+		"storage_path: Invoices/2024",
+		"original_file_name: invoice-original.pdf",
+		"archived_file_name: invoice-archived.pdf",
+		"page_count: 3",
+		"url: " + srv.URL + "/documents/7",
+	} {
+		if !contains(content, needle) {
+			t.Errorf("note content missing %q:\n%s", needle, content)
+		}
+	}
+}
+
 func TestRun_SinceFilter(t *testing.T) {
 	var requestedURL string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

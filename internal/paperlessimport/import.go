@@ -10,6 +10,7 @@ import (
 
 	"github.com/danieljustus/symaira-ingest/internal/ingest"
 	"github.com/danieljustus/symaira-ingest/internal/paperless"
+	"github.com/danieljustus/symaira-ingest/internal/writer"
 )
 
 type Stats struct {
@@ -74,6 +75,16 @@ func loadLookups(client *paperless.Client) (*lookups, error) {
 		l.storagePaths[sp.ID] = sp.Name
 	}
 	return l, nil
+}
+
+// paperlessCreated returns the document's creation timestamp, preferring the
+// full "created" timestamp over the date-only "created_date" fallback that
+// some Paperless-ngx endpoints emit instead.
+func paperlessCreated(doc paperless.Document) time.Time {
+	if !doc.Created.IsZero() {
+		return doc.Created.Time
+	}
+	return doc.CreatedDate.Time
 }
 
 // resolveRef returns the display name for ref, preferring an already
@@ -184,10 +195,13 @@ func importOne(ctx context.Context, client *paperless.Client, doc paperless.Docu
 		}
 		documentType = name
 	}
+	var storagePath string
 	if doc.StoragePath != nil {
-		if _, ok := resolveRef(*doc.StoragePath, lu.storagePaths); !ok {
+		name, ok := resolveRef(*doc.StoragePath, lu.storagePaths)
+		if !ok {
 			warnings = append(warnings, fmt.Sprintf("document %d (%s): unresolved storage path ID %d", doc.ID, doc.Title, doc.StoragePath.ID))
 		}
+		storagePath = name
 	}
 
 	preset := &ingest.IngestOptions{
@@ -195,6 +209,18 @@ func importOne(ctx context.Context, client *paperless.Client, doc paperless.Docu
 		PresetTags:          tags,
 		PresetCorrespondent: correspondent,
 		PresetDocumentType:  documentType,
+		Paperless: &writer.PaperlessMeta{
+			DocumentID:       doc.ID,
+			Title:            doc.Title,
+			Created:          paperlessCreated(doc),
+			Added:            doc.Added.Time,
+			Modified:         doc.Modified.Time,
+			StoragePath:      storagePath,
+			OriginalFileName: doc.OriginalFileName,
+			ArchivedFileName: doc.ArchivedFileName,
+			PageCount:        doc.PageCount,
+			URL:              client.DocumentURL(doc.ID),
+		},
 	}
 
 	_, err = pipeline.Ingest(ctx, finalPath, preset)
