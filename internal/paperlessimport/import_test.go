@@ -85,6 +85,103 @@ func TestRun_DryRun(t *testing.T) {
 	if stats.Imported != 0 {
 		t.Errorf("stats.Imported = %d, want 0", stats.Imported)
 	}
+	if stats.Audit == nil {
+		t.Fatal("stats.Audit = nil, want a populated audit report")
+	}
+	if stats.Audit.TotalDocuments != 1 {
+		t.Errorf("stats.Audit.TotalDocuments = %d, want 1", stats.Audit.TotalDocuments)
+	}
+}
+
+func TestRun_DryRun_AuditReport(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/documents/":
+			json.NewEncoder(w).Encode(map[string]any{
+				"count": 3,
+				"results": []map[string]any{
+					{
+						"id": 1, "title": "Invoice", "created_date": "2026-01-15",
+						"file_type": ".pdf", "mime_type": "application/pdf",
+						"tags":          []map[string]any{{"id": 1, "name": "financial"}},
+						"correspondent": map[string]any{"id": 1, "name": "Acme Corp"},
+						"document_type": map[string]any{"id": 1, "name": "Invoice"},
+					},
+					{
+						"id": 2, "title": "Receipt", "created_date": "2026-01-16",
+						"file_type": ".pdf", "mime_type": "application/pdf",
+						"tags": []int{99}, // unresolved tag ID
+					},
+					{
+						"id": 3, "title": "Spreadsheet", "created_date": "2026-01-17",
+						"file_type": ".xlsx", "mime_type": "application/vnd.ms-excel",
+					},
+				},
+				"next": nil,
+			})
+		case "/api/tags/":
+			json.NewEncoder(w).Encode(map[string]any{
+				"count": 1, "results": []map[string]any{{"id": 1, "name": "financial"}}, "next": nil,
+			})
+		case "/api/correspondents/", "/api/document_types/", "/api/storage_paths/":
+			json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []any{}, "next": nil})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	pipeline := &ingest.Pipeline{
+		Store:      s,
+		Writer:     &writer.NoteWriter{Vault: filepath.Join(dir, "vault")},
+		ArchiveDir: filepath.Join(dir, "archive"),
+	}
+
+	stats, err := Run(context.Background(), Options{
+		BaseURL: srv.URL,
+		Token:   "test-token",
+		DryRun:  true,
+	}, pipeline)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	audit := stats.Audit
+	if audit == nil {
+		t.Fatal("stats.Audit = nil, want a populated audit report")
+	}
+	if audit.TotalDocuments != 3 {
+		t.Errorf("TotalDocuments = %d, want 3", audit.TotalDocuments)
+	}
+	if audit.ByMIME["application/pdf"] != 2 {
+		t.Errorf("ByMIME[application/pdf] = %d, want 2", audit.ByMIME["application/pdf"])
+	}
+	if audit.TagCounts["financial"] != 1 {
+		t.Errorf("TagCounts[financial] = %d, want 1", audit.TagCounts["financial"])
+	}
+	if audit.CorrespondentCounts["Acme Corp"] != 1 {
+		t.Errorf("CorrespondentCounts[Acme Corp] = %d, want 1", audit.CorrespondentCounts["Acme Corp"])
+	}
+	if len(audit.UnresolvedTagIDs) != 1 || audit.UnresolvedTagIDs[0] != 99 {
+		t.Errorf("UnresolvedTagIDs = %v, want [99]", audit.UnresolvedTagIDs)
+	}
+	if audit.UnsupportedFileTypes["xlsx"] != 1 {
+		t.Errorf("UnsupportedFileTypes[xlsx] = %d, want 1", audit.UnsupportedFileTypes["xlsx"])
+	}
+	if stats.Imported != 0 {
+		t.Errorf("stats.Imported = %d, want 0 (dry-run must not write anything)", stats.Imported)
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, "vault") + "/*.md")
+	if len(matches) != 0 {
+		t.Fatalf("dry-run must not write notes, found %d", len(matches))
+	}
 }
 
 func TestRun_Import(t *testing.T) {
@@ -318,6 +415,98 @@ func TestRun_PreservesPaperlessMetadata(t *testing.T) {
 		if !contains(content, needle) {
 			t.Errorf("note content missing %q:\n%s", needle, content)
 		}
+	}
+}
+
+func TestRun_ResumesAfterPartialFailure(t *testing.T) {
+	var failDownload bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/documents/":
+			json.NewEncoder(w).Encode(map[string]any{
+				"count": 2,
+				"results": []map[string]any{
+					{"id": 1, "title": "Good Doc", "created_date": "2026-01-15", "file_type": ".txt"},
+					{"id": 2, "title": "Bad Doc", "created_date": "2026-01-16", "file_type": ".txt"},
+				},
+				"next": nil,
+			})
+		case "/api/documents/1/download/":
+			w.Write([]byte("good content"))
+		case "/api/documents/2/download/":
+			if failDownload {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			w.Write([]byte("recovered content"))
+		case "/api/tags/", "/api/correspondents/", "/api/document_types/", "/api/storage_paths/":
+			json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []any{}, "next": nil})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	pipeline := &ingest.Pipeline{
+		Engine:     fakeEngine{},
+		Store:      s,
+		Writer:     &writer.NoteWriter{Vault: filepath.Join(dir, "vault")},
+		ArchiveDir: filepath.Join(dir, "archive"),
+	}
+
+	// First run: document 2's download fails.
+	failDownload = true
+	stats, err := Run(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, pipeline)
+	if err != nil {
+		t.Fatalf("Run (first): %v", err)
+	}
+	if stats.Imported != 1 || stats.Failed != 1 {
+		t.Fatalf("first run: imported=%d failed=%d, want imported=1 failed=1", stats.Imported, stats.Failed)
+	}
+
+	status, found, err := s.PaperlessImportStatus(context.Background(), srv.URL, 2)
+	if err != nil {
+		t.Fatalf("PaperlessImportStatus: %v", err)
+	}
+	if !found || status != "failed" {
+		t.Fatalf("document 2 status = %q, found = %v, want failed/true", status, found)
+	}
+
+	// Second run: download succeeds. Document 1 must not be re-downloaded
+	// or duplicated; only document 2 should be retried.
+	failDownload = false
+	stats, err = Run(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, pipeline)
+	if err != nil {
+		t.Fatalf("Run (second): %v", err)
+	}
+	if stats.Imported != 1 {
+		t.Errorf("second run: imported = %d, want 1 (only the retried document)", stats.Imported)
+	}
+	if stats.Skipped != 1 {
+		t.Errorf("second run: skipped = %d, want 1 (already-imported document 1)", stats.Skipped)
+	}
+	if stats.Failed != 0 {
+		t.Errorf("second run: failed = %d, want 0", stats.Failed)
+	}
+
+	matches, _ := filepath.Glob(filepath.Join(dir, "vault") + "/*.md")
+	if len(matches) != 2 {
+		t.Fatalf("expected 2 notes total after resume, got %d", len(matches))
+	}
+
+	status, found, err = s.PaperlessImportStatus(context.Background(), srv.URL, 2)
+	if err != nil {
+		t.Fatalf("PaperlessImportStatus: %v", err)
+	}
+	if !found || status != "imported" {
+		t.Fatalf("document 2 status after retry = %q, found = %v, want imported/true", status, found)
 	}
 }
 

@@ -19,6 +19,10 @@ type Stats struct {
 	Failed   int
 	Total    int
 	Warnings []string
+
+	// Audit is the structured migration-readiness summary built during a
+	// dry-run. Nil for a real import.
+	Audit *AuditReport
 }
 
 type Options struct {
@@ -116,11 +120,21 @@ func Run(ctx context.Context, opts Options, pipeline *ingest.Pipeline) (*Stats, 
 
 	stats := &Stats{Total: len(docs)}
 
+	if opts.DryRun {
+		for i, doc := range docs {
+			fmt.Fprintf(os.Stderr, "[%d/%d] would import: %s (created: %s)\n", i+1, stats.Total, doc.Title, doc.CreatedDate.Format("2006-01-02"))
+			stats.Skipped++
+		}
+		stats.Audit = buildAuditReport(docs, lu)
+		printAuditReport(stats.Audit)
+		return stats, nil
+	}
+
 	for i, doc := range docs {
 		fmt.Fprintf(os.Stderr, "[%d/%d] %s\n", i+1, stats.Total, doc.Title)
 
-		if opts.DryRun {
-			fmt.Fprintf(os.Stderr, "  would import: %s (created: %s)\n", doc.Title, doc.CreatedDate.Format("2006-01-02"))
+		if status, found, serr := pipeline.Store.PaperlessImportStatus(ctx, opts.BaseURL, doc.ID); serr == nil && found && status == "imported" {
+			fmt.Fprintf(os.Stderr, "  skipped (already imported in a previous run)\n")
 			stats.Skipped++
 			continue
 		}
@@ -130,12 +144,43 @@ func Run(ctx context.Context, opts Options, pipeline *ingest.Pipeline) (*Stats, 
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  failed: %v\n", err)
 			stats.Failed++
+			if serr := pipeline.Store.UpsertPaperlessImportState(ctx, opts.BaseURL, doc.ID, "failed", err.Error()); serr != nil {
+				stats.Warnings = append(stats.Warnings, fmt.Sprintf("document %d: record import state: %v", doc.ID, serr))
+			}
 			continue
+		}
+		if serr := pipeline.Store.UpsertPaperlessImportState(ctx, opts.BaseURL, doc.ID, "imported", ""); serr != nil {
+			stats.Warnings = append(stats.Warnings, fmt.Sprintf("document %d: record import state: %v", doc.ID, serr))
 		}
 		stats.Imported++
 	}
 
 	return stats, nil
+}
+
+// printAuditReport writes a concise migration-readiness summary to stderr so
+// a dry-run does not leave the operator with only per-document spam.
+func printAuditReport(r *AuditReport) {
+	fmt.Fprintf(os.Stderr, "\n--- migration audit summary ---\n")
+	fmt.Fprintf(os.Stderr, "total documents: %d\n", r.TotalDocuments)
+	fmt.Fprintf(os.Stderr, "by MIME type: %v\n", r.ByMIME)
+	fmt.Fprintf(os.Stderr, "tags: %d distinct, correspondents: %d distinct, document types: %d distinct, storage paths: %d distinct\n",
+		len(r.TagCounts), len(r.CorrespondentCounts), len(r.DocumentTypeCounts), len(r.StoragePathCounts))
+	if len(r.UnresolvedTagIDs) > 0 {
+		fmt.Fprintf(os.Stderr, "unresolved tag IDs: %v\n", r.UnresolvedTagIDs)
+	}
+	if len(r.UnresolvedCorrespondentIDs) > 0 {
+		fmt.Fprintf(os.Stderr, "unresolved correspondent IDs: %v\n", r.UnresolvedCorrespondentIDs)
+	}
+	if len(r.UnresolvedDocumentTypeIDs) > 0 {
+		fmt.Fprintf(os.Stderr, "unresolved document type IDs: %v\n", r.UnresolvedDocumentTypeIDs)
+	}
+	if len(r.UnresolvedStoragePathIDs) > 0 {
+		fmt.Fprintf(os.Stderr, "unresolved storage path IDs: %v\n", r.UnresolvedStoragePathIDs)
+	}
+	if len(r.UnsupportedFileTypes) > 0 {
+		fmt.Fprintf(os.Stderr, "unsupported file types: %v\n", r.UnsupportedFileTypes)
+	}
 }
 
 func importOne(ctx context.Context, client *paperless.Client, doc paperless.Document, lu *lookups, pipeline *ingest.Pipeline) ([]string, error) {

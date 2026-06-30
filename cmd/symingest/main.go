@@ -180,8 +180,12 @@ Flags:
   --archive string    Target archive directory
   --db string         SQLite database path
   --dry-run           List what would be imported without writing
+  --status            List per-document import status from a previous run, then exit
+  --json              With --status, output the status list as JSON
 
-Import documents from a Paperless-ngx instance into the vault.`)
+Import documents from a Paperless-ngx instance into the vault. Imports are
+resumable: a document already recorded as imported is skipped on a re-run,
+and a document that previously failed is retried automatically.`)
 		return nil
 	}
 
@@ -195,6 +199,8 @@ Import documents from a Paperless-ngx instance into the vault.`)
 	token := fs.String("token", "", "API token")
 	sinceStr := fs.String("since", "", "Only import documents created after this date (YYYY-MM-DD)")
 	dryRun := fs.Bool("dry-run", false, "List what would be imported without writing")
+	statusOnly := fs.Bool("status", false, "List per-document import status from a previous run, then exit")
+	jsonFlag := fs.Bool("json", false, "With --status, output the status list as JSON")
 	ocrLang, vault, archive, db := registerSharedFlags(fs)
 	if err := fs.Parse(args[1:]); err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
@@ -211,14 +217,60 @@ Import documents from a Paperless-ngx instance into the vault.`)
 	if *token == "" {
 		*token = os.Getenv("PAPERLESS_TOKEN")
 	}
-	if *baseURL == "" || *token == "" {
+	if *baseURL == "" {
 		return exitcodes.Wrapf(nil, exitcodes.ExitConfig, exitcodes.KindConfig,
-			"base-url and token are required (use flags or PAPERLESS_URL/PAPERLESS_TOKEN env vars)")
+			"base-url is required (use --base-url or the PAPERLESS_URL env var)")
+	}
+	if *token == "" && !*statusOnly {
+		return exitcodes.Wrapf(nil, exitcodes.ExitConfig, exitcodes.KindConfig,
+			"token is required (use --token or the PAPERLESS_TOKEN env var)")
 	}
 
-	if cfg.vault == "" {
+	if cfg.vault == "" && !*statusOnly {
 		return exitcodes.Wrapf(nil, exitcodes.ExitConfig, exitcodes.KindConfig,
 			"no vault configured; use --vault, SYMINGEST_VAULT env, or set vault in ~/.config/symingest/config.toml")
+	}
+
+	if *statusOnly {
+		st, err := store.Open(cfg.db)
+		if err != nil {
+			return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
+				"failed to open document store")
+		}
+		defer st.Close()
+
+		states, err := st.ListPaperlessImportState(context.Background(), *baseURL, "")
+		if err != nil {
+			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
+				"failed to list paperless import status")
+		}
+
+		if *jsonFlag {
+			if states == nil {
+				fmt.Fprintln(stdout, "[]")
+				return nil
+			}
+			data, err := json.MarshalIndent(states, "", "  ")
+			if err != nil {
+				return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
+					"failed to marshal import status to JSON")
+			}
+			fmt.Fprintln(stdout, string(data))
+			return nil
+		}
+
+		if len(states) == 0 {
+			fmt.Fprintf(stdout, "No recorded import status for %s\n", *baseURL)
+			return nil
+		}
+		for _, s := range states {
+			if s.LastError != "" {
+				fmt.Fprintf(stdout, "document %d: %s (%s)\n", s.PaperlessDocumentID, s.Status, s.LastError)
+			} else {
+				fmt.Fprintf(stdout, "document %d: %s\n", s.PaperlessDocumentID, s.Status)
+			}
+		}
+		return nil
 	}
 
 	var since time.Time
@@ -261,6 +313,9 @@ Import documents from a Paperless-ngx instance into the vault.`)
 
 	fmt.Fprintf(stdout, "Import complete: %d imported, %d skipped, %d failed (of %d total)\n",
 		stats.Imported, stats.Skipped, stats.Failed, stats.Total)
+	if stats.Failed > 0 {
+		fmt.Fprintf(stdout, "Re-run the same command to retry failed documents; use --status to inspect them.\n")
+	}
 	return nil
 }
 

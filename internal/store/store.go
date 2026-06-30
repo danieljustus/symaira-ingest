@@ -539,6 +539,101 @@ func (s *Store) ListRules(ctx context.Context) ([]*ClassificationRule, error) {
 	return rules, nil
 }
 
+// PaperlessImportState represents a row in the paperless_import_state table,
+// tracking the migration status of one document from one Paperless-ngx
+// instance so an interrupted import can resume without duplicating work.
+type PaperlessImportState struct {
+	ID                  int64  `json:"id"`
+	BaseURL             string `json:"base_url"`
+	PaperlessDocumentID int    `json:"paperless_document_id"`
+	Status              string `json:"status"` // 'pending', 'imported', 'skipped', 'failed'
+	LastError           string `json:"last_error,omitempty"`
+	CreatedAt           string `json:"created_at"`
+	UpdatedAt           string `json:"updated_at"`
+}
+
+// UpsertPaperlessImportState records the outcome of importing one Paperless
+// document, keyed by (baseURL, paperlessDocumentID). A later call for the
+// same key overwrites the previous status, so a retried import always
+// reflects its most recent attempt.
+func (s *Store) UpsertPaperlessImportState(ctx context.Context, baseURL string, paperlessDocumentID int, status, lastError string) error {
+	switch status {
+	case "pending", "imported", "skipped", "failed":
+	default:
+		return fmt.Errorf("invalid paperless import state status: %q", status)
+	}
+	var lastErrVal sql.NullString
+	if lastError != "" {
+		lastErrVal = sql.NullString{String: lastError, Valid: true}
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO paperless_import_state (base_url, paperless_document_id, status, last_error)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(base_url, paperless_document_id) DO UPDATE SET
+			status = excluded.status,
+			last_error = excluded.last_error,
+			updated_at = CURRENT_TIMESTAMP
+	`, baseURL, paperlessDocumentID, status, lastErrVal)
+	if err != nil {
+		return fmt.Errorf("upsert paperless import state: %w", err)
+	}
+	return nil
+}
+
+// PaperlessImportStatus returns the recorded status for a document, and
+// false if no attempt has been recorded yet.
+func (s *Store) PaperlessImportStatus(ctx context.Context, baseURL string, paperlessDocumentID int) (status string, found bool, err error) {
+	err = s.db.QueryRowContext(ctx,
+		`SELECT status FROM paperless_import_state WHERE base_url = ? AND paperless_document_id = ?`,
+		baseURL, paperlessDocumentID).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("get paperless import state: %w", err)
+	}
+	return status, true, nil
+}
+
+// ListPaperlessImportState lists the recorded import state for all documents
+// from baseURL, ordered by Paperless document ID. When statusFilter is
+// non-empty only matching rows are returned.
+func (s *Store) ListPaperlessImportState(ctx context.Context, baseURL, statusFilter string) ([]*PaperlessImportState, error) {
+	query := `
+		SELECT id, base_url, paperless_document_id, status, last_error, created_at, updated_at
+		FROM paperless_import_state
+		WHERE base_url = ?`
+	args := []any{baseURL}
+	if statusFilter != "" {
+		query += ` AND status = ?`
+		args = append(args, statusFilter)
+	}
+	query += ` ORDER BY paperless_document_id ASC`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list paperless import state: %w", err)
+	}
+	defer rows.Close()
+
+	var states []*PaperlessImportState
+	for rows.Next() {
+		var st PaperlessImportState
+		var lastErr sql.NullString
+		if err := rows.Scan(&st.ID, &st.BaseURL, &st.PaperlessDocumentID, &st.Status, &lastErr, &st.CreatedAt, &st.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan paperless import state: %w", err)
+		}
+		if lastErr.Valid {
+			st.LastError = lastErr.String
+		}
+		states = append(states, &st)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return states, nil
+}
+
 // DeleteRule deletes a classification rule by ID.
 func (s *Store) DeleteRule(ctx context.Context, id int64) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM classification_rules WHERE id = ?`, id)

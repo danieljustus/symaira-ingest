@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/danieljustus/symaira-ingest/internal/config"
+	"github.com/danieljustus/symaira-ingest/internal/store"
 )
 
 func TestRun_Version(t *testing.T) {
@@ -75,6 +77,62 @@ func TestRun_JobsJSON(t *testing.T) {
 	}
 	if got := strings.TrimSpace(sb.String()); got != "[]" {
 		t.Fatalf("expected '[]', got %q", got)
+	}
+}
+
+func TestRun_ImportPaperless_StatusEmpty(t *testing.T) {
+	tempDB := filepath.Join(t.TempDir(), "test.db")
+	var sb strings.Builder
+	oldStdout := stdout
+	stdout = &sb
+	defer func() { stdout = oldStdout }()
+
+	err := run([]string{
+		"import", "paperless",
+		"-db", tempDB,
+		"-base-url", "https://paperless.example",
+		"-status",
+	})
+	if err != nil {
+		t.Fatalf("run(import paperless -status): %v", err)
+	}
+	if got := strings.TrimSpace(sb.String()); !strings.Contains(got, "No recorded import status") {
+		t.Fatalf("expected no-status message, got %q", got)
+	}
+}
+
+func TestRun_ImportPaperless_StatusJSONAfterUpsert(t *testing.T) {
+	tempDB := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.Open(tempDB)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	if err := st.UpsertPaperlessImportState(context.Background(), "https://paperless.example", 42, "failed", "boom"); err != nil {
+		t.Fatalf("UpsertPaperlessImportState: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	var sb strings.Builder
+	oldStdout := stdout
+	stdout = &sb
+	defer func() { stdout = oldStdout }()
+
+	err = run([]string{
+		"import", "paperless",
+		"-db", tempDB,
+		"-base-url", "https://paperless.example",
+		"-status", "-json",
+	})
+	if err != nil {
+		t.Fatalf("run(import paperless -status -json): %v", err)
+	}
+	out := sb.String()
+	for _, want := range []string{`"paperless_document_id": 42`, `"status": "failed"`, `"last_error": "boom"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
 	}
 }
 
