@@ -494,13 +494,18 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 				return nil, err
 			}
 
-			data, mErr := json.Marshal(map[string]any{
+			result := map[string]any{
 				"status":   "success",
 				"imported": stats.Imported,
 				"skipped":  stats.Skipped,
 				"failed":   stats.Failed,
 				"total":    stats.Total,
-			})
+			}
+			if stats.Audit != nil {
+				result["audit"] = stats.Audit
+			}
+
+			data, mErr := json.Marshal(result)
 			if mErr != nil {
 				return nil, fmt.Errorf("marshal import result: %w", mErr)
 			}
