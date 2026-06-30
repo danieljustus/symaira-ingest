@@ -92,13 +92,14 @@ Commands:
 
 func runIngest(args []string) error {
 	fs := flag.NewFlagSet("ingest", flag.ContinueOnError)
-	cfg, err := resolveConfig(fs)
-	if err != nil {
-		return err
-	}
+	ocrLang, vault, archive, db := registerSharedFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
 			"invalid ingest flags")
+	}
+	cfg, err := resolveConfig(fs, ocrLang, vault, archive, db)
+	if err != nil {
+		return err
 	}
 	remaining := fs.Args()
 	if len(remaining) == 0 || remaining[0] == "--help" || remaining[0] == "-h" {
@@ -194,13 +195,14 @@ Import documents from a Paperless-ngx instance into the vault.`)
 	token := fs.String("token", "", "API token")
 	sinceStr := fs.String("since", "", "Only import documents created after this date (YYYY-MM-DD)")
 	dryRun := fs.Bool("dry-run", false, "List what would be imported without writing")
-	cfg, err := resolveConfig(fs)
-	if err != nil {
-		return err
-	}
+	ocrLang, vault, archive, db := registerSharedFlags(fs)
 	if err := fs.Parse(args[1:]); err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
 			"invalid import flags")
+	}
+	cfg, err := resolveConfig(fs, ocrLang, vault, archive, db)
+	if err != nil {
+		return err
 	}
 
 	if *baseURL == "" {
@@ -287,46 +289,68 @@ type resolvedConfig struct {
 	ocrLang string
 }
 
-func resolveConfig(fs *flag.FlagSet) (*resolvedConfig, error) {
-	ocrLang := fs.String("ocr-lang", "", "Tesseract language override")
-	vaultFlag := fs.String("vault", "", "Target vault directory")
-	archiveFlag := fs.String("archive", "", "Target archive directory")
-	dbFlag := fs.String("db", "", "SQLite database path")
+// registerSharedFlags adds the shared CLI flags to fs and returns pointers to
+// their values. Call fs.Parse(args) after this, then resolveConfig to merge
+// flag values with config/env/defaults.
+func registerSharedFlags(fs *flag.FlagSet) (ocrLang, vault, archive, db *string) {
+	ocrLang = fs.String("ocr-lang", "", "Tesseract language override")
+	vault = fs.String("vault", "", "Target vault directory")
+	archive = fs.String("archive", "", "Target archive directory")
+	db = fs.String("db", "", "SQLite database path")
+	return
+}
 
+// resolveConfig merges parsed flag values with config-file / env-var / default
+// values. Precedence: explicit CLI flags > env vars / config file > defaults.
+// fs.Parse(args) must already have been called so that fs.Visit can tell which
+// flags the user actually supplied.
+func resolveConfig(fs *flag.FlagSet, ocrLang, vaultFlag, archiveFlag, dbFlag *string) (*resolvedConfig, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
 			"failed to load configuration")
 	}
 
-	if *ocrLang == "" {
-		*ocrLang = cfg.OCRLang
+	explicitlySet := make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) {
+		explicitlySet[f.Name] = true
+	})
+
+	if !explicitlySet["ocr-lang"] {
+		if cfg.OCRLang != "" {
+			*ocrLang = cfg.OCRLang
+		}
 	}
 	if *ocrLang == "" {
 		*ocrLang = "eng"
 	}
-	if *vaultFlag == "" {
+
+	if !explicitlySet["vault"] {
 		*vaultFlag = cfg.Vault
 	}
-	if *archiveFlag == "" {
-		*archiveFlag = cfg.ArchivePath
-	}
-	if *archiveFlag == "" {
-		path, err := defaultArchivePath()
-		if err != nil {
-			return nil, err
+
+	if !explicitlySet["archive"] {
+		if cfg.ArchivePath != "" {
+			*archiveFlag = cfg.ArchivePath
+		} else {
+			path, err := defaultArchivePath()
+			if err != nil {
+				return nil, err
+			}
+			*archiveFlag = path
 		}
-		*archiveFlag = path
 	}
-	if *dbFlag == "" {
-		*dbFlag = cfg.DBPath
-	}
-	if *dbFlag == "" {
-		path, err := defaultDBPath()
-		if err != nil {
-			return nil, err
+
+	if !explicitlySet["db"] {
+		if cfg.DBPath != "" {
+			*dbFlag = cfg.DBPath
+		} else {
+			path, err := defaultDBPath()
+			if err != nil {
+				return nil, err
+			}
+			*dbFlag = path
 		}
-		*dbFlag = path
 	}
 
 	return &resolvedConfig{
@@ -339,13 +363,14 @@ func resolveConfig(fs *flag.FlagSet) (*resolvedConfig, error) {
 
 func runMCP(args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
-	cfg, err := resolveConfig(fs)
-	if err != nil {
-		return err
-	}
+	ocrLang, vault, archive, db := registerSharedFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
 			"invalid mcp flags")
+	}
+	cfg, err := resolveConfig(fs, ocrLang, vault, archive, db)
+	if err != nil {
+		return err
 	}
 	remaining := fs.Args()
 	if len(remaining) > 0 && (remaining[0] == "--help" || remaining[0] == "-h") {
@@ -382,13 +407,14 @@ Start the MCP server for AI-powered document processing.`)
 
 func runWatch(args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
-	cfg, err := resolveConfig(fs)
-	if err != nil {
-		return err
-	}
+	ocrLang, vault, archive, db := registerSharedFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
 			"invalid watch flags")
+	}
+	cfg, err := resolveConfig(fs, ocrLang, vault, archive, db)
+	if err != nil {
+		return err
 	}
 	remaining := fs.Args()
 	if len(remaining) == 0 || remaining[0] == "--help" || remaining[0] == "-h" {
@@ -468,13 +494,14 @@ func runJobs(args []string) error {
 	fs := flag.NewFlagSet("jobs", flag.ContinueOnError)
 	jsonFlag := fs.Bool("json", false, "Output jobs in JSON format")
 	limitFlag := fs.Int("limit", 100, "Maximum number of jobs to return")
-	cfg, err := resolveConfig(fs)
-	if err != nil {
-		return err
-	}
+	ocrLang, vault, archive, db := registerSharedFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
 			"invalid jobs flags")
+	}
+	cfg, err := resolveConfig(fs, ocrLang, vault, archive, db)
+	if err != nil {
+		return err
 	}
 
 	st, err := store.Open(cfg.db)
@@ -523,13 +550,14 @@ func runJobs(args []string) error {
 
 func runRetry(args []string) error {
 	fs := flag.NewFlagSet("retry", flag.ContinueOnError)
-	cfg, err := resolveConfig(fs)
-	if err != nil {
-		return err
-	}
+	ocrLang, vault, archive, db := registerSharedFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
 			"invalid retry flags")
+	}
+	cfg, err := resolveConfig(fs, ocrLang, vault, archive, db)
+	if err != nil {
+		return err
 	}
 	remaining := fs.Args()
 	if len(remaining) == 0 || remaining[0] == "--help" || remaining[0] == "-h" {
@@ -565,13 +593,14 @@ Retry a failed job by resetting its status to pending.`)
 
 func runRules(args []string) error {
 	fs := flag.NewFlagSet("rules", flag.ContinueOnError)
-	cfg, err := resolveConfig(fs)
-	if err != nil {
-		return err
-	}
+	ocrLang, vault, archive, db := registerSharedFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
 			"invalid rules flags")
+	}
+	cfg, err := resolveConfig(fs, ocrLang, vault, archive, db)
+	if err != nil {
+		return err
 	}
 
 	remaining := fs.Args()
