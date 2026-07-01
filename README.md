@@ -106,6 +106,9 @@ Flags:
   --limit int         Import at most N documents (newest first); 0 means no limit
   --ids string        Import only these Paperless document IDs (comma-separated,
                       e.g. 123,456); takes precedence over --since and --limit
+  --preserve-storage-paths
+                      Place notes under vault subdirectories derived from each
+                      document's Paperless storage path (default: flat layout)
   --vault string      Target vault directory
   --archive string    Target archive directory
   --db string         SQLite database path
@@ -122,7 +125,7 @@ Flags:
 
 After an import, `--verify` re-reads the Paperless source and the generated vault notes and reports any document that is missing, duplicated, missing its archived original, or whose metadata (tags, correspondent, document type, storage path, created date) drifted from the source. It prints a human summary, or a stable JSON report with `--json`, and exits non-zero when any discrepancy is found — suitable as an automated migration gate before Paperless is retired. Only IDs, field names, and paths appear in the output; document content never does.
 
-`--since` filters on the document's Paperless *created* date (the date shown on the document), not the date it was added to Paperless. Use `--limit` or `--ids` to run a small, inspectable pilot before a full migration; both bounds apply to `--dry-run` and real imports alike, and a bounded run echoes the selected document IDs. Imports are resumable: a document already recorded as imported is skipped on a re-run, and a document that previously failed is retried automatically. Also available as the `import_paperless` MCP tool, which accepts the same options (`base_url`, `token`, `since`, `dry_run`, plus optional `vault_path`/`archive_path`/`db_path` overrides).
+`--since` filters on the document's Paperless *created* date (the date shown on the document), not the date it was added to Paperless. Use `--limit` or `--ids` to run a small, inspectable pilot before a full migration; both bounds apply to `--dry-run` and real imports alike, and a bounded run echoes the selected document IDs. Imports are resumable: a document already recorded as imported is skipped on a re-run, and a document that previously failed is retried automatically. With `--preserve-storage-paths`, each note is placed under a vault subdirectory derived from the document's Paperless storage path instead of the vault root; unsafe path segments are sanitized and collisions are resolved deterministically. Also available as the `import_paperless` MCP tool, which accepts the same options (`base_url`, `token`, `since`, `dry_run`, plus optional `vault_path`/`archive_path`/`db_path` overrides).
 
 For a complete, gated migration path — dry-run, bounded pilot, full import, verification, and search validation, with an explicit rule for when Paperless can stop being the source of truth — follow the [Paperless replacement runbook](docs/paperless-replacement-runbook.md).
 

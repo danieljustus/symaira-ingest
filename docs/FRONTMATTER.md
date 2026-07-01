@@ -35,6 +35,19 @@ When a note originates from a Paperless-ngx migration (`symingest import paperle
 | `page_count` | `int` | `page_count: <n>` | Page count reported by Paperless. Omitted if zero. |
 | `url` | `string` | `url: <url>` | Backlink to the original document in the Paperless web UI. Omitted if empty. |
 
+### Storage path layout
+
+By default, migrated notes are written flat into the vault root. When the `--preserve-storage-paths` option is enabled on `symingest import paperless`, the generated Markdown file is placed under a subdirectory derived from `storage_path` instead. For example, a document whose `storage_path` is `Finance/Invoices` becomes `vault/Finance/Invoices/<name>.md` rather than `vault/<name>.md`.
+
+Mapping rules:
+
+- Path separators (`/` or `\`) are treated as nested directory boundaries.
+- Each segment is stripped of leading/trailing spaces and dots, and of characters unsafe on common filesystems (`< > : " | ? * / \`). Those characters are replaced with `_`.
+- Empty segments and the traversal segments `.` and `..` are dropped, so the resulting path can never escape the vault.
+- If multiple documents resolve to the same directory and base name, a deterministic numeric suffix (`-2`, `-3`, …) is appended until a unique name is found.
+
+The original `storage_path` value is always preserved in the `paperless` block regardless of layout mode, so the mapping can be reconstructed or audited later.
+
 ## Example Frontmatter Blocks
 
 ### Ingested PDF with OCR

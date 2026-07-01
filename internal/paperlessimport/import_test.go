@@ -727,6 +727,78 @@ func TestRun_ExplicitIDs_DryRunHonorsBound(t *testing.T) {
 	}
 }
 
+func TestRun_PreserveStoragePaths(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if handleEmptyLookups(w, r) {
+			return
+		}
+		switch r.URL.Path {
+		case "/api/documents/":
+			json.NewEncoder(w).Encode(map[string]any{
+				"count": 1,
+				"results": []map[string]any{
+					{
+						"id": 5, "title": "Acme Invoice", "created_date": "2026-01-15",
+						"file_type":          ".txt",
+						"original_file_name": "acme.pdf",
+						"storage_path":       map[string]any{"id": 11, "name": "Finance/Invoices"},
+					},
+				},
+				"next": nil,
+			})
+		case "/api/documents/5/download/":
+			w.Write([]byte("invoice content"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	vault := filepath.Join(dir, "vault")
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	pipeline := &ingest.Pipeline{
+		Engine:     fakeEngine{},
+		Store:      s,
+		Writer:     &writer.NoteWriter{Vault: vault},
+		ArchiveDir: filepath.Join(dir, "archive"),
+	}
+
+	stats, err := Run(context.Background(), Options{
+		BaseURL:              srv.URL,
+		Token:                "test-token",
+		PreserveStoragePaths: true,
+	}, pipeline)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if stats.Imported != 1 {
+		t.Fatalf("stats.Imported = %d, want 1", stats.Imported)
+	}
+
+	// The note must live under the storage-path-derived subdirectory, not the
+	// vault root.
+	wantPath := filepath.Join(vault, "Finance", "Invoices", "acme.md")
+	if _, err := os.Stat(wantPath); err != nil {
+		rootMatches, _ := filepath.Glob(filepath.Join(vault, "*.md"))
+		t.Fatalf("note not placed under storage path (%v); vault root has %v", err, rootMatches)
+	}
+
+	content, err := os.ReadFile(wantPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Frontmatter must still record the original Paperless storage path.
+	if !contains(string(content), "storage_path: Finance/Invoices") {
+		t.Errorf("note frontmatter missing original storage path:\n%s", content)
+	}
+}
+
 func TestRun_ErrorStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
