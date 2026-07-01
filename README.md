@@ -14,6 +14,7 @@ Drop a scanned PDF or an image into a folder → get a searchable, classified **
 - **Markdown output** — produces clean, searchable Markdown with YAML frontmatter instead of proprietary formats
 - **MCP integration** — works as an MCP tool for AI-powered document processing workflows
 - **Classification rules** — automatically categorize documents based on content patterns
+- **Paperless-ngx import** — pull documents from an existing Paperless-ngx instance, preserving tags, correspondent and document type as frontmatter
 
 ## Install
 
@@ -89,6 +90,27 @@ symingest rules add --pattern "*.pdf" --category "Documents"
 symingest jobs
 symingest retry <job-id>
 ```
+
+**Import from a Paperless-ngx instance:**
+
+```bash
+symingest import paperless --base-url https://paperless.example.com --token <api-token> --vault ~/vault
+```
+
+```text
+Flags:
+  --base-url string   Paperless-ngx instance URL (or PAPERLESS_URL env)
+  --token string      API token (or PAPERLESS_TOKEN env)
+  --since string      Only import documents created after this date (YYYY-MM-DD)
+  --vault string      Target vault directory
+  --archive string    Target archive directory
+  --db string         SQLite database path
+  --dry-run           List what would be imported without writing
+  --status            List per-document import status from a previous run, then exit
+  --json              With --status, output the status list as JSON
+```
+
+Imports are resumable: a document already recorded as imported is skipped on a re-run, and a document that previously failed is retried automatically. Also available as the `import_paperless` MCP tool, which accepts the same options (`base_url`, `token`, `since`, `dry_run`, plus optional `vault_path`/`archive_path`/`db_path` overrides).
 
 ## Development
 
