@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -177,6 +178,9 @@ Flags:
   --token string      API token (or PAPERLESS_TOKEN env)
   --since string      Only import documents whose Paperless created date is on
                       or after this date (YYYY-MM-DD)
+  --limit int         Import at most N documents (newest first); 0 means no limit
+  --ids string        Import only these Paperless document IDs (comma-separated,
+                      e.g. 123,456); takes precedence over --since and --limit
   --vault string      Target vault directory
   --archive string    Target archive directory
   --db string         SQLite database path
@@ -184,9 +188,11 @@ Flags:
   --status            List per-document import status from a previous run, then exit
   --json              With --status, output the status list as JSON
 
-Import documents from a Paperless-ngx instance into the vault. Imports are
-resumable: a document already recorded as imported is skipped on a re-run,
-and a document that previously failed is retried automatically.`)
+Import documents from a Paperless-ngx instance into the vault. Use --limit or
+--ids to run a small, inspectable pilot before a full migration; both bounds
+apply to --dry-run and real imports alike. Imports are resumable: a document
+already recorded as imported is skipped on a re-run, and a document that
+previously failed is retried automatically.`)
 		return nil
 	}
 
@@ -199,6 +205,8 @@ and a document that previously failed is retried automatically.`)
 	baseURL := fs.String("base-url", "", "Paperless-ngx instance URL")
 	token := fs.String("token", "", "API token")
 	sinceStr := fs.String("since", "", "Only import documents whose Paperless created date is on or after this date (YYYY-MM-DD)")
+	limit := fs.Int("limit", 0, "Import at most N documents (newest first); 0 means no limit")
+	idsStr := fs.String("ids", "", "Import only these Paperless document IDs (comma-separated); takes precedence over --since and --limit")
 	dryRun := fs.Bool("dry-run", false, "List what would be imported without writing")
 	statusOnly := fs.Bool("status", false, "List per-document import status from a previous run, then exit")
 	jsonFlag := fs.Bool("json", false, "With --status, output the status list as JSON")
@@ -283,6 +291,17 @@ and a document that previously failed is retried automatically.`)
 		}
 	}
 
+	if *limit < 0 {
+		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation,
+			"invalid limit %d; must be zero or positive", *limit)
+	}
+
+	ids, err := parseDocumentIDs(*idsStr)
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
+			"invalid ids")
+	}
+
 	st, err := store.Open(cfg.db)
 	if err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
@@ -303,6 +322,8 @@ and a document that previously failed is retried automatically.`)
 		Token:   *token,
 		Since:   since,
 		DryRun:  *dryRun,
+		Limit:   *limit,
+		IDs:     ids,
 	}
 
 	ctx := context.Background()
@@ -314,10 +335,49 @@ and a document that previously failed is retried automatically.`)
 
 	fmt.Fprintf(stdout, "Import complete: %d imported, %d skipped, %d failed (of %d total)\n",
 		stats.Imported, stats.Skipped, stats.Failed, stats.Total)
+	// For a bounded pilot run, echo exactly which documents were selected so
+	// the operator can inspect them. Document content is never printed.
+	if (*limit > 0 || len(ids) > 0) && len(stats.SelectedIDs) > 0 {
+		fmt.Fprintf(stdout, "Selected document IDs: %s\n", joinInts(stats.SelectedIDs))
+	}
 	if stats.Failed > 0 {
 		fmt.Fprintf(stdout, "Re-run the same command to retry failed documents; use --status to inspect them.\n")
 	}
 	return nil
+}
+
+// parseDocumentIDs parses a comma-separated list of Paperless document IDs,
+// tolerating surrounding whitespace and empty entries. Each ID must be a
+// positive integer.
+func parseDocumentIDs(s string) ([]int, error) {
+	if strings.TrimSpace(s) == "" {
+		return nil, nil
+	}
+	var ids []int
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		id, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, fmt.Errorf("document ID %q is not a number", part)
+		}
+		if id <= 0 {
+			return nil, fmt.Errorf("document ID %d must be positive", id)
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+// joinInts renders a slice of ints as a comma-separated string.
+func joinInts(nums []int) string {
+	parts := make([]string, len(nums))
+	for i, n := range nums {
+		parts[i] = strconv.Itoa(n)
+	}
+	return strings.Join(parts, ",")
 }
 
 func defaultDBPath() (string, error) {

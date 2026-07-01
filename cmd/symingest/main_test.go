@@ -247,6 +247,46 @@ func TestResolveConfig_DefaultsWhenNothingSet(t *testing.T) {
 	}
 }
 
+func TestParseDocumentIDs(t *testing.T) {
+	t.Run("valid list tolerates whitespace and empty entries", func(t *testing.T) {
+		ids, err := parseDocumentIDs(" 123, 456 ,,789 ")
+		if err != nil {
+			t.Fatalf("parseDocumentIDs: %v", err)
+		}
+		want := []int{123, 456, 789}
+		if len(ids) != len(want) {
+			t.Fatalf("ids = %v, want %v", ids, want)
+		}
+		for i, v := range want {
+			if ids[i] != v {
+				t.Errorf("ids[%d] = %d, want %d", i, ids[i], v)
+			}
+		}
+	})
+	t.Run("empty input yields no ids", func(t *testing.T) {
+		ids, err := parseDocumentIDs("   ")
+		if err != nil {
+			t.Fatalf("parseDocumentIDs: %v", err)
+		}
+		if ids != nil {
+			t.Errorf("ids = %v, want nil", ids)
+		}
+	})
+	t.Run("non-numeric entry errors", func(t *testing.T) {
+		if _, err := parseDocumentIDs("123,abc"); err == nil {
+			t.Error("expected error for non-numeric ID")
+		}
+	})
+	t.Run("non-positive entry errors", func(t *testing.T) {
+		if _, err := parseDocumentIDs("123,0"); err == nil {
+			t.Error("expected error for zero ID")
+		}
+		if _, err := parseDocumentIDs("-5"); err == nil {
+			t.Error("expected error for negative ID")
+		}
+	})
+}
+
 func setEnv(t *testing.T, vars map[string]string) func() {
 	t.Helper()
 	origins := make(map[string]string, len(vars))
