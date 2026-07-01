@@ -175,7 +175,8 @@ func runImport(args []string) error {
 Flags:
   --base-url string   Paperless-ngx instance URL (or PAPERLESS_URL env)
   --token string      API token (or PAPERLESS_TOKEN env)
-  --since string      Only import documents created after this date (YYYY-MM-DD)
+  --since string      Only import documents whose Paperless created date is on
+                      or after this date (YYYY-MM-DD)
   --vault string      Target vault directory
   --archive string    Target archive directory
   --db string         SQLite database path
@@ -197,7 +198,7 @@ and a document that previously failed is retried automatically.`)
 	fs := flag.NewFlagSet("import paperless", flag.ContinueOnError)
 	baseURL := fs.String("base-url", "", "Paperless-ngx instance URL")
 	token := fs.String("token", "", "API token")
-	sinceStr := fs.String("since", "", "Only import documents created after this date (YYYY-MM-DD)")
+	sinceStr := fs.String("since", "", "Only import documents whose Paperless created date is on or after this date (YYYY-MM-DD)")
 	dryRun := fs.Bool("dry-run", false, "List what would be imported without writing")
 	statusOnly := fs.Bool("status", false, "List per-document import status from a previous run, then exit")
 	jsonFlag := fs.Bool("json", false, "With --status, output the status list as JSON")

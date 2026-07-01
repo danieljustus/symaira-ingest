@@ -548,7 +548,7 @@ func TestRun_SinceFilter(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if !contains(requestedURL, "created_date__gte=2026-01-01") {
+	if !contains(requestedURL, "created__date__gte=2026-01-01") {
 		t.Errorf("expected since filter in URL, got: %s", requestedURL)
 	}
 }

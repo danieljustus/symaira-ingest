@@ -89,7 +89,10 @@ func (c *Client) resolveNextURL(next string) (string, error) {
 func (c *Client) ListDocuments(since time.Time, filters ...string) ([]Document, error) {
 	url := c.baseURL + "/api/documents/?format=json&ordering=-created_date"
 	if !since.IsZero() {
-		url += "&created_date__gte=" + since.Format("2006-01-02")
+		// created__date__gte (the Django date-transform lookup) is honored by
+		// the deployed Paperless-ngx API; the plain created_date__gte field is
+		// silently ignored and would return the entire archive unbounded.
+		url += "&created__date__gte=" + since.Format("2006-01-02")
 	}
 	for _, f := range filters {
 		url += "&" + f

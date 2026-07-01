@@ -152,6 +152,50 @@ func TestListDocuments_PaginationRelativeNext(t *testing.T) {
 	}
 }
 
+func TestListDocuments_SinceFilter(t *testing.T) {
+	var gotQuery url.Values
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/documents/", func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		json.NewEncoder(w).Encode(listResponse[Document]{Next: ""})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "test-token")
+	since := time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := c.ListDocuments(since); err != nil {
+		t.Fatalf("ListDocuments: %v", err)
+	}
+	// The deployed Paperless-ngx honors created__date__gte but silently
+	// ignores created_date__gte, so a --since bound must use the former.
+	if got := gotQuery.Get("created__date__gte"); got != "2099-01-01" {
+		t.Errorf("created__date__gte = %q, want 2099-01-01", got)
+	}
+	if _, ok := gotQuery["created_date__gte"]; ok {
+		t.Errorf("query still uses the ignored created_date__gte filter: %v", gotQuery.Encode())
+	}
+}
+
+func TestListDocuments_NoSinceOmitsDateFilter(t *testing.T) {
+	var gotQuery url.Values
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/documents/", func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		json.NewEncoder(w).Encode(listResponse[Document]{Next: ""})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "test-token")
+	if _, err := c.ListDocuments(time.Time{}); err != nil {
+		t.Fatalf("ListDocuments: %v", err)
+	}
+	if _, ok := gotQuery["created__date__gte"]; ok {
+		t.Errorf("zero since must not add a date filter, got %v", gotQuery.Encode())
+	}
+}
+
 func TestGetDocument(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/documents/42/", func(w http.ResponseWriter, r *http.Request) {

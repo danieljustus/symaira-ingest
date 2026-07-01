@@ -101,7 +101,8 @@ symingest import paperless --base-url https://paperless.example.com --token <api
 Flags:
   --base-url string   Paperless-ngx instance URL (or PAPERLESS_URL env)
   --token string      API token (or PAPERLESS_TOKEN env)
-  --since string      Only import documents created after this date (YYYY-MM-DD)
+  --since string      Only import documents whose Paperless created date is on
+                      or after this date (YYYY-MM-DD)
   --vault string      Target vault directory
   --archive string    Target archive directory
   --db string         SQLite database path
@@ -110,7 +111,7 @@ Flags:
   --json              With --status, output the status list as JSON
 ```
 
-Imports are resumable: a document already recorded as imported is skipped on a re-run, and a document that previously failed is retried automatically. Also available as the `import_paperless` MCP tool, which accepts the same options (`base_url`, `token`, `since`, `dry_run`, plus optional `vault_path`/`archive_path`/`db_path` overrides).
+`--since` filters on the document's Paperless *created* date (the date shown on the document), not the date it was added to Paperless. Imports are resumable: a document already recorded as imported is skipped on a re-run, and a document that previously failed is retried automatically. Also available as the `import_paperless` MCP tool, which accepts the same options (`base_url`, `token`, `since`, `dry_run`, plus optional `vault_path`/`archive_path`/`db_path` overrides).
 
 ## Development
 
