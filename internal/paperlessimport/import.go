@@ -25,9 +25,23 @@ type Stats struct {
 	// documents were touched without leaking any document content.
 	SelectedIDs []int
 
+	// Results records the per-document outcome in processing order, feeding
+	// the machine-readable migration report. It never contains document
+	// content, only IDs, a status, an optional reason, and written paths.
+	Results []DocumentResult
+
 	// Audit is the structured migration-readiness summary built during a
 	// dry-run. Nil for a real import.
 	Audit *AuditReport
+}
+
+// DocumentResult is the outcome of processing a single Paperless document.
+type DocumentResult struct {
+	ID          int    `json:"id"`
+	Status      string `json:"status"` // imported | skipped | failed | would-import
+	Reason      string `json:"reason,omitempty"`
+	VaultPath   string `json:"vault_path,omitempty"`
+	ArchivePath string `json:"archive_path,omitempty"`
 }
 
 type Options struct {
@@ -120,6 +134,63 @@ func resolveRef(ref paperless.Ref, table map[int]string) (name string, ok bool) 
 	return name, found
 }
 
+// resolvedMeta is the display metadata a document contributes to a generated
+// note: tag names, correspondent, document type, and storage path, plus any
+// warnings raised for references that could not be resolved to a name.
+type resolvedMeta struct {
+	Tags          []string
+	Correspondent string
+	DocumentType  string
+	StoragePath   string
+	Warnings      []string
+}
+
+// resolveDocMeta turns a document's Paperless references into the exact
+// display values written into its note. Both the importer and the post-import
+// verifier use it, so a verification compares against what the import would
+// have produced rather than a re-derived guess.
+func resolveDocMeta(doc paperless.Document, lu *lookups) resolvedMeta {
+	var m resolvedMeta
+
+	m.Tags = make([]string, 0, len(doc.Tags))
+	for _, t := range doc.Tags {
+		name, ok := resolveRef(t, lu.tags)
+		if !ok {
+			m.Warnings = append(m.Warnings, fmt.Sprintf("document %d (%s): unresolved tag ID %d", doc.ID, doc.Title, t.ID))
+			name = fmt.Sprintf("id:%d", t.ID)
+		}
+		if name != "" {
+			m.Tags = append(m.Tags, name)
+		}
+	}
+
+	if doc.Correspondent != nil {
+		name, ok := resolveRef(*doc.Correspondent, lu.correspondents)
+		if !ok {
+			m.Warnings = append(m.Warnings, fmt.Sprintf("document %d (%s): unresolved correspondent ID %d", doc.ID, doc.Title, doc.Correspondent.ID))
+			name = fmt.Sprintf("id:%d", doc.Correspondent.ID)
+		}
+		m.Correspondent = name
+	}
+	if doc.DocumentType != nil {
+		name, ok := resolveRef(*doc.DocumentType, lu.documentTypes)
+		if !ok {
+			m.Warnings = append(m.Warnings, fmt.Sprintf("document %d (%s): unresolved document type ID %d", doc.ID, doc.Title, doc.DocumentType.ID))
+			name = fmt.Sprintf("id:%d", doc.DocumentType.ID)
+		}
+		m.DocumentType = name
+	}
+	if doc.StoragePath != nil {
+		name, ok := resolveRef(*doc.StoragePath, lu.storagePaths)
+		if !ok {
+			m.Warnings = append(m.Warnings, fmt.Sprintf("document %d (%s): unresolved storage path ID %d", doc.ID, doc.Title, doc.StoragePath.ID))
+		}
+		m.StoragePath = name
+	}
+
+	return m
+}
+
 // selectDocuments resolves the set of Paperless documents to import for this
 // run. An explicit --ids list is fetched document-by-document (bounded, no
 // full-archive scan); otherwise the archive is listed with the --since bound
@@ -170,6 +241,7 @@ func Run(ctx context.Context, opts Options, pipeline *ingest.Pipeline) (*Stats, 
 		for i, doc := range docs {
 			fmt.Fprintf(os.Stderr, "[%d/%d] would import: %s (created: %s)\n", i+1, stats.Total, doc.Title, doc.CreatedDate.Format("2006-01-02"))
 			stats.Skipped++
+			stats.Results = append(stats.Results, DocumentResult{ID: doc.ID, Status: "would-import"})
 		}
 		stats.Audit = buildAuditReport(docs, lu)
 		printAuditReport(stats.Audit)
@@ -182,14 +254,16 @@ func Run(ctx context.Context, opts Options, pipeline *ingest.Pipeline) (*Stats, 
 		if status, found, serr := pipeline.Store.PaperlessImportStatus(ctx, opts.BaseURL, doc.ID); serr == nil && found && status == "imported" {
 			fmt.Fprintf(os.Stderr, "  skipped (already imported in a previous run)\n")
 			stats.Skipped++
+			stats.Results = append(stats.Results, DocumentResult{ID: doc.ID, Status: "skipped", Reason: "already imported in a previous run"})
 			continue
 		}
 
-		warnings, err := importOne(ctx, client, doc, lu, pipeline)
+		vaultPath, archivePath, warnings, err := importOne(ctx, client, doc, lu, pipeline)
 		stats.Warnings = append(stats.Warnings, warnings...)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  failed: %v\n", err)
 			stats.Failed++
+			stats.Results = append(stats.Results, DocumentResult{ID: doc.ID, Status: "failed", Reason: err.Error()})
 			if serr := pipeline.Store.UpsertPaperlessImportState(ctx, opts.BaseURL, doc.ID, "failed", err.Error()); serr != nil {
 				stats.Warnings = append(stats.Warnings, fmt.Sprintf("document %d: record import state: %v", doc.ID, serr))
 			}
@@ -199,6 +273,11 @@ func Run(ctx context.Context, opts Options, pipeline *ingest.Pipeline) (*Stats, 
 			stats.Warnings = append(stats.Warnings, fmt.Sprintf("document %d: record import state: %v", doc.ID, serr))
 		}
 		stats.Imported++
+		result := DocumentResult{ID: doc.ID, Status: "imported", VaultPath: vaultPath, ArchivePath: archivePath}
+		if vaultPath == "" {
+			result.Reason = "duplicate content; note already present in the vault"
+		}
+		stats.Results = append(stats.Results, result)
 	}
 
 	return stats, nil
@@ -229,22 +308,23 @@ func printAuditReport(r *AuditReport) {
 	}
 }
 
-func importOne(ctx context.Context, client *paperless.Client, doc paperless.Document, lu *lookups, pipeline *ingest.Pipeline) ([]string, error) {
-	var warnings []string
-
+// importOne downloads and ingests a single document, returning the written
+// vault and archive paths on success. A content duplicate returns empty paths
+// with a nil error (the document is already represented in the vault).
+func importOne(ctx context.Context, client *paperless.Client, doc paperless.Document, lu *lookups, pipeline *ingest.Pipeline) (vaultPath, archivePath string, warnings []string, err error) {
 	tmpFile, err := os.CreateTemp("", "symingest-import-*.tmp")
 	if err != nil {
-		return warnings, fmt.Errorf("create temp file: %w", err)
+		return "", "", warnings, fmt.Errorf("create temp file: %w", err)
 	}
 	tmpName := tmpFile.Name()
 	defer os.Remove(tmpName)
 
 	if err := client.DownloadDocument(doc.ID, tmpFile); err != nil {
 		tmpFile.Close()
-		return warnings, fmt.Errorf("download document: %w", err)
+		return "", "", warnings, fmt.Errorf("download document: %w", err)
 	}
 	if err := tmpFile.Close(); err != nil {
-		return warnings, fmt.Errorf("close temp file: %w", err)
+		return "", "", warnings, fmt.Errorf("close temp file: %w", err)
 	}
 
 	ext := doc.FileType
@@ -253,47 +333,16 @@ func importOne(ctx context.Context, client *paperless.Client, doc paperless.Docu
 	}
 	finalPath := tmpName + ext
 	if err := os.Rename(tmpName, finalPath); err != nil {
-		return warnings, fmt.Errorf("rename temp file: %w", err)
+		return "", "", warnings, fmt.Errorf("rename temp file: %w", err)
 	}
 	defer os.Remove(finalPath)
 
-	tags := make([]string, 0, len(doc.Tags))
-	for _, t := range doc.Tags {
-		name, ok := resolveRef(t, lu.tags)
-		if !ok {
-			warnings = append(warnings, fmt.Sprintf("document %d (%s): unresolved tag ID %d", doc.ID, doc.Title, t.ID))
-			name = fmt.Sprintf("id:%d", t.ID)
-		}
-		if name != "" {
-			tags = append(tags, name)
-		}
-	}
-
-	var correspondent, documentType string
-	if doc.Correspondent != nil {
-		name, ok := resolveRef(*doc.Correspondent, lu.correspondents)
-		if !ok {
-			warnings = append(warnings, fmt.Sprintf("document %d (%s): unresolved correspondent ID %d", doc.ID, doc.Title, doc.Correspondent.ID))
-			name = fmt.Sprintf("id:%d", doc.Correspondent.ID)
-		}
-		correspondent = name
-	}
-	if doc.DocumentType != nil {
-		name, ok := resolveRef(*doc.DocumentType, lu.documentTypes)
-		if !ok {
-			warnings = append(warnings, fmt.Sprintf("document %d (%s): unresolved document type ID %d", doc.ID, doc.Title, doc.DocumentType.ID))
-			name = fmt.Sprintf("id:%d", doc.DocumentType.ID)
-		}
-		documentType = name
-	}
-	var storagePath string
-	if doc.StoragePath != nil {
-		name, ok := resolveRef(*doc.StoragePath, lu.storagePaths)
-		if !ok {
-			warnings = append(warnings, fmt.Sprintf("document %d (%s): unresolved storage path ID %d", doc.ID, doc.Title, doc.StoragePath.ID))
-		}
-		storagePath = name
-	}
+	meta := resolveDocMeta(doc, lu)
+	warnings = append(warnings, meta.Warnings...)
+	tags := meta.Tags
+	correspondent := meta.Correspondent
+	documentType := meta.DocumentType
+	storagePath := meta.StoragePath
 
 	preset := &ingest.IngestOptions{
 		PresetCategory:      documentType,
@@ -314,15 +363,15 @@ func importOne(ctx context.Context, client *paperless.Client, doc paperless.Docu
 		},
 	}
 
-	_, err = pipeline.Ingest(ctx, finalPath, preset)
+	res, err := pipeline.Ingest(ctx, finalPath, preset)
 	if err != nil {
 		if errors.Is(err, ingest.ErrDuplicate) {
 			log.Printf("  skipped (duplicate): %s", doc.Title)
-			return warnings, nil
+			return "", "", warnings, nil
 		}
-		return warnings, fmt.Errorf("ingest: %w", err)
+		return "", "", warnings, fmt.Errorf("ingest: %w", err)
 	}
 
 	log.Printf("  imported: %s → vault", doc.Title)
-	return warnings, nil
+	return res.VaultPath, res.ArchivePath, warnings, nil
 }

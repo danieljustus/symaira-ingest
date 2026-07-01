@@ -185,8 +185,12 @@ Flags:
   --archive string    Target archive directory
   --db string         SQLite database path
   --dry-run           List what would be imported without writing
+  --report string     Write a JSON migration report to this path (works with
+                      --dry-run and real imports)
+  --verify            Verify a completed import against the Paperless source
+                      (compares notes, archived originals, and metadata), then exit
   --status            List per-document import status from a previous run, then exit
-  --json              With --status, output the status list as JSON
+  --json              With --status or --verify, output the result as JSON
 
 Import documents from a Paperless-ngx instance into the vault. Use --limit or
 --ids to run a small, inspectable pilot before a full migration; both bounds
@@ -208,8 +212,10 @@ previously failed is retried automatically.`)
 	limit := fs.Int("limit", 0, "Import at most N documents (newest first); 0 means no limit")
 	idsStr := fs.String("ids", "", "Import only these Paperless document IDs (comma-separated); takes precedence over --since and --limit")
 	dryRun := fs.Bool("dry-run", false, "List what would be imported without writing")
+	reportPath := fs.String("report", "", "Write a JSON migration report to this path (works with --dry-run and real imports)")
+	verify := fs.Bool("verify", false, "Verify a completed import against the Paperless source instead of importing")
 	statusOnly := fs.Bool("status", false, "List per-document import status from a previous run, then exit")
-	jsonFlag := fs.Bool("json", false, "With --status, output the status list as JSON")
+	jsonFlag := fs.Bool("json", false, "With --status or --verify, output the result as JSON")
 	ocrLang, vault, archive, db := registerSharedFlags(fs)
 	if err := fs.Parse(args[1:]); err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
@@ -302,6 +308,36 @@ previously failed is retried automatically.`)
 			"invalid ids")
 	}
 
+	if *verify {
+		report, err := paperlessimport.Verify(context.Background(), paperlessimport.Options{
+			BaseURL: *baseURL,
+			Token:   *token,
+			Since:   since,
+			Limit:   *limit,
+			IDs:     ids,
+		}, cfg.vault)
+		if err != nil {
+			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
+				"verification failed")
+		}
+		if *jsonFlag {
+			data, err := json.MarshalIndent(report, "", "  ")
+			if err != nil {
+				return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
+					"failed to marshal verification report to JSON")
+			}
+			fmt.Fprintln(stdout, string(data))
+		} else {
+			printVerifyReport(stdout, report)
+		}
+		if !report.Complete() {
+			return exitcodes.Wrapf(nil, exitcodes.ExitConflict, exitcodes.KindConflict,
+				"migration verification found discrepancies: %d missing, %d duplicate, %d missing-archive, %d mismatched",
+				len(report.Missing), len(report.Duplicate), len(report.MissingArchive), len(report.Mismatches))
+		}
+		return nil
+	}
+
 	st, err := store.Open(cfg.db)
 	if err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
@@ -340,10 +376,41 @@ previously failed is retried automatically.`)
 	if (*limit > 0 || len(ids) > 0) && len(stats.SelectedIDs) > 0 {
 		fmt.Fprintf(stdout, "Selected document IDs: %s\n", joinInts(stats.SelectedIDs))
 	}
+	if *reportPath != "" {
+		if err := paperlessimport.WriteMigrationReport(*reportPath, stats.BuildMigrationReport(*dryRun)); err != nil {
+			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
+				"failed to write migration report")
+		}
+		fmt.Fprintf(stdout, "Migration report written to %s\n", *reportPath)
+	}
 	if stats.Failed > 0 {
 		fmt.Fprintf(stdout, "Re-run the same command to retry failed documents; use --status to inspect them.\n")
 	}
 	return nil
+}
+
+// printVerifyReport writes a human-readable migration verification summary.
+func printVerifyReport(w io.Writer, r *paperlessimport.VerifyReport) {
+	fmt.Fprintf(w, "Migration verification: %d source documents, %d vault notes, %d verified\n",
+		r.SourceDocuments, r.VaultNotes, r.Verified)
+	if len(r.Missing) > 0 {
+		fmt.Fprintf(w, "  missing from vault (%d): %s\n", len(r.Missing), joinInts(r.Missing))
+	}
+	if len(r.Duplicate) > 0 {
+		fmt.Fprintf(w, "  duplicate notes (%d): %s\n", len(r.Duplicate), joinInts(r.Duplicate))
+	}
+	if len(r.MissingArchive) > 0 {
+		fmt.Fprintf(w, "  missing archived original (%d): %s\n", len(r.MissingArchive), joinInts(r.MissingArchive))
+	}
+	if len(r.Mismatches) > 0 {
+		fmt.Fprintf(w, "  metadata mismatches (%d):\n", len(r.Mismatches))
+		for _, m := range r.Mismatches {
+			fmt.Fprintf(w, "    document %d: %s expected %q, got %q\n", m.DocumentID, m.Field, m.Expected, m.Got)
+		}
+	}
+	if r.Complete() {
+		fmt.Fprintln(w, "  OK: vault matches the Paperless source")
+	}
 }
 
 // parseDocumentIDs parses a comma-separated list of Paperless document IDs,
