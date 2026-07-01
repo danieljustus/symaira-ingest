@@ -110,9 +110,13 @@ Flags:
   --archive string    Target archive directory
   --db string         SQLite database path
   --dry-run           List what would be imported without writing
+  --verify            Verify a completed import against the Paperless source
+                      (compares notes, archived originals, and metadata), then exit
   --status            List per-document import status from a previous run, then exit
-  --json              With --status, output the status list as JSON
+  --json              With --status or --verify, output the result as JSON
 ```
+
+After an import, `--verify` re-reads the Paperless source and the generated vault notes and reports any document that is missing, duplicated, missing its archived original, or whose metadata (tags, correspondent, document type, storage path, created date) drifted from the source. It prints a human summary, or a stable JSON report with `--json`, and exits non-zero when any discrepancy is found — suitable as an automated migration gate before Paperless is retired. Only IDs, field names, and paths appear in the output; document content never does.
 
 `--since` filters on the document's Paperless *created* date (the date shown on the document), not the date it was added to Paperless. Use `--limit` or `--ids` to run a small, inspectable pilot before a full migration; both bounds apply to `--dry-run` and real imports alike, and a bounded run echoes the selected document IDs. Imports are resumable: a document already recorded as imported is skipped on a re-run, and a document that previously failed is retried automatically. Also available as the `import_paperless` MCP tool, which accepts the same options (`base_url`, `token`, `since`, `dry_run`, plus optional `vault_path`/`archive_path`/`db_path` overrides).
 
