@@ -124,6 +124,8 @@ After an import, `--verify` re-reads the Paperless source and the generated vaul
 
 `--since` filters on the document's Paperless *created* date (the date shown on the document), not the date it was added to Paperless. Use `--limit` or `--ids` to run a small, inspectable pilot before a full migration; both bounds apply to `--dry-run` and real imports alike, and a bounded run echoes the selected document IDs. Imports are resumable: a document already recorded as imported is skipped on a re-run, and a document that previously failed is retried automatically. Also available as the `import_paperless` MCP tool, which accepts the same options (`base_url`, `token`, `since`, `dry_run`, plus optional `vault_path`/`archive_path`/`db_path` overrides).
 
+For a complete, gated migration path — dry-run, bounded pilot, full import, verification, and search validation, with an explicit rule for when Paperless can stop being the source of truth — follow the [Paperless replacement runbook](docs/paperless-replacement-runbook.md).
+
 ## Development
 
 **Build:**
