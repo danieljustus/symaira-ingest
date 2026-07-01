@@ -185,6 +185,8 @@ Flags:
   --archive string    Target archive directory
   --db string         SQLite database path
   --dry-run           List what would be imported without writing
+  --report string     Write a JSON migration report to this path (works with
+                      --dry-run and real imports)
   --verify            Verify a completed import against the Paperless source
                       (compares notes, archived originals, and metadata), then exit
   --status            List per-document import status from a previous run, then exit
@@ -210,6 +212,7 @@ previously failed is retried automatically.`)
 	limit := fs.Int("limit", 0, "Import at most N documents (newest first); 0 means no limit")
 	idsStr := fs.String("ids", "", "Import only these Paperless document IDs (comma-separated); takes precedence over --since and --limit")
 	dryRun := fs.Bool("dry-run", false, "List what would be imported without writing")
+	reportPath := fs.String("report", "", "Write a JSON migration report to this path (works with --dry-run and real imports)")
 	verify := fs.Bool("verify", false, "Verify a completed import against the Paperless source instead of importing")
 	statusOnly := fs.Bool("status", false, "List per-document import status from a previous run, then exit")
 	jsonFlag := fs.Bool("json", false, "With --status or --verify, output the result as JSON")
@@ -372,6 +375,13 @@ previously failed is retried automatically.`)
 	// the operator can inspect them. Document content is never printed.
 	if (*limit > 0 || len(ids) > 0) && len(stats.SelectedIDs) > 0 {
 		fmt.Fprintf(stdout, "Selected document IDs: %s\n", joinInts(stats.SelectedIDs))
+	}
+	if *reportPath != "" {
+		if err := paperlessimport.WriteMigrationReport(*reportPath, stats.BuildMigrationReport(*dryRun)); err != nil {
+			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
+				"failed to write migration report")
+		}
+		fmt.Fprintf(stdout, "Migration report written to %s\n", *reportPath)
 	}
 	if stats.Failed > 0 {
 		fmt.Fprintf(stdout, "Re-run the same command to retry failed documents; use --status to inspect them.\n")

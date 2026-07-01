@@ -110,11 +110,15 @@ Flags:
   --archive string    Target archive directory
   --db string         SQLite database path
   --dry-run           List what would be imported without writing
+  --report string     Write a JSON migration report to this path (works with
+                      --dry-run and real imports)
   --verify            Verify a completed import against the Paperless source
                       (compares notes, archived originals, and metadata), then exit
   --status            List per-document import status from a previous run, then exit
   --json              With --status or --verify, output the result as JSON
 ```
+
+`--report <path>` writes a stable JSON migration report for a dry-run or a real import: overall counts plus a per-document array (`id`, `status`, optional `reason`, and generated `vault_path`/`archive_path`), collected warnings, and — for a dry-run — the unsupported file types and unresolved metadata IDs from the audit. Like every other output it contains no document content, so it is safe to hand to a review step or a later UI.
 
 After an import, `--verify` re-reads the Paperless source and the generated vault notes and reports any document that is missing, duplicated, missing its archived original, or whose metadata (tags, correspondent, document type, storage path, created date) drifted from the source. It prints a human summary, or a stable JSON report with `--json`, and exits non-zero when any discrepancy is found — suitable as an automated migration gate before Paperless is retired. Only IDs, field names, and paths appear in the output; document content never does.
 
