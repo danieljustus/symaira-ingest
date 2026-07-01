@@ -548,8 +548,182 @@ func TestRun_SinceFilter(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if !contains(requestedURL, "created_date__gte=2026-01-01") {
+	if !contains(requestedURL, "created__date__gte=2026-01-01") {
 		t.Errorf("expected since filter in URL, got: %s", requestedURL)
+	}
+}
+
+func TestRun_Limit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if handleEmptyLookups(w, r) {
+			return
+		}
+		switch {
+		case r.URL.Path == "/api/documents/":
+			json.NewEncoder(w).Encode(map[string]any{
+				"count": 3,
+				"results": []map[string]any{
+					{"id": 1, "title": "Doc 1", "created_date": "2026-01-15", "file_type": ".txt"},
+					{"id": 2, "title": "Doc 2", "created_date": "2026-01-16", "file_type": ".txt"},
+					{"id": 3, "title": "Doc 3", "created_date": "2026-01-17", "file_type": ".txt"},
+				},
+				"next": nil,
+			})
+		case r.URL.Path == "/api/documents/1/download/":
+			w.Write([]byte("content 1"))
+		case r.URL.Path == "/api/documents/2/download/":
+			w.Write([]byte("content 2"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	pipeline := &ingest.Pipeline{
+		Engine:     fakeEngine{},
+		Store:      s,
+		Writer:     &writer.NoteWriter{Vault: filepath.Join(dir, "vault")},
+		ArchiveDir: filepath.Join(dir, "archive"),
+	}
+
+	stats, err := Run(context.Background(), Options{
+		BaseURL: srv.URL,
+		Token:   "test-token",
+		Limit:   2,
+	}, pipeline)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if stats.Total != 2 {
+		t.Errorf("stats.Total = %d, want 2 (limit must cap the selection)", stats.Total)
+	}
+	if stats.Imported != 2 {
+		t.Errorf("stats.Imported = %d, want 2", stats.Imported)
+	}
+	wantIDs := []int{1, 2}
+	if len(stats.SelectedIDs) != 2 || stats.SelectedIDs[0] != wantIDs[0] || stats.SelectedIDs[1] != wantIDs[1] {
+		t.Errorf("stats.SelectedIDs = %v, want %v", stats.SelectedIDs, wantIDs)
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, "vault") + "/*.md")
+	if len(matches) != 2 {
+		t.Fatalf("expected 2 notes (limited), got %d", len(matches))
+	}
+}
+
+func TestRun_ExplicitIDs(t *testing.T) {
+	var listCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if handleEmptyLookups(w, r) {
+			return
+		}
+		switch r.URL.Path {
+		case "/api/documents/":
+			// A bounded --ids run must fetch documents individually, never
+			// scan the full archive listing.
+			listCalled = true
+			w.WriteHeader(http.StatusInternalServerError)
+		case "/api/documents/42/":
+			json.NewEncoder(w).Encode(map[string]any{
+				"id": 42, "title": "Doc 42", "created_date": "2026-01-15", "file_type": ".txt",
+			})
+		case "/api/documents/42/download/":
+			w.Write([]byte("content 42"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	pipeline := &ingest.Pipeline{
+		Engine:     fakeEngine{},
+		Store:      s,
+		Writer:     &writer.NoteWriter{Vault: filepath.Join(dir, "vault")},
+		ArchiveDir: filepath.Join(dir, "archive"),
+	}
+
+	stats, err := Run(context.Background(), Options{
+		BaseURL: srv.URL,
+		Token:   "test-token",
+		IDs:     []int{42},
+	}, pipeline)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if listCalled {
+		t.Error("explicit --ids run must not call the document list endpoint")
+	}
+	if stats.Total != 1 || stats.Imported != 1 {
+		t.Errorf("stats total=%d imported=%d, want 1/1", stats.Total, stats.Imported)
+	}
+	if len(stats.SelectedIDs) != 1 || stats.SelectedIDs[0] != 42 {
+		t.Errorf("stats.SelectedIDs = %v, want [42]", stats.SelectedIDs)
+	}
+}
+
+func TestRun_ExplicitIDs_DryRunHonorsBound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if handleEmptyLookups(w, r) {
+			return
+		}
+		switch r.URL.Path {
+		case "/api/documents/":
+			t.Error("dry-run with --ids must not list the full archive")
+			w.WriteHeader(http.StatusInternalServerError)
+		case "/api/documents/7/":
+			json.NewEncoder(w).Encode(map[string]any{
+				"id": 7, "title": "Doc 7", "created_date": "2026-01-15", "file_type": ".pdf",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	pipeline := &ingest.Pipeline{
+		Store:      s,
+		Writer:     &writer.NoteWriter{Vault: filepath.Join(dir, "vault")},
+		ArchiveDir: filepath.Join(dir, "archive"),
+	}
+
+	stats, err := Run(context.Background(), Options{
+		BaseURL: srv.URL,
+		Token:   "test-token",
+		IDs:     []int{7},
+		DryRun:  true,
+	}, pipeline)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if stats.Total != 1 || stats.Skipped != 1 || stats.Imported != 0 {
+		t.Errorf("dry-run stats total=%d skipped=%d imported=%d, want 1/1/0", stats.Total, stats.Skipped, stats.Imported)
+	}
+	if len(stats.SelectedIDs) != 1 || stats.SelectedIDs[0] != 7 {
+		t.Errorf("stats.SelectedIDs = %v, want [7]", stats.SelectedIDs)
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, "vault") + "/*.md")
+	if len(matches) != 0 {
+		t.Fatalf("dry-run must not write notes, found %d", len(matches))
 	}
 }
 

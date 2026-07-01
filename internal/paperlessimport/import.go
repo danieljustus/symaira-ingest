@@ -20,6 +20,11 @@ type Stats struct {
 	Total    int
 	Warnings []string
 
+	// SelectedIDs lists the Paperless document IDs chosen for this run, in
+	// processing order. It lets a bounded pilot import report exactly which
+	// documents were touched without leaking any document content.
+	SelectedIDs []int
+
 	// Audit is the structured migration-readiness summary built during a
 	// dry-run. Nil for a real import.
 	Audit *AuditReport
@@ -30,6 +35,16 @@ type Options struct {
 	Token   string
 	Since   time.Time
 	DryRun  bool
+
+	// Limit caps the number of documents processed this run to the first N
+	// of the listed archive (newest first). Zero means no limit. Ignored
+	// when IDs is set.
+	Limit int
+
+	// IDs restricts the run to an explicit set of Paperless document IDs,
+	// fetched individually. When non-empty it takes precedence over Since
+	// and Limit, enabling a deterministic, inspectable pilot import.
+	IDs []int
 }
 
 // lookups resolves Paperless tag/correspondent/document-type/storage-path
@@ -105,12 +120,39 @@ func resolveRef(ref paperless.Ref, table map[int]string) (name string, ok bool) 
 	return name, found
 }
 
-func Run(ctx context.Context, opts Options, pipeline *ingest.Pipeline) (*Stats, error) {
-	client := paperless.NewClient(opts.BaseURL, opts.Token)
+// selectDocuments resolves the set of Paperless documents to import for this
+// run. An explicit --ids list is fetched document-by-document (bounded, no
+// full-archive scan); otherwise the archive is listed with the --since bound
+// and capped to --limit when set.
+func selectDocuments(client *paperless.Client, opts Options) ([]paperless.Document, error) {
+	if len(opts.IDs) > 0 {
+		docs := make([]paperless.Document, 0, len(opts.IDs))
+		for _, id := range opts.IDs {
+			doc, err := client.GetDocument(id)
+			if err != nil {
+				return nil, fmt.Errorf("get document %d: %w", id, err)
+			}
+			docs = append(docs, *doc)
+		}
+		return docs, nil
+	}
 
 	docs, err := client.ListDocuments(opts.Since)
 	if err != nil {
 		return nil, fmt.Errorf("list documents: %w", err)
+	}
+	if opts.Limit > 0 && len(docs) > opts.Limit {
+		docs = docs[:opts.Limit]
+	}
+	return docs, nil
+}
+
+func Run(ctx context.Context, opts Options, pipeline *ingest.Pipeline) (*Stats, error) {
+	client := paperless.NewClient(opts.BaseURL, opts.Token)
+
+	docs, err := selectDocuments(client, opts)
+	if err != nil {
+		return nil, err
 	}
 
 	lu, err := loadLookups(client)
@@ -119,6 +161,10 @@ func Run(ctx context.Context, opts Options, pipeline *ingest.Pipeline) (*Stats, 
 	}
 
 	stats := &Stats{Total: len(docs)}
+	stats.SelectedIDs = make([]int, 0, len(docs))
+	for _, doc := range docs {
+		stats.SelectedIDs = append(stats.SelectedIDs, doc.ID)
+	}
 
 	if opts.DryRun {
 		for i, doc := range docs {

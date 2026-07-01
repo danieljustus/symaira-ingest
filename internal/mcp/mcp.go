@@ -437,7 +437,7 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 			"properties": {
 				"base_url": {"type": "string", "description": "Paperless-ngx instance URL (or set PAPERLESS_URL env)"},
 				"token": {"type": "string", "description": "API token (or set PAPERLESS_TOKEN env)"},
-				"since": {"type": "string", "description": "Only import documents created after this date (YYYY-MM-DD)"},
+				"since": {"type": "string", "description": "Only import documents whose Paperless created date is on or after this date (YYYY-MM-DD)"},
 				"dry_run": {"type": "boolean", "description": "List what would be imported without writing"},
 				"vault_path": {"type": "string", "description": "Optional vault directory override; required if no default vault is configured"},
 				"archive_path": {"type": "string", "description": "Optional archive directory override"},
