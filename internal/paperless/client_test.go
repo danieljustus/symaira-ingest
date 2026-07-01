@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 )
@@ -69,6 +70,82 @@ func TestListDocuments_Pagination(t *testing.T) {
 	}
 	if len(docs) != 2 {
 		t.Fatalf("len(docs) = %d, want 2", len(docs))
+	}
+	if callCount != 2 {
+		t.Errorf("callCount = %d, want 2", callCount)
+	}
+}
+
+func TestListDocuments_PaginationAbsoluteNextMissingPort(t *testing.T) {
+	callCount := 0
+	var srvURL string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/documents/", func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount == 1 {
+			// Emit an absolute next link that drops the configured port,
+			// exactly as the real Paperless API was observed to do.
+			u, _ := url.Parse(srvURL)
+			next := "http://" + u.Hostname() + "/api/documents/?format=json&page=2"
+			json.NewEncoder(w).Encode(listResponse[Document]{
+				Count:   2,
+				Results: []Document{{ID: 1, Title: "Doc 1"}},
+				Next:    next,
+			})
+			return
+		}
+		json.NewEncoder(w).Encode(listResponse[Document]{
+			Count:   2,
+			Results: []Document{{ID: 2, Title: "Doc 2"}},
+			Next:    "",
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	srvURL = srv.URL
+
+	c := NewClient(srv.URL, "test-token")
+	docs, err := c.ListDocuments(time.Time{})
+	if err != nil {
+		t.Fatalf("ListDocuments: %v", err)
+	}
+	if len(docs) != 2 {
+		t.Fatalf("len(docs) = %d, want 2 (page 2 must reuse the configured port, not fall back to port 80)", len(docs))
+	}
+	if callCount != 2 {
+		t.Errorf("callCount = %d, want 2", callCount)
+	}
+}
+
+func TestListDocuments_PaginationRelativeNext(t *testing.T) {
+	callCount := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/documents/", func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount == 1 {
+			json.NewEncoder(w).Encode(listResponse[Document]{
+				Count:   2,
+				Results: []Document{{ID: 1, Title: "Doc 1"}},
+				Next:    "/api/documents/?format=json&page=2",
+			})
+			return
+		}
+		json.NewEncoder(w).Encode(listResponse[Document]{
+			Count:   2,
+			Results: []Document{{ID: 2, Title: "Doc 2"}},
+			Next:    "",
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "test-token")
+	docs, err := c.ListDocuments(time.Time{})
+	if err != nil {
+		t.Fatalf("ListDocuments: %v", err)
+	}
+	if len(docs) != 2 {
+		t.Fatalf("len(docs) = %d, want 2 (relative next link must resolve against the base URL)", len(docs))
 	}
 	if callCount != 2 {
 		t.Errorf("callCount = %d, want 2", callCount)

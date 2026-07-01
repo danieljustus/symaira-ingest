@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
@@ -57,6 +58,34 @@ func (c *Client) doRequest(url string, result any) error {
 	return nil
 }
 
+// resolveNextURL normalizes a Paperless pagination "next" link against the
+// configured base URL. Paperless-ngx has been observed to return absolute
+// next links that drop the deployment port (e.g. the bare host without
+// :8001), which would otherwise send the follow-up request to port 80 and
+// fail. Relative links are resolved against the base URL; absolute links that
+// point at the configured host but changed or dropped the port have the
+// configured host:port restored. A genuinely different host is left as-is.
+func (c *Client) resolveNextURL(next string) (string, error) {
+	if next == "" {
+		return "", nil
+	}
+	ref, err := url.Parse(next)
+	if err != nil {
+		return "", fmt.Errorf("parse next link %q: %w", next, err)
+	}
+	base, err := url.Parse(c.baseURL)
+	if err != nil {
+		// Without a parseable base we cannot normalize; follow the link as
+		// given rather than dropping pagination entirely.
+		return next, nil
+	}
+	resolved := base.ResolveReference(ref)
+	if resolved.Hostname() == base.Hostname() && resolved.Port() != base.Port() {
+		resolved.Host = base.Host
+	}
+	return resolved.String(), nil
+}
+
 func (c *Client) ListDocuments(since time.Time, filters ...string) ([]Document, error) {
 	url := c.baseURL + "/api/documents/?format=json&ordering=-created_date"
 	if !since.IsZero() {
@@ -73,7 +102,11 @@ func (c *Client) ListDocuments(since time.Time, filters ...string) ([]Document, 
 			return nil, err
 		}
 		all = append(all, page.Results...)
-		url = page.Next
+		next, err := c.resolveNextURL(page.Next)
+		if err != nil {
+			return nil, err
+		}
+		url = next
 	}
 	return all, nil
 }
@@ -125,7 +158,11 @@ func (c *Client) ListTags() ([]Tag, error) {
 			return nil, err
 		}
 		all = append(all, page.Results...)
-		url = page.Next
+		next, err := c.resolveNextURL(page.Next)
+		if err != nil {
+			return nil, err
+		}
+		url = next
 	}
 	return all, nil
 }
@@ -139,7 +176,11 @@ func (c *Client) ListCorrespondents() ([]Correspondent, error) {
 			return nil, err
 		}
 		all = append(all, page.Results...)
-		url = page.Next
+		next, err := c.resolveNextURL(page.Next)
+		if err != nil {
+			return nil, err
+		}
+		url = next
 	}
 	return all, nil
 }
@@ -153,7 +194,11 @@ func (c *Client) ListDocumentTypes() ([]DocumentType, error) {
 			return nil, err
 		}
 		all = append(all, page.Results...)
-		url = page.Next
+		next, err := c.resolveNextURL(page.Next)
+		if err != nil {
+			return nil, err
+		}
+		url = next
 	}
 	return all, nil
 }
@@ -167,7 +212,11 @@ func (c *Client) ListStoragePaths() ([]StoragePath, error) {
 			return nil, err
 		}
 		all = append(all, page.Results...)
-		url = page.Next
+		next, err := c.resolveNextURL(page.Next)
+		if err != nil {
+			return nil, err
+		}
+		url = next
 	}
 	return all, nil
 }
