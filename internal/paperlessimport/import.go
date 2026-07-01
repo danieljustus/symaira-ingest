@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/danieljustus/symaira-ingest/internal/ingest"
@@ -59,6 +61,12 @@ type Options struct {
 	// fetched individually. When non-empty it takes precedence over Since
 	// and Limit, enabling a deterministic, inspectable pilot import.
 	IDs []int
+
+	// PreserveStoragePaths, when true, places each generated note under a
+	// vault subdirectory derived from the document's Paperless storage path
+	// instead of the flat vault root. Off by default for backward
+	// compatibility.
+	PreserveStoragePaths bool
 }
 
 // lookups resolves Paperless tag/correspondent/document-type/storage-path
@@ -258,7 +266,7 @@ func Run(ctx context.Context, opts Options, pipeline *ingest.Pipeline) (*Stats, 
 			continue
 		}
 
-		vaultPath, archivePath, warnings, err := importOne(ctx, client, doc, lu, pipeline)
+		vaultPath, archivePath, warnings, err := importOne(ctx, client, doc, lu, pipeline, opts.PreserveStoragePaths)
 		stats.Warnings = append(stats.Warnings, warnings...)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  failed: %v\n", err)
@@ -308,10 +316,26 @@ func printAuditReport(r *AuditReport) {
 	}
 }
 
+// paperlessNoteBaseName derives a stable, human-readable file name (without
+// extension) for a document's note, used by --preserve-storage-paths. It
+// prefers the original Paperless file name, then the title, and finally a
+// document-ID fallback. Sanitization is applied by the writer.
+func paperlessNoteBaseName(doc paperless.Document) string {
+	if doc.OriginalFileName != "" {
+		if b := strings.TrimSuffix(filepath.Base(doc.OriginalFileName), filepath.Ext(doc.OriginalFileName)); b != "" {
+			return b
+		}
+	}
+	if doc.Title != "" {
+		return doc.Title
+	}
+	return fmt.Sprintf("document-%d", doc.ID)
+}
+
 // importOne downloads and ingests a single document, returning the written
 // vault and archive paths on success. A content duplicate returns empty paths
 // with a nil error (the document is already represented in the vault).
-func importOne(ctx context.Context, client *paperless.Client, doc paperless.Document, lu *lookups, pipeline *ingest.Pipeline) (vaultPath, archivePath string, warnings []string, err error) {
+func importOne(ctx context.Context, client *paperless.Client, doc paperless.Document, lu *lookups, pipeline *ingest.Pipeline, preserveStoragePaths bool) (vaultPath, archivePath string, warnings []string, err error) {
 	tmpFile, err := os.CreateTemp("", "symingest-import-*.tmp")
 	if err != nil {
 		return "", "", warnings, fmt.Errorf("create temp file: %w", err)
@@ -344,11 +368,20 @@ func importOne(ctx context.Context, client *paperless.Client, doc paperless.Docu
 	documentType := meta.DocumentType
 	storagePath := meta.StoragePath
 
+	var layout *writer.NoteLayout
+	if preserveStoragePaths {
+		layout = &writer.NoteLayout{
+			Subdir:   writer.SanitizeStoragePath(storagePath),
+			BaseName: paperlessNoteBaseName(doc),
+		}
+	}
+
 	preset := &ingest.IngestOptions{
 		PresetCategory:      documentType,
 		PresetTags:          tags,
 		PresetCorrespondent: correspondent,
 		PresetDocumentType:  documentType,
+		Layout:              layout,
 		Paperless: &writer.PaperlessMeta{
 			DocumentID:       doc.ID,
 			Title:            doc.Title,

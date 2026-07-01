@@ -181,6 +181,9 @@ Flags:
   --limit int         Import at most N documents (newest first); 0 means no limit
   --ids string        Import only these Paperless document IDs (comma-separated,
                       e.g. 123,456); takes precedence over --since and --limit
+  --preserve-storage-paths
+                      Place notes under vault subdirectories derived from each
+                      document's Paperless storage path (default: flat layout)
   --vault string      Target vault directory
   --archive string    Target archive directory
   --db string         SQLite database path
@@ -211,6 +214,7 @@ previously failed is retried automatically.`)
 	sinceStr := fs.String("since", "", "Only import documents whose Paperless created date is on or after this date (YYYY-MM-DD)")
 	limit := fs.Int("limit", 0, "Import at most N documents (newest first); 0 means no limit")
 	idsStr := fs.String("ids", "", "Import only these Paperless document IDs (comma-separated); takes precedence over --since and --limit")
+	preserveStoragePaths := fs.Bool("preserve-storage-paths", false, "Place notes under vault subdirectories derived from each document's Paperless storage path")
 	dryRun := fs.Bool("dry-run", false, "List what would be imported without writing")
 	reportPath := fs.String("report", "", "Write a JSON migration report to this path (works with --dry-run and real imports)")
 	verify := fs.Bool("verify", false, "Verify a completed import against the Paperless source instead of importing")
@@ -354,12 +358,13 @@ previously failed is retried automatically.`)
 	}
 
 	opts := paperlessimport.Options{
-		BaseURL: *baseURL,
-		Token:   *token,
-		Since:   since,
-		DryRun:  *dryRun,
-		Limit:   *limit,
-		IDs:     ids,
+		BaseURL:              *baseURL,
+		Token:                *token,
+		Since:                since,
+		DryRun:               *dryRun,
+		Limit:                *limit,
+		IDs:                  ids,
+		PreserveStoragePaths: *preserveStoragePaths,
 	}
 
 	ctx := context.Background()

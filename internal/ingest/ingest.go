@@ -19,6 +19,9 @@ type IngestOptions struct {
 	// Paperless carries traceability metadata when the source originates
 	// from a Paperless-ngx migration. Nil for ordinary ingests.
 	Paperless *writer.PaperlessMeta
+	// Layout optionally overrides the note's placement within the vault
+	// (subdirectory and file name). Nil keeps the flat sidecar layout.
+	Layout *writer.NoteLayout
 }
 
 // Result is the outcome of a one-shot ingest.
