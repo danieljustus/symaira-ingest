@@ -129,7 +129,7 @@ func fileExists(path string) bool {
 // a partially written file behind.
 func (w *NoteWriter) WriteNote(sourcePath, sha256, mime, ocrEngine, text, archivePath string, ingestedAt time.Time, category string, tags []string, correspondent, documentType string, paperless *PaperlessMeta, layout *NoteLayout) (string, error) {
 	vaultPath := w.resolveNotePath(sourcePath, layout)
-	if err := os.MkdirAll(filepath.Dir(vaultPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(vaultPath), 0o700); err != nil {
 		return "", fmt.Errorf("create vault directory: %w", err)
 	}
 
@@ -168,7 +168,7 @@ func (w *NoteWriter) WriteNote(sourcePath, sha256, mime, ocrEngine, text, archiv
 		sb.WriteString(fmt.Sprintf("[Archived Original](file://%s)\n", filepath.ToSlash(archivePath)))
 	}
 
-	if err := fsutil.AtomicWriteFile(vaultPath, []byte(sb.String()), 0o644); err != nil {
+	if err := fsutil.AtomicWriteFile(vaultPath, []byte(sb.String()), 0o600); err != nil {
 		return "", fmt.Errorf("write note: %w", err)
 	}
 	return vaultPath, nil

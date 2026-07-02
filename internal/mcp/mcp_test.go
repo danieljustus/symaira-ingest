@@ -132,10 +132,10 @@ func readResp(t *testing.T, r io.ReadCloser) jsonRPCResponse {
 }
 
 type jsonRPCResponse struct {
-	JSONRPC string      `json:"jsonrpc"`
-	ID      any         `json:"id"`
-	Result  any         `json:"result"`
-	Error   any         `json:"error"`
+	JSONRPC string `json:"jsonrpc"`
+	ID      any    `json:"id"`
+	Result  any    `json:"result"`
+	Error   any    `json:"error"`
 }
 
 func itoa(n int) string {
@@ -913,10 +913,87 @@ func TestRegister_ImportPaperless_PathOverrides(t *testing.T) {
 	}
 }
 
+func TestRegister_ImportPaperless_BoundedOptions(t *testing.T) {
+	var listCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/documents/":
+			listCalled = true
+			w.WriteHeader(http.StatusInternalServerError)
+		case "/api/documents/2/":
+			json.NewEncoder(w).Encode(map[string]any{
+				"id": 2, "title": "Bounded MCP Doc", "created_date": "2026-01-15", "file_type": ".txt",
+				"original_file_name": "invoice.pdf",
+				"storage_path":       map[string]any{"id": 9, "name": "Finance/Invoices"},
+			})
+		case "/api/documents/2/download/":
+			w.Write([]byte("bounded mcp content"))
+		case "/api/tags/", "/api/correspondents/", "/api/document_types/", "/api/storage_paths/":
+			json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []any{}, "next": nil})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "mcp.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	server := mcpserver.New("symingest", "0.1.0")
+	Register(server, st, fakeEngine{}, "", "")
+
+	overrideVault := filepath.Join(dir, "override-vault")
+	overrideArchive := filepath.Join(dir, "override-archive")
+	reportPath := filepath.Join(dir, "report.json")
+
+	raw, isError := callTool(t, server, "import_paperless", map[string]any{
+		"base_url":               srv.URL,
+		"token":                  "test-token",
+		"vault_path":             overrideVault,
+		"archive_path":           overrideArchive,
+		"ids":                    []any{float64(2)},
+		"limit":                  float64(1),
+		"preserve_storage_paths": true,
+		"report_path":            reportPath,
+	})
+	if isError {
+		t.Fatalf("expected success, got error result: %v", raw)
+	}
+	if listCalled {
+		t.Fatal("ids import must fetch documents individually instead of listing the archive")
+	}
+	selected, ok := raw["selected_ids"].([]any)
+	if !ok || len(selected) != 1 || selected[0] != float64(2) {
+		t.Fatalf("selected_ids = %v, want [2]", raw["selected_ids"])
+	}
+	wantNote := filepath.Join(overrideVault, "Finance", "Invoices", "invoice.md")
+	if _, err := os.Stat(wantNote); err != nil {
+		t.Fatalf("expected preserve_storage_paths note at %s: %v", wantNote, err)
+	}
+	if _, err := os.Stat(reportPath); err != nil {
+		t.Fatalf("expected report_path to be written: %v", err)
+	}
+}
+
+func TestResolveVaultArchive_DefaultArchiveHomeError(t *testing.T) {
+	t.Setenv("HOME", "")
+	_, _, err := resolveVaultArchive("/vault", "", "", "")
+	if err == nil {
+		t.Fatal("expected home-dir error for missing default archive base")
+	}
+	if !strings.Contains(err.Error(), "default archive") {
+		t.Fatalf("error = %v, want mention of default archive", err)
+	}
+}
+
 func TestStopAllWatchers(t *testing.T) {
 	cancelled := false
 	activeWatchers.Store("test-dir", &watcherEntry{
-		cancel: func() { cancelled = true },
+		cancel:  func() { cancelled = true },
 		watcher: nil,
 	})
 

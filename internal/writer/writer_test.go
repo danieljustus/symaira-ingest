@@ -24,6 +24,9 @@ func TestWriteNote(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if mode := fileMode(t, path); mode != 0o600 {
+		t.Fatalf("note mode = %o, want 0600", mode)
+	}
 	out := string(data)
 	if !strings.HasPrefix(out, "---\n") {
 		t.Fatal("missing frontmatter start")
@@ -253,6 +256,21 @@ func TestWriteNote_LayoutSubdirAndBaseName(t *testing.T) {
 	if _, err := os.Stat(want); err != nil {
 		t.Errorf("note not written at expected layout path: %v", err)
 	}
+	if mode := fileMode(t, want); mode != 0o600 {
+		t.Fatalf("note mode = %o, want 0600", mode)
+	}
+	if mode := fileMode(t, filepath.Dir(want)); mode != 0o700 {
+		t.Fatalf("layout directory mode = %o, want 0700", mode)
+	}
+}
+
+func fileMode(t *testing.T, path string) os.FileMode {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return info.Mode().Perm()
 }
 
 func TestWriteNote_LayoutCollisionDeterministic(t *testing.T) {

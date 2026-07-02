@@ -46,6 +46,18 @@ type DocumentResult struct {
 	ArchivePath string `json:"archive_path,omitempty"`
 }
 
+func boundedErrorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	const max = 1024
+	reason := strings.Join(strings.Fields(err.Error()), " ")
+	if len(reason) <= max {
+		return reason
+	}
+	return reason[:max] + "…"
+}
+
 type Options struct {
 	BaseURL string
 	Token   string
@@ -79,20 +91,20 @@ type lookups struct {
 	storagePaths   map[int]string
 }
 
-func loadLookups(client *paperless.Client) (*lookups, error) {
-	tags, err := client.ListTags()
+func loadLookups(ctx context.Context, client *paperless.Client) (*lookups, error) {
+	tags, err := client.ListTags(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list tags: %w", err)
 	}
-	correspondents, err := client.ListCorrespondents()
+	correspondents, err := client.ListCorrespondents(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list correspondents: %w", err)
 	}
-	documentTypes, err := client.ListDocumentTypes()
+	documentTypes, err := client.ListDocumentTypes(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list document types: %w", err)
 	}
-	storagePaths, err := client.ListStoragePaths()
+	storagePaths, err := client.ListStoragePaths(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list storage paths: %w", err)
 	}
@@ -203,11 +215,11 @@ func resolveDocMeta(doc paperless.Document, lu *lookups) resolvedMeta {
 // run. An explicit --ids list is fetched document-by-document (bounded, no
 // full-archive scan); otherwise the archive is listed with the --since bound
 // and capped to --limit when set.
-func selectDocuments(client *paperless.Client, opts Options) ([]paperless.Document, error) {
+func selectDocuments(ctx context.Context, client *paperless.Client, opts Options) ([]paperless.Document, error) {
 	if len(opts.IDs) > 0 {
 		docs := make([]paperless.Document, 0, len(opts.IDs))
 		for _, id := range opts.IDs {
-			doc, err := client.GetDocument(id)
+			doc, err := client.GetDocument(ctx, id)
 			if err != nil {
 				return nil, fmt.Errorf("get document %d: %w", id, err)
 			}
@@ -216,7 +228,7 @@ func selectDocuments(client *paperless.Client, opts Options) ([]paperless.Docume
 		return docs, nil
 	}
 
-	docs, err := client.ListDocuments(opts.Since)
+	docs, err := client.ListDocuments(ctx, opts.Since, opts.Limit)
 	if err != nil {
 		return nil, fmt.Errorf("list documents: %w", err)
 	}
@@ -229,12 +241,12 @@ func selectDocuments(client *paperless.Client, opts Options) ([]paperless.Docume
 func Run(ctx context.Context, opts Options, pipeline *ingest.Pipeline) (*Stats, error) {
 	client := paperless.NewClient(opts.BaseURL, opts.Token)
 
-	docs, err := selectDocuments(client, opts)
+	docs, err := selectDocuments(ctx, client, opts)
 	if err != nil {
 		return nil, err
 	}
 
-	lu, err := loadLookups(client)
+	lu, err := loadLookups(ctx, client)
 	if err != nil {
 		return nil, fmt.Errorf("load lookup maps: %w", err)
 	}
@@ -247,6 +259,9 @@ func Run(ctx context.Context, opts Options, pipeline *ingest.Pipeline) (*Stats, 
 
 	if opts.DryRun {
 		for i, doc := range docs {
+			if err := ctx.Err(); err != nil {
+				return stats, err
+			}
 			fmt.Fprintf(os.Stderr, "[%d/%d] would import: %s (created: %s)\n", i+1, stats.Total, doc.Title, doc.CreatedDate.Format("2006-01-02"))
 			stats.Skipped++
 			stats.Results = append(stats.Results, DocumentResult{ID: doc.ID, Status: "would-import"})
@@ -257,22 +272,32 @@ func Run(ctx context.Context, opts Options, pipeline *ingest.Pipeline) (*Stats, 
 	}
 
 	for i, doc := range docs {
+		if err := ctx.Err(); err != nil {
+			return stats, err
+		}
 		fmt.Fprintf(os.Stderr, "[%d/%d] %s\n", i+1, stats.Total, doc.Title)
 
 		if status, found, serr := pipeline.Store.PaperlessImportStatus(ctx, opts.BaseURL, doc.ID); serr == nil && found && status == "imported" {
 			fmt.Fprintf(os.Stderr, "  skipped (already imported in a previous run)\n")
 			stats.Skipped++
 			stats.Results = append(stats.Results, DocumentResult{ID: doc.ID, Status: "skipped", Reason: "already imported in a previous run"})
+			if err := ctx.Err(); err != nil {
+				return stats, err
+			}
 			continue
 		}
 
 		vaultPath, archivePath, warnings, err := importOne(ctx, client, doc, lu, pipeline, opts.PreserveStoragePaths)
 		stats.Warnings = append(stats.Warnings, warnings...)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return stats, ctxErr
+			}
 			fmt.Fprintf(os.Stderr, "  failed: %v\n", err)
 			stats.Failed++
-			stats.Results = append(stats.Results, DocumentResult{ID: doc.ID, Status: "failed", Reason: err.Error()})
-			if serr := pipeline.Store.UpsertPaperlessImportState(ctx, opts.BaseURL, doc.ID, "failed", err.Error()); serr != nil {
+			reason := boundedErrorString(err)
+			stats.Results = append(stats.Results, DocumentResult{ID: doc.ID, Status: "failed", Reason: reason})
+			if serr := pipeline.Store.UpsertPaperlessImportState(ctx, opts.BaseURL, doc.ID, "failed", reason); serr != nil {
 				stats.Warnings = append(stats.Warnings, fmt.Sprintf("document %d: record import state: %v", doc.ID, serr))
 			}
 			continue
@@ -286,6 +311,9 @@ func Run(ctx context.Context, opts Options, pipeline *ingest.Pipeline) (*Stats, 
 			result.Reason = "duplicate content; note already present in the vault"
 		}
 		stats.Results = append(stats.Results, result)
+		if err := ctx.Err(); err != nil {
+			return stats, err
+		}
 	}
 
 	return stats, nil
@@ -343,7 +371,7 @@ func importOne(ctx context.Context, client *paperless.Client, doc paperless.Docu
 	tmpName := tmpFile.Name()
 	defer os.Remove(tmpName)
 
-	if err := client.DownloadDocument(doc.ID, tmpFile); err != nil {
+	if err := client.DownloadDocument(ctx, doc.ID, tmpFile); err != nil {
 		tmpFile.Close()
 		return "", "", warnings, fmt.Errorf("download document: %w", err)
 	}
