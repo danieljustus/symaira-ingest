@@ -1,6 +1,7 @@
 package paperlessimport
 
 import (
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -17,10 +18,57 @@ var supportedFileExtensions = map[string]bool{
 	"jpeg":     true,
 	"tiff":     true,
 	"tif":      true,
+	"webp":     true,
+	"heic":     true,
+	"heif":     true,
 	"txt":      true,
 	"text":     true,
+	"csv":      true,
 	"md":       true,
 	"markdown": true,
+}
+
+var supportedMIMEDefaultExtensions = map[string]string{
+	"application/pdf": ".pdf",
+	"image/png":       ".png",
+	"image/jpeg":      ".jpg",
+	"image/tiff":      ".tiff",
+	"image/webp":      ".webp",
+	"image/heic":      ".heic",
+	"image/heif":      ".heif",
+	"text/plain":      ".txt",
+	"text/csv":        ".csv",
+	"text/markdown":   ".md",
+}
+
+// paperlessDownloadExtension returns the extension that should be used for
+// the downloaded Paperless payload. Paperless' file_type can be null on real
+// installations; when an archived/OCR PDF exists, /download returns that
+// archived file, otherwise it returns the original upload.
+func paperlessDownloadExtension(doc paperless.Document) string {
+	for _, candidate := range []string{doc.FileType, doc.ArchivedFileName, doc.OriginalFileName} {
+		if ext := normalizeExtension(candidate); ext != "" {
+			return ext
+		}
+	}
+	if ext := supportedMIMEDefaultExtensions[strings.ToLower(strings.TrimSpace(doc.MimeType))]; ext != "" {
+		return ext
+	}
+	return ""
+}
+
+func normalizeExtension(candidate string) string {
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		return ""
+	}
+	if strings.HasPrefix(candidate, ".") && !strings.ContainsAny(candidate[1:], `/\\`) {
+		return strings.ToLower(candidate)
+	}
+	if !strings.ContainsAny(candidate, `/\\`) && !strings.Contains(candidate, ".") {
+		return "." + strings.ToLower(candidate)
+	}
+	return strings.ToLower(filepath.Ext(candidate))
 }
 
 // AuditReport summarizes a dry-run scan of Paperless documents so a
@@ -101,11 +149,11 @@ func buildAuditReport(docs []paperless.Document, lu *lookups) *AuditReport {
 			}
 		}
 
-		ext := strings.ToLower(strings.TrimPrefix(doc.FileType, "."))
+		ext := strings.ToLower(strings.TrimPrefix(paperlessDownloadExtension(doc), "."))
 		if ext == "" {
 			ext = "unknown"
 		}
-		if !supportedFileExtensions[ext] {
+		if !supportedFileExtensions[ext] && supportedMIMEDefaultExtensions[strings.ToLower(strings.TrimSpace(doc.MimeType))] == "" {
 			r.UnsupportedFileTypes[ext]++
 		}
 	}

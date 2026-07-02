@@ -18,7 +18,10 @@ const (
 	KindPNG      Kind = "image/png"
 	KindJPEG     Kind = "image/jpeg"
 	KindTIFF     Kind = "image/tiff"
+	KindWebP     Kind = "image/webp"
+	KindHEIC     Kind = "image/heic"
 	KindText     Kind = "text/plain"
+	KindCSV      Kind = "text/csv"
 	KindMarkdown Kind = "text/markdown"
 	KindUnknown  Kind = ""
 )
@@ -59,12 +62,18 @@ func Detect(path string) (Kind, error) {
 		return KindJPEG, nil
 	case len(head) >= 4 && (bytes.Equal(head[:4], []byte("II*\x00")) || bytes.Equal(head[:4], []byte("MM\x00*"))):
 		return KindTIFF, nil
+	case len(head) >= 12 && bytes.Equal(head[:4], []byte("RIFF")) && bytes.Equal(head[8:12], []byte("WEBP")):
+		return KindWebP, nil
+	case len(head) >= 12 && bytes.Equal(head[4:8], []byte("ftyp")) && isHEIFBrand(string(head[8:12])):
+		return KindHEIC, nil
 	}
 
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
 	case ".txt", ".text":
 		return KindText, nil
+	case ".csv":
+		return KindCSV, nil
 	case ".md", ".markdown":
 		return KindMarkdown, nil
 	case ".pdf":
@@ -75,16 +84,37 @@ func Detect(path string) (Kind, error) {
 		return KindJPEG, nil
 	case ".tiff", ".tif":
 		return KindTIFF, nil
+	case ".webp":
+		return KindWebP, nil
+	case ".heic", ".heif":
+		return KindHEIC, nil
 	}
 
 	return KindUnknown, fmt.Errorf("unsupported file type: %s", path)
 }
 
+func isHEIFBrand(brand string) bool {
+	switch brand {
+	case "heic", "heix", "hevc", "hevx", "heim", "heis", "mif1", "msf1":
+		return true
+	default:
+		return false
+	}
+}
+
 // ReadText reads plain text files directly.
 func ReadText(ctx context.Context, path string) (*Result, error) {
+	return ReadTextKind(ctx, path, KindText)
+}
+
+// ReadTextKind reads a text-like file directly while preserving its normalized MIME kind.
+func ReadTextKind(ctx context.Context, path string, kind Kind) (*Result, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read text file: %w", err)
 	}
-	return &Result{Text: string(data), MIME: string(KindText), Engine: "text"}, nil
+	if kind == "" {
+		kind = KindText
+	}
+	return &Result{Text: string(data), MIME: string(kind), Engine: "text"}, nil
 }

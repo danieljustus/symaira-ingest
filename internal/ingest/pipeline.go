@@ -134,7 +134,7 @@ func (p *Pipeline) processJob(ctx context.Context, job *store.Job, opts *IngestO
 
 	var extractRes *extract.Result
 	switch kind {
-	case extract.KindText, extract.KindMarkdown:
+	case extract.KindText, extract.KindMarkdown, extract.KindCSV:
 		extractRes, err = extractText(ctx, doc.SourcePath, kind, nil)
 	default:
 		if p.Engine == nil {
