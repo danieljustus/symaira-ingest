@@ -21,6 +21,14 @@ type Runner struct {
 	Tesseract string // path to tesseract binary
 	PDFToPPM  string // path to pdftoppm binary
 	OCRLang   string // tesseract language, e.g. "eng" or "deu+eng"
+
+	langMu              sync.Mutex
+	langCacheLoaded     bool
+	langCache           map[string]bool
+	validatedLangKey    string
+	validatedLang       string
+	validatedLangErr    error
+	validatedLangCached bool
 }
 
 // DefaultRunner returns a runner that looks up tools on PATH.
@@ -86,34 +94,37 @@ func (r *Runner) validateLanguages(ctx context.Context) (string, error) {
 	if lang == "" {
 		lang = "eng"
 	}
+	r.langMu.Lock()
+	if r.validatedLangCached && r.validatedLangKey == lang {
+		cachedLang, cachedErr := r.validatedLang, r.validatedLangErr
+		r.langMu.Unlock()
+		return cachedLang, cachedErr
+	}
+	r.langMu.Unlock()
 
-	path, err := cleanToolPath("tesseract", r.Tesseract)
+	validated, err := r.validateLanguagesUncached(ctx, lang)
+	if ctx.Err() != nil {
+		return validated, err
+	}
+	r.langMu.Lock()
+	r.validatedLangKey = lang
+	r.validatedLang = validated
+	r.validatedLangErr = err
+	r.validatedLangCached = true
+	r.langMu.Unlock()
+	return validated, err
+}
+
+func (r *Runner) validateLanguagesUncached(ctx context.Context, lang string) (string, error) {
+	available, err := r.availableLanguages(ctx)
 	if err != nil {
 		return "", err
 	}
-	execPath, err := exec.LookPath(path)
-	if err != nil {
-		return "", fmt.Errorf("tesseract not found on PATH: %w", err)
-	}
-
-	// We capture stdout and stderr separately
-	cmd := exec.CommandContext(ctx, execPath, "--list-langs")
-	var stdoutBuf, stderrBuf bytes.Buffer
-	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf
-	if err := cmd.Run(); err != nil {
-		// If tesseract --list-langs fails, we cannot validate, so just return the original lang
+	if available == nil {
+		// If tesseract --list-langs fails, we cannot validate, so just return
+		// the original lang. The failed validation state is cached so we do not
+		// respawn --list-langs for every document in the same run.
 		return lang, nil
-	}
-
-	available := make(map[string]bool)
-	lines := strings.Split(stdoutBuf.String(), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.Contains(line, ":") || strings.Contains(line, "available") {
-			continue
-		}
-		available[line] = true
 	}
 
 	parts := strings.Split(lang, "+")
@@ -146,6 +157,49 @@ func (r *Runner) validateLanguages(ctx context.Context) (string, error) {
 	}
 
 	return lang, nil
+}
+
+func (r *Runner) availableLanguages(ctx context.Context) (map[string]bool, error) {
+	r.langMu.Lock()
+	defer r.langMu.Unlock()
+	if r.langCacheLoaded {
+		return r.langCache, nil
+	}
+
+	path, err := cleanToolPath("tesseract", r.Tesseract)
+	if err != nil {
+		return nil, err
+	}
+	execPath, err := exec.LookPath(path)
+	if err != nil {
+		return nil, fmt.Errorf("tesseract not found on PATH: %w", err)
+	}
+
+	// We capture stdout and stderr separately
+	cmd := exec.CommandContext(ctx, execPath, "--list-langs")
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+	if err := cmd.Run(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		r.langCacheLoaded = true
+		return nil, nil
+	}
+
+	available := make(map[string]bool)
+	lines := strings.Split(stdoutBuf.String(), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.Contains(line, ":") || strings.Contains(line, "available") {
+			continue
+		}
+		available[line] = true
+	}
+	r.langCache = available
+	r.langCacheLoaded = true
+	return available, nil
 }
 
 func (r *Runner) extractImage(ctx context.Context, path string) (*extract.Result, error) {

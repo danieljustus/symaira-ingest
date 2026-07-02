@@ -1,10 +1,12 @@
 package paperless
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -27,7 +29,7 @@ func TestListDocuments(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "test-token")
-	docs, err := c.ListDocuments(time.Time{})
+	docs, err := c.ListDocuments(context.Background(), time.Time{}, 0)
 	if err != nil {
 		t.Fatalf("ListDocuments: %v", err)
 	}
@@ -64,7 +66,7 @@ func TestListDocuments_Pagination(t *testing.T) {
 	baseURL = srv.URL
 
 	c := NewClient(srv.URL, "test-token")
-	docs, err := c.ListDocuments(time.Time{})
+	docs, err := c.ListDocuments(context.Background(), time.Time{}, 0)
 	if err != nil {
 		t.Fatalf("ListDocuments: %v", err)
 	}
@@ -73,6 +75,49 @@ func TestListDocuments_Pagination(t *testing.T) {
 	}
 	if callCount != 2 {
 		t.Errorf("callCount = %d, want 2", callCount)
+	}
+}
+
+func TestListDocuments_LimitStopsPagination(t *testing.T) {
+	callCount := 0
+	var baseURL string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/documents/", func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		switch callCount {
+		case 1:
+			if got := r.URL.Query().Get("page_size"); got != "2" {
+				t.Errorf("page_size = %q, want 2", got)
+			}
+			json.NewEncoder(w).Encode(listResponse[Document]{
+				Count:   3,
+				Results: []Document{{ID: 1, Title: "Doc 1"}},
+				Next:    baseURL + "/api/documents/?format=json&page=2",
+			})
+		case 2:
+			json.NewEncoder(w).Encode(listResponse[Document]{
+				Count:   3,
+				Results: []Document{{ID: 2, Title: "Doc 2"}},
+				Next:    baseURL + "/api/documents/?format=json&page=3",
+			})
+		default:
+			t.Fatalf("unexpected page request %d; limit should stop before page 3", callCount)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	baseURL = srv.URL
+
+	c := NewClient(srv.URL, "test-token")
+	docs, err := c.ListDocuments(context.Background(), time.Time{}, 2)
+	if err != nil {
+		t.Fatalf("ListDocuments: %v", err)
+	}
+	if len(docs) != 2 || docs[0].ID != 1 || docs[1].ID != 2 {
+		t.Fatalf("docs = %+v, want IDs [1 2]", docs)
+	}
+	if callCount != 2 {
+		t.Fatalf("callCount = %d, want 2", callCount)
 	}
 }
 
@@ -105,7 +150,7 @@ func TestListDocuments_PaginationAbsoluteNextMissingPort(t *testing.T) {
 	srvURL = srv.URL
 
 	c := NewClient(srv.URL, "test-token")
-	docs, err := c.ListDocuments(time.Time{})
+	docs, err := c.ListDocuments(context.Background(), time.Time{}, 0)
 	if err != nil {
 		t.Fatalf("ListDocuments: %v", err)
 	}
@@ -140,7 +185,7 @@ func TestListDocuments_PaginationRelativeNext(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "test-token")
-	docs, err := c.ListDocuments(time.Time{})
+	docs, err := c.ListDocuments(context.Background(), time.Time{}, 0)
 	if err != nil {
 		t.Fatalf("ListDocuments: %v", err)
 	}
@@ -164,7 +209,7 @@ func TestListDocuments_SinceFilter(t *testing.T) {
 
 	c := NewClient(srv.URL, "test-token")
 	since := time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
-	if _, err := c.ListDocuments(since); err != nil {
+	if _, err := c.ListDocuments(context.Background(), since, 0); err != nil {
 		t.Fatalf("ListDocuments: %v", err)
 	}
 	// The deployed Paperless-ngx honors created__date__gte but silently
@@ -188,7 +233,7 @@ func TestListDocuments_NoSinceOmitsDateFilter(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "test-token")
-	if _, err := c.ListDocuments(time.Time{}); err != nil {
+	if _, err := c.ListDocuments(context.Background(), time.Time{}, 0); err != nil {
 		t.Fatalf("ListDocuments: %v", err)
 	}
 	if _, ok := gotQuery["created__date__gte"]; ok {
@@ -205,7 +250,7 @@ func TestGetDocument(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "test-token")
-	doc, err := c.GetDocument(42)
+	doc, err := c.GetDocument(context.Background(), 42)
 	if err != nil {
 		t.Fatalf("GetDocument: %v", err)
 	}
@@ -224,12 +269,37 @@ func TestDownloadDocument(t *testing.T) {
 
 	c := NewClient(srv.URL, "test-token")
 	var buf []byte
-	err := c.DownloadDocument(5, (*mockWriter)(&buf))
+	err := c.DownloadDocument(context.Background(), 5, (*mockWriter)(&buf))
 	if err != nil {
 		t.Fatalf("DownloadDocument: %v", err)
 	}
 	if string(buf) != "file content here" {
 		t.Errorf("downloaded content = %q, want file content here", string(buf))
+	}
+}
+
+func TestDownloadDocument_SlowBodyDoesNotUseWholeRequestTimeout(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/documents/5/download/", func(w http.ResponseWriter, r *http.Request) {
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(50 * time.Millisecond)
+		w.Write([]byte("slow body"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "test-token")
+	if c.httpClient.Timeout != 0 {
+		t.Fatalf("client Timeout = %s, want 0 so downloads are not capped by whole-request timeout", c.httpClient.Timeout)
+	}
+	var buf []byte
+	if err := c.DownloadDocument(context.Background(), 5, (*mockWriter)(&buf)); err != nil {
+		t.Fatalf("DownloadDocument: %v", err)
+	}
+	if string(buf) != "slow body" {
+		t.Fatalf("downloaded content = %q, want slow body", string(buf))
 	}
 }
 
@@ -244,7 +314,7 @@ func TestListTags(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "test-token")
-	tags, err := c.ListTags()
+	tags, err := c.ListTags(context.Background())
 	if err != nil {
 		t.Fatalf("ListTags: %v", err)
 	}
@@ -264,7 +334,7 @@ func TestListCorrespondents(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "test-token")
-	corrs, err := c.ListCorrespondents()
+	corrs, err := c.ListCorrespondents(context.Background())
 	if err != nil {
 		t.Fatalf("ListCorrespondents: %v", err)
 	}
@@ -284,7 +354,7 @@ func TestListDocumentTypes(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "test-token")
-	types, err := c.ListDocumentTypes()
+	types, err := c.ListDocumentTypes(context.Background())
 	if err != nil {
 		t.Fatalf("ListDocumentTypes: %v", err)
 	}
@@ -304,7 +374,7 @@ func TestListStoragePaths(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "test-token")
-	paths, err := c.ListStoragePaths()
+	paths, err := c.ListStoragePaths(context.Background())
 	if err != nil {
 		t.Fatalf("ListStoragePaths: %v", err)
 	}
@@ -339,7 +409,7 @@ func TestListDocuments_RealAPIShape(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "test-token")
-	docs, err := c.ListDocuments(time.Time{})
+	docs, err := c.ListDocuments(context.Background(), time.Time{}, 0)
 	if err != nil {
 		t.Fatalf("ListDocuments: %v", err)
 	}
@@ -408,7 +478,7 @@ func TestListDocuments_EmbeddedRefShape(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "test-token")
-	docs, err := c.ListDocuments(time.Time{})
+	docs, err := c.ListDocuments(context.Background(), time.Time{}, 0)
 	if err != nil {
 		t.Fatalf("ListDocuments: %v", err)
 	}
@@ -435,9 +505,38 @@ func TestClient_ErrorStatus(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "bad-token")
-	_, err := c.ListDocuments(time.Time{})
+	_, err := c.ListDocuments(context.Background(), time.Time{}, 0)
 	if err == nil {
 		t.Fatal("expected error for 401 status")
+	}
+}
+
+func TestClient_ErrorStatus_TruncatesSingleLineBody(t *testing.T) {
+	largeHTML := "<html>" + strings.Repeat("secret-ish details\n", 80) + "</html>"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusBadGateway)
+		w.Write([]byte(largeHTML))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "bad-token")
+	_, err := c.ListDocuments(context.Background(), time.Time{}, 0)
+	if err == nil {
+		t.Fatal("expected error for 502 status")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "\n") {
+		t.Fatalf("error is not single-line: %q", msg)
+	}
+	if !strings.Contains(msg, "API error 502 Bad Gateway") {
+		t.Fatalf("error should prefer status text, got %q", msg)
+	}
+	if len(msg) > 620 {
+		t.Fatalf("error length = %d, want bounded <= 620: %q", len(msg), msg)
+	}
+	if !strings.HasSuffix(msg, "…") {
+		t.Fatalf("expected truncated error suffix, got %q", msg)
 	}
 }
 

@@ -54,11 +54,11 @@ func (r *VerifyReport) Complete() bool {
 func Verify(ctx context.Context, opts Options, vault string) (*VerifyReport, error) {
 	client := paperless.NewClient(opts.BaseURL, opts.Token)
 
-	docs, err := selectDocuments(client, opts)
+	docs, err := selectDocuments(ctx, client, opts)
 	if err != nil {
 		return nil, err
 	}
-	lu, err := loadLookups(client)
+	lu, err := loadLookups(ctx, client)
 	if err != nil {
 		return nil, fmt.Errorf("load lookup maps: %w", err)
 	}

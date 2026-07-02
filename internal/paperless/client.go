@@ -1,14 +1,22 @@
 package paperless
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
+)
+
+const (
+	jsonRequestTimeout = 30 * time.Second
+	maxErrorBodyBytes  = 512
 )
 
 type Client struct {
@@ -28,13 +36,30 @@ func NewClient(baseURL, token string) *Client {
 		baseURL: baseURL,
 		token:   token,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Transport: defaultTransport(),
 		},
 	}
 }
 
-func (c *Client) doRequest(url string, result any) error {
-	req, err := http.NewRequest("GET", url, nil)
+func defaultTransport() *http.Transport {
+	return &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+	}
+}
+
+func (c *Client) doRequest(ctx context.Context, url string, result any) error {
+	ctx, cancel := context.WithTimeout(ctx, jsonRequestTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
@@ -48,14 +73,42 @@ func (c *Client) doRequest(url string, result any) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+		return apiError(resp)
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
 		return fmt.Errorf("decode response: %w", err)
 	}
 	return nil
+}
+
+func apiError(resp *http.Response) error {
+	status := resp.Status
+	if status == "" {
+		status = fmt.Sprintf("%d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+	}
+	preview := errorBodyPreview(resp.Body)
+	if preview == "" {
+		return fmt.Errorf("API error %s", status)
+	}
+	return fmt.Errorf("API error %s: %s", status, preview)
+}
+
+func errorBodyPreview(body io.Reader) string {
+	data, _ := io.ReadAll(io.LimitReader(body, maxErrorBodyBytes+1))
+	truncated := len(data) > maxErrorBodyBytes
+	if truncated {
+		data = data[:maxErrorBodyBytes]
+	}
+	preview := strings.Join(strings.Fields(string(data)), " ")
+	if len(preview) > maxErrorBodyBytes {
+		preview = preview[:maxErrorBodyBytes]
+		truncated = true
+	}
+	if truncated {
+		preview = strings.TrimSpace(preview) + "…"
+	}
+	return preview
 }
 
 // resolveNextURL normalizes a Paperless pagination "next" link against the
@@ -86,13 +139,16 @@ func (c *Client) resolveNextURL(next string) (string, error) {
 	return resolved.String(), nil
 }
 
-func (c *Client) ListDocuments(since time.Time, filters ...string) ([]Document, error) {
+func (c *Client) ListDocuments(ctx context.Context, since time.Time, maxResults int, filters ...string) ([]Document, error) {
 	url := c.baseURL + "/api/documents/?format=json&ordering=-created_date"
 	if !since.IsZero() {
 		// created__date__gte (the Django date-transform lookup) is honored by
 		// the deployed Paperless-ngx API; the plain created_date__gte field is
 		// silently ignored and would return the entire archive unbounded.
 		url += "&created__date__gte=" + since.Format("2006-01-02")
+	}
+	if maxResults > 0 {
+		url += "&page_size=" + strconv.Itoa(maxResults)
 	}
 	for _, f := range filters {
 		url += "&" + f
@@ -101,10 +157,13 @@ func (c *Client) ListDocuments(since time.Time, filters ...string) ([]Document, 
 	var all []Document
 	for url != "" {
 		var page listResponse[Document]
-		if err := c.doRequest(url, &page); err != nil {
+		if err := c.doRequest(ctx, url, &page); err != nil {
 			return nil, err
 		}
 		all = append(all, page.Results...)
+		if maxResults > 0 && len(all) >= maxResults {
+			return all[:maxResults], nil
+		}
 		next, err := c.resolveNextURL(page.Next)
 		if err != nil {
 			return nil, err
@@ -120,18 +179,18 @@ func (c *Client) DocumentURL(id int) string {
 	return c.baseURL + "/documents/" + strconv.Itoa(id)
 }
 
-func (c *Client) GetDocument(id int) (*Document, error) {
+func (c *Client) GetDocument(ctx context.Context, id int) (*Document, error) {
 	url := c.baseURL + "/api/documents/" + strconv.Itoa(id) + "/?format=json"
 	var doc Document
-	if err := c.doRequest(url, &doc); err != nil {
+	if err := c.doRequest(ctx, url, &doc); err != nil {
 		return nil, err
 	}
 	return &doc, nil
 }
 
-func (c *Client) DownloadDocument(id int, dst io.Writer) error {
+func (c *Client) DownloadDocument(ctx context.Context, id int, dst io.Writer) error {
 	url := c.baseURL + "/api/documents/" + strconv.Itoa(id) + "/download/"
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
@@ -144,20 +203,19 @@ func (c *Client) DownloadDocument(id int, dst io.Writer) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API error %d: %s", resp.StatusCode, string(body))
+		return apiError(resp)
 	}
 
 	_, err = io.Copy(dst, resp.Body)
 	return err
 }
 
-func (c *Client) ListTags() ([]Tag, error) {
+func (c *Client) ListTags(ctx context.Context) ([]Tag, error) {
 	var all []Tag
 	url := c.baseURL + "/api/tags/?format=json"
 	for url != "" {
 		var page listResponse[Tag]
-		if err := c.doRequest(url, &page); err != nil {
+		if err := c.doRequest(ctx, url, &page); err != nil {
 			return nil, err
 		}
 		all = append(all, page.Results...)
@@ -170,12 +228,12 @@ func (c *Client) ListTags() ([]Tag, error) {
 	return all, nil
 }
 
-func (c *Client) ListCorrespondents() ([]Correspondent, error) {
+func (c *Client) ListCorrespondents(ctx context.Context) ([]Correspondent, error) {
 	var all []Correspondent
 	url := c.baseURL + "/api/correspondents/?format=json"
 	for url != "" {
 		var page listResponse[Correspondent]
-		if err := c.doRequest(url, &page); err != nil {
+		if err := c.doRequest(ctx, url, &page); err != nil {
 			return nil, err
 		}
 		all = append(all, page.Results...)
@@ -188,12 +246,12 @@ func (c *Client) ListCorrespondents() ([]Correspondent, error) {
 	return all, nil
 }
 
-func (c *Client) ListDocumentTypes() ([]DocumentType, error) {
+func (c *Client) ListDocumentTypes(ctx context.Context) ([]DocumentType, error) {
 	var all []DocumentType
 	url := c.baseURL + "/api/document_types/?format=json"
 	for url != "" {
 		var page listResponse[DocumentType]
-		if err := c.doRequest(url, &page); err != nil {
+		if err := c.doRequest(ctx, url, &page); err != nil {
 			return nil, err
 		}
 		all = append(all, page.Results...)
@@ -206,12 +264,12 @@ func (c *Client) ListDocumentTypes() ([]DocumentType, error) {
 	return all, nil
 }
 
-func (c *Client) ListStoragePaths() ([]StoragePath, error) {
+func (c *Client) ListStoragePaths(ctx context.Context) ([]StoragePath, error) {
 	var all []StoragePath
 	url := c.baseURL + "/api/storage_paths/?format=json"
 	for url != "" {
 		var page listResponse[StoragePath]
-		if err := c.doRequest(url, &page); err != nil {
+		if err := c.doRequest(ctx, url, &page); err != nil {
 			return nil, err
 		}
 		all = append(all, page.Results...)

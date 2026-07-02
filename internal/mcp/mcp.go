@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +29,66 @@ var activeWatchers sync.Map
 type watcherEntry struct {
 	cancel  context.CancelFunc
 	watcher *ingest.Watcher
+}
+
+func resolveVaultArchive(argVault, argArchive, defaultVault, defaultArchive string) (vault, archive string, err error) {
+	vault = argVault
+	if vault == "" {
+		vault = defaultVault
+	}
+	if vault == "" {
+		return "", "", fmt.Errorf("no vault configured")
+	}
+
+	archive = argArchive
+	if archive == "" {
+		archive = defaultArchive
+	}
+	if archive == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", "", fmt.Errorf("determine default archive path: %w", err)
+		}
+		archive = filepath.Join(home, ".local", "share", "symingest", "archive")
+	}
+	return vault, archive, nil
+}
+
+func parseMCPDocumentIDs(raw json.RawMessage) ([]int, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var ids []int
+	if err := json.Unmarshal(raw, &ids); err == nil {
+		for _, id := range ids {
+			if id <= 0 {
+				return nil, fmt.Errorf("document ID %d must be positive", id)
+			}
+		}
+		return ids, nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return nil, fmt.Errorf("ids must be an array of positive integers or a comma-separated string")
+	}
+	if strings.TrimSpace(s) == "" {
+		return nil, nil
+	}
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		id, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, fmt.Errorf("document ID %q is not a number", part)
+		}
+		if id <= 0 {
+			return nil, fmt.Errorf("document ID %d must be positive", id)
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
 }
 
 // Register adds the ingest_file tool to the MCP server.
@@ -49,13 +111,13 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 		}`),
 		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
 			var args struct {
-				Path        string   `json:"path"`
-				VaultPath   string   `json:"vault_path"`
-				ArchivePath string   `json:"archive_path"`
-				Category    string   `json:"category"`
-				Tags        []string `json:"tags"`
-				Correspondent string `json:"correspondent"`
-				DocumentType  string `json:"document_type"`
+				Path          string   `json:"path"`
+				VaultPath     string   `json:"vault_path"`
+				ArchivePath   string   `json:"archive_path"`
+				Category      string   `json:"category"`
+				Tags          []string `json:"tags"`
+				Correspondent string   `json:"correspondent"`
+				DocumentType  string   `json:"document_type"`
 			}
 			if err := json.Unmarshal(input, &args); err != nil {
 				return nil, fmt.Errorf("invalid arguments: %w", err)
@@ -66,23 +128,9 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 				return nil, fmt.Errorf("invalid source path: %w", err)
 			}
 
-			vault := args.VaultPath
-			if vault == "" {
-				vault = defaultVault
-			}
-			if vault == "" {
-				return nil, fmt.Errorf("no vault configured")
-			}
-
-			archive := args.ArchivePath
-			if archive == "" {
-				archive = defaultArchive
-			}
-			if archive == "" {
-				home, err := os.UserHomeDir()
-				if err == nil {
-					archive = filepath.Join(home, ".local", "share", "symingest", "archive")
-				}
+			vault, archive, err := resolveVaultArchive(args.VaultPath, args.ArchivePath, defaultVault, defaultArchive)
+			if err != nil {
+				return nil, err
 			}
 
 			pipeline := &ingest.Pipeline{
@@ -236,24 +284,10 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 				return nil, fmt.Errorf("directory %s is already being watched", dir)
 			}
 
-			vault := args.VaultPath
-			if vault == "" {
-				vault = defaultVault
-			}
-			if vault == "" {
+			vault, archive, err := resolveVaultArchive(args.VaultPath, args.ArchivePath, defaultVault, defaultArchive)
+			if err != nil {
 				activeWatchers.Delete(dir)
-				return nil, fmt.Errorf("no vault configured")
-			}
-
-			archive := args.ArchivePath
-			if archive == "" {
-				archive = defaultArchive
-			}
-			if archive == "" {
-				home, err := os.UserHomeDir()
-				if err == nil {
-					archive = filepath.Join(home, ".local", "share", "symingest", "archive")
-				}
+				return nil, err
 			}
 
 			watcher, err := ingest.NewWatcher(st, dir)
@@ -431,13 +465,17 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 
 	server.RegisterTool(&mcpserver.Tool{
 		Name:        "import_paperless",
-		Description: "Import documents from a Paperless-ngx instance into the vault. Downloads original files and ingests them with preset metadata from Paperless (tags, correspondent, document type).",
+		Description: "Import documents from a Paperless-ngx instance into the vault. Downloads original files and ingests them with preset metadata from Paperless (tags, correspondent, document type). Supports the same bounded pilot controls as the CLI.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
 				"base_url": {"type": "string", "description": "Paperless-ngx instance URL (or set PAPERLESS_URL env)"},
 				"token": {"type": "string", "description": "API token (or set PAPERLESS_TOKEN env)"},
 				"since": {"type": "string", "description": "Only import documents whose Paperless created date is on or after this date (YYYY-MM-DD)"},
+				"limit": {"type": "integer", "description": "Import at most N documents (newest first); 0 means no limit"},
+				"ids": {"oneOf": [{"type": "array", "items": {"type": "integer"}}, {"type": "string"}], "description": "Import only these Paperless document IDs; takes precedence over since and limit"},
+				"preserve_storage_paths": {"type": "boolean", "description": "Place notes under vault subdirectories derived from each document's Paperless storage path"},
+				"report_path": {"type": "string", "description": "Write a JSON migration report to this path"},
 				"dry_run": {"type": "boolean", "description": "List what would be imported without writing"},
 				"vault_path": {"type": "string", "description": "Optional vault directory override; required if no default vault is configured"},
 				"archive_path": {"type": "string", "description": "Optional archive directory override"},
@@ -447,35 +485,32 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 		}`),
 		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
 			var args struct {
-				BaseURL     string `json:"base_url"`
-				Token       string `json:"token"`
-				Since       string `json:"since"`
-				DryRun      bool   `json:"dry_run"`
-				VaultPath   string `json:"vault_path"`
-				ArchivePath string `json:"archive_path"`
-				DBPath      string `json:"db_path"`
+				BaseURL              string          `json:"base_url"`
+				Token                string          `json:"token"`
+				Since                string          `json:"since"`
+				Limit                int             `json:"limit"`
+				IDs                  json.RawMessage `json:"ids"`
+				PreserveStoragePaths bool            `json:"preserve_storage_paths"`
+				ReportPath           string          `json:"report_path"`
+				DryRun               bool            `json:"dry_run"`
+				VaultPath            string          `json:"vault_path"`
+				ArchivePath          string          `json:"archive_path"`
+				DBPath               string          `json:"db_path"`
 			}
 			if err := json.Unmarshal(input, &args); err != nil {
 				return nil, fmt.Errorf("invalid arguments: %w", err)
 			}
+			if args.Limit < 0 {
+				return nil, fmt.Errorf("limit must be zero or positive")
+			}
+			ids, err := parseMCPDocumentIDs(args.IDs)
+			if err != nil {
+				return nil, fmt.Errorf("invalid ids: %w", err)
+			}
 
-			vault := args.VaultPath
-			if vault == "" {
-				vault = defaultVault
-			}
-			if vault == "" {
-				return nil, fmt.Errorf("no vault configured")
-			}
-
-			archive := args.ArchivePath
-			if archive == "" {
-				archive = defaultArchive
-			}
-			if archive == "" {
-				home, err := os.UserHomeDir()
-				if err == nil {
-					archive = filepath.Join(home, ".local", "share", "symingest", "archive")
-				}
+			vault, archive, err := resolveVaultArchive(args.VaultPath, args.ArchivePath, defaultVault, defaultArchive)
+			if err != nil {
+				return nil, err
 			}
 
 			pipelineStore := st
@@ -505,10 +540,13 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 			}
 
 			opts := paperlessimport.Options{
-				BaseURL: args.BaseURL,
-				Token:   args.Token,
-				Since:   since,
-				DryRun:  args.DryRun,
+				BaseURL:              args.BaseURL,
+				Token:                args.Token,
+				Since:                since,
+				DryRun:               args.DryRun,
+				Limit:                args.Limit,
+				IDs:                  ids,
+				PreserveStoragePaths: args.PreserveStoragePaths,
 			}
 
 			stats, err := paperlessimport.Run(ctx, opts, pipeline)
@@ -523,8 +561,17 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 				"failed":   stats.Failed,
 				"total":    stats.Total,
 			}
+			if (args.Limit > 0 || len(ids) > 0) && len(stats.SelectedIDs) > 0 {
+				result["selected_ids"] = stats.SelectedIDs
+			}
 			if stats.Audit != nil {
 				result["audit"] = stats.Audit
+			}
+			if args.ReportPath != "" {
+				if err := paperlessimport.WriteMigrationReport(args.ReportPath, stats.BuildMigrationReport(args.DryRun)); err != nil {
+					return nil, fmt.Errorf("write report_path: %w", err)
+				}
+				result["report_path"] = args.ReportPath
 			}
 
 			data, mErr := json.Marshal(result)

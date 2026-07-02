@@ -510,6 +510,79 @@ func TestRun_ResumesAfterPartialFailure(t *testing.T) {
 	}
 }
 
+func TestRun_CancellationStopsDuringNextDownloadAfterStateRecorded(t *testing.T) {
+	secondStarted := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if handleEmptyLookups(w, r) {
+			return
+		}
+		switch r.URL.Path {
+		case "/api/documents/":
+			json.NewEncoder(w).Encode(map[string]any{
+				"count": 2,
+				"results": []map[string]any{
+					{"id": 1, "title": "First Doc", "created_date": "2026-01-15", "file_type": ".txt"},
+					{"id": 2, "title": "Second Doc", "created_date": "2026-01-16", "file_type": ".txt"},
+				},
+				"next": nil,
+			})
+		case "/api/documents/1/download/":
+			w.Write([]byte("first content"))
+		case "/api/documents/2/download/":
+			select {
+			case secondStarted <- struct{}{}:
+			default:
+			}
+			<-r.Context().Done()
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-secondStarted
+		cancel()
+	}()
+	pipeline := &ingest.Pipeline{
+		Engine:     fakeEngine{},
+		Store:      s,
+		Writer:     &writer.NoteWriter{Vault: filepath.Join(dir, "vault")},
+		ArchiveDir: filepath.Join(dir, "archive"),
+	}
+
+	stats, err := Run(ctx, Options{BaseURL: srv.URL, Token: "test-token"}, pipeline)
+	if err == nil {
+		t.Fatal("expected cancellation error")
+	}
+	if stats == nil || stats.Imported != 1 {
+		t.Fatalf("stats = %+v, want Imported=1", stats)
+	}
+	status, found, err := s.PaperlessImportStatus(context.Background(), srv.URL, 1)
+	if err != nil {
+		t.Fatalf("PaperlessImportStatus doc1: %v", err)
+	}
+	if !found || status != "imported" {
+		t.Fatalf("document 1 status = %q, found = %v, want imported/true", status, found)
+	}
+	_, found, err = s.PaperlessImportStatus(context.Background(), srv.URL, 2)
+	if err != nil {
+		t.Fatalf("PaperlessImportStatus doc2: %v", err)
+	}
+	if found {
+		t.Fatal("document 2 should not be persisted as failed when cancellation aborts its download")
+	}
+}
+
 func TestRun_SinceFilter(t *testing.T) {
 	var requestedURL string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

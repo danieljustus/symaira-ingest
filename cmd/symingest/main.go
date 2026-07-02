@@ -91,28 +91,39 @@ Commands:
 	return nil
 }
 
+func configureUsage(fs *flag.FlagSet, usage, description string) {
+	fs.SetOutput(stdout)
+	fs.Usage = func() {
+		fmt.Fprintf(stdout, "Usage: symingest %s\n\n%s\n\nFlags:\n", usage, description)
+		fs.PrintDefaults()
+	}
+}
+
+func parseFlags(fs *flag.FlagSet, args []string, message string) (bool, error) {
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return true, nil
+		}
+		return false, exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation, message)
+	}
+	return false, nil
+}
+
 func runIngest(args []string) error {
 	fs := flag.NewFlagSet("ingest", flag.ContinueOnError)
 	ocrLang, vault, archive, db := registerSharedFlags(fs)
-	if err := fs.Parse(args); err != nil {
-		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
-			"invalid ingest flags")
+	configureUsage(fs, "ingest [flags] <file>", "Ingest a single file into the configured vault.")
+	help, err := parseFlags(fs, args, "invalid ingest flags")
+	if help || err != nil {
+		return err
 	}
 	cfg, err := resolveConfig(fs, ocrLang, vault, archive, db)
 	if err != nil {
 		return err
 	}
 	remaining := fs.Args()
-	if len(remaining) == 0 || remaining[0] == "--help" || remaining[0] == "-h" {
-		fmt.Fprintln(stdout, `Usage: symingest ingest [flags] <file>
-
-Flags:
-  --ocr-lang string   Tesseract language override (default "eng")
-  --vault string      Target vault directory
-  --archive string    Target archive directory
-  --db string         SQLite database path
-
-Ingest a single file into the configured vault.`)
+	if len(remaining) == 0 {
+		fs.Usage()
 		return nil
 	}
 
@@ -170,47 +181,9 @@ Ingest a single file into the configured vault.`)
 }
 
 func runImport(args []string) error {
-	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintln(stdout, `Usage: symingest import paperless [flags]
-
-Flags:
-  --base-url string   Paperless-ngx instance URL (or PAPERLESS_URL env)
-  --token string      API token (or PAPERLESS_TOKEN env)
-  --since string      Only import documents whose Paperless created date is on
-                      or after this date (YYYY-MM-DD)
-  --limit int         Import at most N documents (newest first); 0 means no limit
-  --ids string        Import only these Paperless document IDs (comma-separated,
-                      e.g. 123,456); takes precedence over --since and --limit
-  --preserve-storage-paths
-                      Place notes under vault subdirectories derived from each
-                      document's Paperless storage path (default: flat layout)
-  --vault string      Target vault directory
-  --archive string    Target archive directory
-  --db string         SQLite database path
-  --dry-run           List what would be imported without writing
-  --report string     Write a JSON migration report to this path (works with
-                      --dry-run and real imports)
-  --verify            Verify a completed import against the Paperless source
-                      (compares notes, archived originals, and metadata), then exit
-  --status            List per-document import status from a previous run, then exit
-  --json              With --status or --verify, output the result as JSON
-
-Import documents from a Paperless-ngx instance into the vault. Use --limit or
---ids to run a small, inspectable pilot before a full migration; both bounds
-apply to --dry-run and real imports alike. Imports are resumable: a document
-already recorded as imported is skipped on a re-run, and a document that
-previously failed is retried automatically.`)
-		return nil
-	}
-
-	if args[0] != "paperless" {
-		return exitcodes.Wrapf(nil, exitcodes.ExitNoInput, exitcodes.KindValidation,
-			"unknown import subcommand %q; supported: paperless", args[0])
-	}
-
 	fs := flag.NewFlagSet("import paperless", flag.ContinueOnError)
-	baseURL := fs.String("base-url", "", "Paperless-ngx instance URL")
-	token := fs.String("token", "", "API token")
+	baseURL := fs.String("base-url", "", "Paperless-ngx instance URL (or PAPERLESS_URL env)")
+	token := fs.String("token", "", "API token (or PAPERLESS_TOKEN env)")
 	sinceStr := fs.String("since", "", "Only import documents whose Paperless created date is on or after this date (YYYY-MM-DD)")
 	limit := fs.Int("limit", 0, "Import at most N documents (newest first); 0 means no limit")
 	idsStr := fs.String("ids", "", "Import only these Paperless document IDs (comma-separated); takes precedence over --since and --limit")
@@ -221,9 +194,21 @@ previously failed is retried automatically.`)
 	statusOnly := fs.Bool("status", false, "List per-document import status from a previous run, then exit")
 	jsonFlag := fs.Bool("json", false, "With --status or --verify, output the result as JSON")
 	ocrLang, vault, archive, db := registerSharedFlags(fs)
-	if err := fs.Parse(args[1:]); err != nil {
-		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
-			"invalid import flags")
+	configureUsage(fs, "import paperless [flags]", "Import documents from a Paperless-ngx instance into the vault. Use --limit or --ids to run a small, inspectable pilot before a full migration; both bounds apply to --dry-run and real imports alike. Imports are resumable: a document already recorded as imported is skipped on a re-run, and a document that previously failed is retried automatically.")
+
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
+		fs.Usage()
+		return nil
+	}
+
+	if args[0] != "paperless" {
+		return exitcodes.Wrapf(nil, exitcodes.ExitNoInput, exitcodes.KindValidation,
+			"unknown import subcommand %q; supported: paperless", args[0])
+	}
+
+	help, err := parseFlags(fs, args[1:], "invalid import flags")
+	if help || err != nil {
+		return err
 	}
 	cfg, err := resolveConfig(fs, ocrLang, vault, archive, db)
 	if err != nil {
@@ -312,8 +297,11 @@ previously failed is retried automatically.`)
 			"invalid ids")
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	if *verify {
-		report, err := paperlessimport.Verify(context.Background(), paperlessimport.Options{
+		report, err := paperlessimport.Verify(ctx, paperlessimport.Options{
 			BaseURL: *baseURL,
 			Token:   *token,
 			Since:   since,
@@ -367,7 +355,6 @@ previously failed is retried automatically.`)
 		PreserveStoragePaths: *preserveStoragePaths,
 	}
 
-	ctx := context.Background()
 	stats, err := paperlessimport.Run(ctx, opts, pipeline)
 	if err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
@@ -552,26 +539,14 @@ func resolveConfig(fs *flag.FlagSet, ocrLang, vaultFlag, archiveFlag, dbFlag *st
 func runMCP(args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	ocrLang, vault, archive, db := registerSharedFlags(fs)
-	if err := fs.Parse(args); err != nil {
-		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
-			"invalid mcp flags")
+	configureUsage(fs, "mcp [flags]", "Start the MCP server for AI-powered document processing.")
+	help, err := parseFlags(fs, args, "invalid mcp flags")
+	if help || err != nil {
+		return err
 	}
 	cfg, err := resolveConfig(fs, ocrLang, vault, archive, db)
 	if err != nil {
 		return err
-	}
-	remaining := fs.Args()
-	if len(remaining) > 0 && (remaining[0] == "--help" || remaining[0] == "-h") {
-		fmt.Fprintln(stdout, `Usage: symingest mcp [flags]
-
-Flags:
-  --ocr-lang string   Tesseract language override (default "eng")
-  --vault string      Target vault directory
-  --archive string    Target archive directory
-  --db string         SQLite database path
-
-Start the MCP server for AI-powered document processing.`)
-		return nil
 	}
 
 	st, err := store.Open(cfg.db)
@@ -596,25 +571,18 @@ Start the MCP server for AI-powered document processing.`)
 func runWatch(args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 	ocrLang, vault, archive, db := registerSharedFlags(fs)
-	if err := fs.Parse(args); err != nil {
-		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
-			"invalid watch flags")
+	configureUsage(fs, "watch [flags] <dir>", "Watch a directory for new or modified files and ingest them in the background.")
+	help, err := parseFlags(fs, args, "invalid watch flags")
+	if help || err != nil {
+		return err
 	}
 	cfg, err := resolveConfig(fs, ocrLang, vault, archive, db)
 	if err != nil {
 		return err
 	}
 	remaining := fs.Args()
-	if len(remaining) == 0 || remaining[0] == "--help" || remaining[0] == "-h" {
-		fmt.Fprintln(stdout, `Usage: symingest watch [flags] <dir>
-
-Flags:
-  --ocr-lang string   Tesseract language override (default "eng")
-  --vault string      Target vault directory
-  --archive string    Target archive directory
-  --db string         SQLite database path
-
-Watch a directory for new or modified files and ingest them in the background.`)
+	if len(remaining) == 0 {
+		fs.Usage()
 		return nil
 	}
 
@@ -683,9 +651,10 @@ func runJobs(args []string) error {
 	jsonFlag := fs.Bool("json", false, "Output jobs in JSON format")
 	limitFlag := fs.Int("limit", 100, "Maximum number of jobs to return")
 	ocrLang, vault, archive, db := registerSharedFlags(fs)
-	if err := fs.Parse(args); err != nil {
-		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
-			"invalid jobs flags")
+	configureUsage(fs, "jobs [flags]", "List ingestion jobs in the queue.")
+	help, err := parseFlags(fs, args, "invalid jobs flags")
+	if help || err != nil {
+		return err
 	}
 	cfg, err := resolveConfig(fs, ocrLang, vault, archive, db)
 	if err != nil {
@@ -739,19 +708,18 @@ func runJobs(args []string) error {
 func runRetry(args []string) error {
 	fs := flag.NewFlagSet("retry", flag.ContinueOnError)
 	ocrLang, vault, archive, db := registerSharedFlags(fs)
-	if err := fs.Parse(args); err != nil {
-		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
-			"invalid retry flags")
+	configureUsage(fs, "retry [flags] <job-id>", "Retry a failed job by resetting its status to pending.")
+	help, err := parseFlags(fs, args, "invalid retry flags")
+	if help || err != nil {
+		return err
 	}
 	cfg, err := resolveConfig(fs, ocrLang, vault, archive, db)
 	if err != nil {
 		return err
 	}
 	remaining := fs.Args()
-	if len(remaining) == 0 || remaining[0] == "--help" || remaining[0] == "-h" {
-		fmt.Fprintln(stdout, `Usage: symingest retry [flags] <job-id>
-
-Retry a failed job by resetting its status to pending.`)
+	if len(remaining) == 0 {
+		fs.Usage()
 		return nil
 	}
 
@@ -782,9 +750,10 @@ Retry a failed job by resetting its status to pending.`)
 func runRules(args []string) error {
 	fs := flag.NewFlagSet("rules", flag.ContinueOnError)
 	ocrLang, vault, archive, db := registerSharedFlags(fs)
-	if err := fs.Parse(args); err != nil {
-		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation,
-			"invalid rules flags")
+	configureUsage(fs, "rules [flags] [command]", "Manage classification rules. Patterns are case-insensitive substrings matched against extracted document text, not filename globs.\n\nCommands:\n  list                         List all classification rules\n  add <pattern> <kind> <value> Add a classification rule\n  delete <id>                  Delete a classification rule by ID\n\nKinds for add command: category, tag, correspondent, document_type")
+	help, err := parseFlags(fs, args, "invalid rules flags")
+	if help || err != nil {
+		return err
 	}
 	cfg, err := resolveConfig(fs, ocrLang, vault, archive, db)
 	if err != nil {
@@ -792,8 +761,9 @@ func runRules(args []string) error {
 	}
 
 	remaining := fs.Args()
-	if len(remaining) == 0 || remaining[0] == "--help" || remaining[0] == "-h" {
-		return printRulesUsage()
+	if len(remaining) == 0 {
+		fs.Usage()
+		return nil
 	}
 
 	st, err := store.Open(cfg.db)
@@ -821,16 +791,13 @@ func runRules(args []string) error {
 func printRulesUsage() error {
 	fmt.Fprintln(stdout, `Usage: symingest rules [flags] [command]
 
-Flags:
-  --db string   SQLite database path
-
 Commands:
-  list                          List all classification rules
-  add <pattern> <kind> <value>  Add a classification rule
-  delete <id>                   Delete a classification rule by ID
+  list                         List all classification rules
+  add <pattern> <kind> <value> Add a classification rule
+  delete <id>                  Delete a classification rule by ID
 
-Kinds for add command:
-  category, tag, correspondent, document_type`)
+Patterns are case-insensitive substrings matched against extracted document text, not filename globs.
+Kinds for add command: category, tag, correspondent, document_type`)
 	return nil
 }
 

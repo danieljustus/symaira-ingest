@@ -299,6 +299,46 @@ fi
 	}
 }
 
+func TestRunner_ValidateLanguages_CachesListLanguages(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell counter fixture is Unix-only")
+	}
+	dir := t.TempDir()
+	counter := filepath.Join(dir, "list-langs-count")
+	tess := writeFakeBin(t, dir, "tesseract", fmt.Sprintf(`
+count_file=%q
+if [ "$1" = "--list-langs" ]; then
+	n=0
+	if [ -f "$count_file" ]; then n=$(cat "$count_file"); fi
+	n=$((n + 1))
+	printf "%%s\n" "$n" > "$count_file"
+	echo "List of available languages (1):"
+	echo "eng"
+	exit 0
+fi
+echo "extracted text"
+`, counter))
+
+	r := &Runner{Tesseract: tess, OCRLang: "eng"}
+	for i := 0; i < 2; i++ {
+		img := filepath.Join(dir, fmt.Sprintf("scan-%d.png", i))
+		if err := os.WriteFile(img, []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.Extract(context.Background(), img, extract.KindPNG); err != nil {
+			t.Fatalf("Extract %d: %v", i, err)
+		}
+	}
+
+	data, err := os.ReadFile(counter)
+	if err != nil {
+		t.Fatalf("read counter: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "1" {
+		t.Fatalf("--list-langs calls = %s, want 1", got)
+	}
+}
+
 func TestRunner_Integration(t *testing.T) {
 	if os.Getenv("SYM_TEST_REAL_OCR") != "true" {
 		t.Skip("skipping real OCR integration tests (set SYM_TEST_REAL_OCR=true to run)")
