@@ -198,12 +198,13 @@ func runImport(args []string) error {
 	idsStr := fs.String("ids", "", "Import only these Paperless document IDs (comma-separated); takes precedence over --since and --limit")
 	preserveStoragePaths := fs.Bool("preserve-storage-paths", false, "Place notes under vault subdirectories derived from each document's Paperless storage path")
 	dryRun := fs.Bool("dry-run", false, "List what would be imported without writing")
-	reportPath := fs.String("report", "", "Write a JSON migration report to this path (works with --dry-run and real imports)")
+	plan := fs.Bool("plan", false, "Plan a Paperless import without downloading document bodies or writing vault/archive/import-state")
+	reportPath := fs.String("report", "", "Write a JSON migration report to this path (works with --plan, --dry-run and real imports)")
 	verify := fs.Bool("verify", false, "Verify a completed import against the Paperless source instead of importing")
 	statusOnly := fs.Bool("status", false, "List per-document import status from a previous run, then exit")
 	jsonFlag := fs.Bool("json", false, "With --status or --verify, output the result as JSON")
 	ocrLang, vault, archive, db := registerSharedFlags(fs)
-	configureUsage(fs, "import paperless [flags]", "Import documents from a Paperless-ngx instance into the vault. Use --limit or --ids to run a small, inspectable pilot before a full migration; both bounds apply to --dry-run and real imports alike. Imports are resumable: a document already recorded as imported is skipped on a re-run, and a document that previously failed is retried automatically.")
+	configureUsage(fs, "import paperless [flags]", "Import documents from a Paperless-ngx instance into the vault. Use --plan, --dry-run, --limit, or --ids to run a small, inspectable pilot before a full migration; bounds apply to --plan, --dry-run and real imports alike. Imports are resumable: a document already recorded as imported is skipped on a re-run, and a document that previously failed is retried automatically.")
 
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
 		fs.Usage()
@@ -242,7 +243,12 @@ func runImport(args []string) error {
 			"token is required (use --token or the PAPERLESS_TOKEN env var)")
 	}
 
-	if cfg.vault == "" && !*statusOnly {
+	if *plan && *dryRun {
+		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation,
+			"--plan and --dry-run are mutually exclusive")
+	}
+
+	if cfg.vault == "" && !*statusOnly && !*plan && !*dryRun {
 		return exitcodes.Wrapf(nil, exitcodes.ExitConfig, exitcodes.KindConfig,
 			"no vault configured; use --vault, SYMINGEST_VAULT env, or set vault in ~/.config/symingest/config.toml")
 	}
@@ -362,6 +368,7 @@ func runImport(args []string) error {
 		Token:                *token,
 		Since:                since,
 		DryRun:               *dryRun,
+		Plan:                 *plan,
 		Limit:                *limit,
 		IDs:                  ids,
 		PreserveStoragePaths: *preserveStoragePaths,
@@ -373,15 +380,19 @@ func runImport(args []string) error {
 			"import failed")
 	}
 
-	fmt.Fprintf(stdout, "Import complete: %d imported, %d skipped, %d failed (of %d total)\n",
-		stats.Imported, stats.Skipped, stats.Failed, stats.Total)
+	if *plan {
+		fmt.Fprintf(stdout, "Import plan complete: %d documents analyzed, %d unsupported type groups\n", stats.Total, len(stats.Audit.UnsupportedFileTypes))
+	} else {
+		fmt.Fprintf(stdout, "Import complete: %d imported, %d skipped, %d failed (of %d total)\n",
+			stats.Imported, stats.Skipped, stats.Failed, stats.Total)
+	}
 	// For a bounded pilot run, echo exactly which documents were selected so
 	// the operator can inspect them. Document content is never printed.
 	if (*limit > 0 || len(ids) > 0) && len(stats.SelectedIDs) > 0 {
 		fmt.Fprintf(stdout, "Selected document IDs: %s\n", joinInts(stats.SelectedIDs))
 	}
 	if *reportPath != "" {
-		if err := paperlessimport.WriteMigrationReport(*reportPath, stats.BuildMigrationReport(*dryRun)); err != nil {
+		if err := paperlessimport.WriteMigrationReport(*reportPath, stats.BuildMigrationReport(*dryRun || *plan)); err != nil {
 			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
 				"failed to write migration report")
 		}
@@ -945,6 +956,10 @@ func runMCP(args []string) error {
 
 func runWatch(args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
+	processingDir := fs.String("processing-dir", "", "Move stable files here before enqueueing them")
+	processedDir := fs.String("processed-dir", "", "Move successfully processed source files here")
+	failedDir := fs.String("failed-dir", "", "Move failed source files here and write .error.json sidecars")
+	stableFor := fs.Duration("stable-for", time.Second, "How long a file must remain unchanged before enqueueing")
 	ocrLang, vault, archive, db := registerSharedFlags(fs)
 	configureUsage(fs, "watch [flags] <dir>", "Watch a directory for new or modified files and ingest them in the background.")
 	help, err := parseFlags(fs, args, "invalid watch flags")
@@ -988,7 +1003,12 @@ func runWatch(args []string) error {
 			"failed to reset running jobs")
 	}
 
-	watcher, err := ingest.NewWatcher(st, inboxDir)
+	watcher, err := ingest.NewWatcherWithOptions(st, inboxDir, ingest.WatcherOptions{
+		StableFor:     *stableFor,
+		ProcessingDir: *processingDir,
+		ProcessedDir:  *processedDir,
+		FailedDir:     *failedDir,
+	})
 	if err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindInternal,
 			"failed to initialize watcher")
@@ -997,10 +1017,12 @@ func runWatch(args []string) error {
 
 	engine := ocr.DefaultRunner(cfg.ocrLang)
 	pipeline := &ingest.Pipeline{
-		Engine:     engine,
-		Store:      st,
-		Writer:     &writer.NoteWriter{Vault: cfg.vault},
-		ArchiveDir: cfg.archive,
+		Engine:       engine,
+		Store:        st,
+		Writer:       &writer.NoteWriter{Vault: cfg.vault},
+		ArchiveDir:   cfg.archive,
+		ProcessedDir: *processedDir,
+		FailedDir:    *failedDir,
 	}
 
 	if err := watcher.Start(ctx); err != nil {

@@ -86,6 +86,67 @@ func TestRun_JobsJSON(t *testing.T) {
 	}
 }
 
+func TestRun_ImportPaperless_PlanWritesReportWithoutVault(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/documents/":
+			json.NewEncoder(w).Encode(map[string]any{
+				"count":   1,
+				"results": []map[string]any{{"id": 5, "title": "Plan Doc", "created_date": "2026-01-15", "file_type": ".pdf", "mime_type": "application/pdf"}},
+				"next":    nil,
+			})
+		case "/api/tags/", "/api/correspondents/", "/api/document_types/", "/api/storage_paths/":
+			json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []any{}, "next": nil})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	reportPath := filepath.Join(dir, "plan.json")
+	var sb strings.Builder
+	oldStdout := stdout
+	stdout = &sb
+	defer func() { stdout = oldStdout }()
+
+	err := run([]string{
+		"import", "paperless",
+		"-db", filepath.Join(dir, "test.db"),
+		"-base-url", srv.URL,
+		"-token", "test-token",
+		"-plan",
+		"-report", reportPath,
+	})
+	if err != nil {
+		t.Fatalf("run(import paperless -plan): %v", err)
+	}
+	if !strings.Contains(sb.String(), "Import plan complete") {
+		t.Fatalf("plan output missing completion message: %s", sb.String())
+	}
+	data, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("read plan report: %v", err)
+	}
+	var report struct {
+		Mode      string `json:"mode"`
+		Documents []struct {
+			Status    string `json:"status"`
+			SourceURI string `json:"source_uri"`
+		} `json:"documents"`
+		RequiredTools []string `json:"required_tools"`
+	}
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("plan report JSON: %v", err)
+	}
+	if report.Mode != "plan" || len(report.Documents) != 1 || report.Documents[0].Status != "planned" || report.Documents[0].SourceURI != "paperless://documents/5" {
+		t.Fatalf("unexpected plan report: %+v", report)
+	}
+	if len(report.RequiredTools) == 0 {
+		t.Fatalf("plan report should identify required tools for PDF/OCR workload: %+v", report)
+	}
+}
+
 func TestRun_ImportPaperless_StatusEmpty(t *testing.T) {
 	tempDB := filepath.Join(t.TempDir(), "test.db")
 	var sb strings.Builder

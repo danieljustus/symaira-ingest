@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"log"
@@ -11,18 +12,22 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
 	"github.com/danieljustus/symaira-ingest/internal/extract"
 	"github.com/danieljustus/symaira-ingest/internal/store"
+	"github.com/fsnotify/fsnotify"
 )
 
 // Watcher monitors a directory for files to ingest.
 type Watcher struct {
-	store    *store.Store
-	inboxDir string
-	watcher  *fsnotify.Watcher
-	pending  map[string]*fileState
-	mu       sync.Mutex
+	store         *store.Store
+	inboxDir      string
+	watcher       *fsnotify.Watcher
+	pending       map[string]*fileState
+	stableFor     time.Duration
+	processingDir string
+	processedDir  string
+	failedDir     string
+	mu            sync.Mutex
 }
 
 type fileState struct {
@@ -32,20 +37,65 @@ type fileState struct {
 	timer       *time.Timer
 }
 
+type WatcherOptions struct {
+	StableFor     time.Duration
+	ProcessingDir string
+	ProcessedDir  string
+	FailedDir     string
+}
+
 // NewWatcher creates a new Watcher instance for the given inbox directory.
 func NewWatcher(s *store.Store, inboxDir string) (*Watcher, error) {
+	return NewWatcherWithOptions(s, inboxDir, WatcherOptions{})
+}
+
+func NewWatcherWithOptions(s *store.Store, inboxDir string, opts WatcherOptions) (*Watcher, error) {
 	inboxDir = filepath.Clean(inboxDir)
+	if opts.StableFor <= 0 {
+		opts.StableFor = time.Second
+	}
 	fw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, fmt.Errorf("create fsnotify watcher: %w", err)
 	}
 
+	processingDir, err := cleanOptionalDir(opts.ProcessingDir)
+	if err != nil {
+		fw.Close()
+		return nil, fmt.Errorf("resolve processing dir: %w", err)
+	}
+	processedDir, err := cleanOptionalDir(opts.ProcessedDir)
+	if err != nil {
+		fw.Close()
+		return nil, fmt.Errorf("resolve processed dir: %w", err)
+	}
+	failedDir, err := cleanOptionalDir(opts.FailedDir)
+	if err != nil {
+		fw.Close()
+		return nil, fmt.Errorf("resolve failed dir: %w", err)
+	}
+
 	return &Watcher{
-		store:    s,
-		inboxDir: inboxDir,
-		watcher:  fw,
-		pending:  make(map[string]*fileState),
+		store:         s,
+		inboxDir:      inboxDir,
+		watcher:       fw,
+		pending:       make(map[string]*fileState),
+		stableFor:     opts.StableFor,
+		processingDir: processingDir,
+		processedDir:  processedDir,
+		failedDir:     failedDir,
 	}, nil
+}
+
+func cleanOptionalDir(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(abs), nil
 }
 
 // Close closes the underlying fsnotify watcher.
@@ -61,7 +111,7 @@ func (w *Watcher) Start(ctx context.Context) error {
 			return err
 		}
 		if d.IsDir() {
-			if isIgnored(path) {
+			if w.shouldIgnore(path) {
 				return filepath.SkipDir
 			}
 			log.Printf("[Watcher] Watching directory: %s", path)
@@ -69,7 +119,7 @@ func (w *Watcher) Start(ctx context.Context) error {
 				return fmt.Errorf("watch dir %s: %w", path, err)
 			}
 		} else {
-			if !isIgnored(path) {
+			if !w.shouldIgnore(path) {
 				w.debounceFile(ctx, path)
 			}
 		}
@@ -103,7 +153,7 @@ func (w *Watcher) Start(ctx context.Context) error {
 				if !ok {
 					return
 				}
-				if isIgnored(event.Name) {
+				if w.shouldIgnore(event.Name) {
 					continue
 				}
 
@@ -145,13 +195,13 @@ func (w *Watcher) watchDirectoryRecursive(ctx context.Context, dir string) {
 			return nil
 		}
 		if d.IsDir() {
-			if isIgnored(path) {
+			if w.shouldIgnore(path) {
 				return filepath.SkipDir
 			}
 			log.Printf("[Watcher] Recursively watching directory: %s", path)
 			_ = w.watcher.Add(path)
 		} else {
-			if !isIgnored(path) {
+			if !w.shouldIgnore(path) {
 				w.debounceFile(ctx, path)
 			}
 		}
@@ -190,7 +240,7 @@ func (w *Watcher) debounceFile(ctx context.Context, path string) {
 	}
 
 	state := w.pending[path]
-	state.timer = time.AfterFunc(1*time.Second, func() {
+	state.timer = time.AfterFunc(w.stableFor, func() {
 		w.checkStability(ctx, path)
 	})
 }
@@ -247,7 +297,7 @@ func (w *Watcher) checkStability(ctx context.Context, path string) {
 
 	state.lastSize = currentSize
 	state.lastModTime = currentModTime
-	state.timer = time.AfterFunc(1*time.Second, func() {
+	state.timer = time.AfterFunc(w.stableFor, func() {
 		w.checkStability(ctx, path)
 	})
 	w.mu.Unlock()
@@ -266,24 +316,33 @@ func (w *Watcher) cancelDebounce(path string) {
 }
 
 func (w *Watcher) enqueueFile(ctx context.Context, path string) error {
-	kind, err := extract.Detect(path)
+	workPath, err := w.moveToProcessing(path)
 	if err != nil {
+		return err
+	}
+
+	kind, err := extract.Detect(workPath)
+	if err != nil {
+		w.handlePreQueueFailure(workPath, "detect", err)
 		return fmt.Errorf("detect file kind: %w", err)
 	}
 
-	hash, err := hashFile(path)
+	hash, err := hashFile(workPath)
 	if err != nil {
+		w.handlePreQueueFailure(workPath, "hash", err)
 		return fmt.Errorf("hash file: %w", err)
 	}
 
-	doc, created, err := w.store.CreateOrGet(ctx, path, hash, string(kind))
+	doc, created, err := w.store.CreateOrGet(ctx, workPath, hash, string(kind))
 	if err != nil {
+		w.handlePreQueueFailure(workPath, "store", err)
 		return fmt.Errorf("create or get document: %w", err)
 	}
 
 	if !created {
-		log.Printf("[Watcher] File %s (hash %s) already ingested or enqueued. Recording skipped job.", path, hash)
+		log.Printf("[Watcher] File %s (hash %s) already ingested or enqueued. Recording skipped job.", workPath, hash)
 		if _, err := w.store.EnqueueSkippedJob(ctx, doc.ID, string(kind), "duplicate"); err != nil {
+			w.handlePreQueueFailure(workPath, "store", err)
 			return fmt.Errorf("enqueue skipped job: %w", err)
 		}
 		return nil
@@ -291,10 +350,93 @@ func (w *Watcher) enqueueFile(ctx context.Context, path string) error {
 
 	_, err = w.store.EnqueueJob(ctx, doc.ID, string(kind))
 	if err != nil {
+		w.handlePreQueueFailure(workPath, "store", err)
 		return fmt.Errorf("enqueue job: %w", err)
 	}
 
 	return nil
+}
+
+func (w *Watcher) moveToProcessing(path string) (string, error) {
+	if w.processingDir == "." || w.processingDir == "" {
+		return path, nil
+	}
+	return moveFileToDir(path, w.processingDir)
+}
+
+func (w *Watcher) handlePreQueueFailure(path, stage string, err error) {
+	if w.failedDir == "." || w.failedDir == "" {
+		return
+	}
+	failedPath, moveErr := moveFileToDir(path, w.failedDir)
+	if moveErr != nil {
+		log.Printf("[Watcher] Failed to move %s to failed dir: %v", path, moveErr)
+		return
+	}
+	if sidecarErr := writeFailureSidecar(failedPath, stage, err); sidecarErr != nil {
+		log.Printf("[Watcher] Failed to write error sidecar for %s: %v", failedPath, sidecarErr)
+	}
+}
+
+func (w *Watcher) shouldIgnore(path string) bool {
+	if isIgnored(path) {
+		return true
+	}
+	for _, dir := range []string{w.processingDir, w.processedDir, w.failedDir} {
+		if dir == "" || dir == "." {
+			continue
+		}
+		if isPathWithin(path, dir) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPathWithin(path, dir string) bool {
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(path))
+	if err != nil {
+		return false
+	}
+	return rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel))
+}
+
+func moveFileToDir(path, dir string) (string, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("create target directory: %w", err)
+	}
+	base := filepath.Base(path)
+	dst := filepath.Join(dir, base)
+	for i := 2; fileExists(dst); i++ {
+		ext := filepath.Ext(base)
+		stem := strings.TrimSuffix(base, ext)
+		dst = filepath.Join(dir, fmt.Sprintf("%s-%d%s", stem, i, ext))
+	}
+	if err := os.Rename(path, dst); err != nil {
+		return "", fmt.Errorf("move %s to %s: %w", path, dst, err)
+	}
+	return dst, nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+type failureSidecar struct {
+	SourcePath string    `json:"source_path"`
+	Stage      string    `json:"stage"`
+	Error      string    `json:"error"`
+	FailedAt   time.Time `json:"failed_at"`
+}
+
+func writeFailureSidecar(path, stage string, err error) error {
+	payload := failureSidecar{SourcePath: path, Stage: stage, Error: err.Error(), FailedAt: time.Now().UTC()}
+	data, marshalErr := json.MarshalIndent(payload, "", "  ")
+	if marshalErr != nil {
+		return marshalErr
+	}
+	return os.WriteFile(path+".error.json", append(data, '\n'), 0o600)
 }
 
 func isIgnored(path string) bool {

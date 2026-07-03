@@ -20,10 +20,12 @@ import (
 
 // Pipeline orchestrates extraction, persistence, and Markdown output.
 type Pipeline struct {
-	Engine     extract.Engine
-	Store      *store.Store
-	Writer     *writer.NoteWriter
-	ArchiveDir string
+	Engine       extract.Engine
+	Store        *store.Store
+	Writer       *writer.NoteWriter
+	ArchiveDir   string
+	ProcessedDir string
+	FailedDir    string
 }
 
 // ErrDuplicate is returned when a source has already been ingested.
@@ -217,13 +219,22 @@ func (p *Pipeline) processJob(ctx context.Context, job *store.Job, opts *IngestO
 
 	var paperlessMeta *writer.PaperlessMeta
 	var layout *writer.NoteLayout
+	noteSourcePath := doc.SourcePath
+	var importedFrom, importRunID, sourceURI, downloadURI string
 	if opts != nil {
 		paperlessMeta = opts.Paperless
 		layout = opts.Layout
+		if opts.SourcePathOverride != "" {
+			noteSourcePath = opts.SourcePathOverride
+		}
+		importedFrom = opts.ImportedFrom
+		importRunID = opts.ImportRunID
+		sourceURI = opts.SourceURI
+		downloadURI = opts.DownloadURI
 	}
 
 	vaultPath, err := p.Writer.WriteNote(
-		doc.SourcePath,
+		noteSourcePath,
 		doc.SHA256,
 		extractRes.MIME,
 		extractRes.Engine,
@@ -234,6 +245,10 @@ func (p *Pipeline) processJob(ctx context.Context, job *store.Job, opts *IngestO
 		tags,
 		correspondent,
 		documentType,
+		importedFrom,
+		importRunID,
+		sourceURI,
+		downloadURI,
 		paperlessMeta,
 		layout,
 	)
@@ -242,7 +257,8 @@ func (p *Pipeline) processJob(ctx context.Context, job *store.Job, opts *IngestO
 	}
 
 	return &Result{
-		SourcePath:    doc.SourcePath,
+		SourcePath:    noteSourcePath,
+		SHA256:        doc.SHA256,
 		Kind:          kind,
 		Extract:       extractRes,
 		VaultPath:     vaultPath,
