@@ -237,6 +237,47 @@ func TestRun_ImportPaperless_StatusJSONAfterUpsert(t *testing.T) {
 	}
 }
 
+func TestRun_ImportPaperless_StatusSummaryAndFailedFilter(t *testing.T) {
+	tempDB := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.Open(tempDB)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	if err := st.UpsertPaperlessImportState(context.Background(), "https://paperless.example", 8, "imported", ""); err != nil {
+		t.Fatalf("Upsert imported: %v", err)
+	}
+	if err := st.UpsertPaperlessImportState(context.Background(), "https://paperless.example", 9, "failed", "ocr failed"); err != nil {
+		t.Fatalf("Upsert failed: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	var sb strings.Builder
+	oldStdout := stdout
+	stdout = &sb
+	defer func() { stdout = oldStdout }()
+
+	if err := run([]string{"import", "paperless", "-db", tempDB, "-base-url", "https://paperless.example", "-status", "-summary"}); err != nil {
+		t.Fatalf("run(status summary): %v", err)
+	}
+	out := sb.String()
+	for _, want := range []string{"total=2", "imported=1", "failed=1"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("summary output missing %q: %s", want, out)
+		}
+	}
+
+	sb.Reset()
+	if err := run([]string{"import", "paperless", "-db", tempDB, "-base-url", "https://paperless.example", "-status", "-failed"}); err != nil {
+		t.Fatalf("run(status failed): %v", err)
+	}
+	out = sb.String()
+	if !strings.Contains(out, "document 9: failed") || strings.Contains(out, "document 8") {
+		t.Fatalf("failed filter output wrong: %s", out)
+	}
+}
+
 func TestRun_SetupWritesConfigWithoutTokenAndDoctorPasses(t *testing.T) {
 	home := t.TempDir()
 	oldHome := os.Getenv("HOME")

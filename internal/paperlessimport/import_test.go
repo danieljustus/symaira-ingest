@@ -602,6 +602,90 @@ func TestRun_ResumesAfterPartialFailure(t *testing.T) {
 	}
 }
 
+func TestRun_RetryFailedUsesCurrentTargetAndCheckpoints(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if handleEmptyLookups(w, r) {
+			return
+		}
+		switch r.URL.Path {
+		case "/api/documents/":
+			json.NewEncoder(w).Encode(map[string]any{
+				"count": 3,
+				"results": []map[string]any{
+					{"id": 1, "title": "Already Done", "created_date": "2026-01-15", "file_type": ".txt"},
+					{"id": 2, "title": "Retry Me", "created_date": "2026-01-16", "file_type": ".txt"},
+					{"id": 3, "title": "Never Tried", "created_date": "2026-01-17", "file_type": ".txt"},
+				},
+				"next": nil,
+			})
+		case "/api/documents/2/download/":
+			w.Write([]byte("recovered content"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	vault := filepath.Join(dir, "vault")
+	archive := filepath.Join(dir, "archive")
+	if err := s.UpsertPaperlessImportStateForTarget(context.Background(), srv.URL, vault, archive, 1, "imported", ""); err != nil {
+		t.Fatalf("seed imported: %v", err)
+	}
+	if err := s.UpsertPaperlessImportStateForTarget(context.Background(), srv.URL, vault, archive, 2, "failed", "download timeout"); err != nil {
+		t.Fatalf("seed failed: %v", err)
+	}
+	// Same document ID but a different target must not make the current target
+	// look imported.
+	otherVault := filepath.Join(dir, "other-vault")
+	if status, found, err := s.PaperlessImportStatusForTarget(context.Background(), srv.URL, otherVault, archive, 1); err != nil || found || status != "" {
+		t.Fatalf("target mismatch status = %q found=%v err=%v, want not found", status, found, err)
+	}
+
+	pipeline := &ingest.Pipeline{
+		Engine:     fakeEngine{},
+		Store:      s,
+		Writer:     &writer.NoteWriter{Vault: vault},
+		ArchiveDir: archive,
+	}
+	var progress strings.Builder
+	stats, err := Run(context.Background(), Options{
+		BaseURL:         srv.URL,
+		Token:           "test-token",
+		RetryFailed:     true,
+		Concurrency:     2,
+		CheckpointEvery: 1,
+		TargetVault:     vault,
+		TargetArchive:   archive,
+		Progress:        &progress,
+	}, pipeline)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if stats.Imported != 1 || stats.Skipped != 2 || stats.Failed != 0 {
+		t.Fatalf("stats imported=%d skipped=%d failed=%d, want 1/2/0", stats.Imported, stats.Skipped, stats.Failed)
+	}
+	if got := []string{stats.Results[0].Status, stats.Results[1].Status, stats.Results[2].Status}; got[0] != "skipped" || got[1] != "imported" || got[2] != "skipped" {
+		t.Fatalf("results not deterministic/in input order: %+v", stats.Results)
+	}
+	if !strings.Contains(progress.String(), "checkpoint: processed=") || !strings.Contains(progress.String(), "eta=") {
+		t.Fatalf("checkpoint output missing progress/eta: %s", progress.String())
+	}
+	status, found, err := s.PaperlessImportStatusForTarget(context.Background(), srv.URL, vault, archive, 2)
+	if err != nil {
+		t.Fatalf("PaperlessImportStatusForTarget: %v", err)
+	}
+	if !found || status != "imported" {
+		t.Fatalf("document 2 status = %q found=%v, want imported/true", status, found)
+	}
+}
+
 func TestRun_CancellationStopsDuringNextDownloadAfterStateRecorded(t *testing.T) {
 	secondStarted := make(chan struct{}, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

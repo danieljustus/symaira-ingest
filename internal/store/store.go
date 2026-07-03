@@ -89,6 +89,9 @@ func (s *Store) CreateOrGet(ctx context.Context, sourcePath, sha256, mime string
 		`INSERT INTO documents (source_path, sha256, mime, status) VALUES (?, ?, ?, 'pending')`,
 		sourcePath, sha256, mime)
 	if err != nil {
+		if existing, lookupErr := s.ByHash(ctx, sha256); lookupErr == nil && existing != nil {
+			return existing, false, nil
+		}
 		return nil, false, fmt.Errorf("insert document: %w", err)
 	}
 	id, _ := res.LastInsertId()
@@ -216,7 +219,7 @@ type Job struct {
 	UpdatedAt  string  `json:"updated_at"`
 
 	// Joined field
-	SourcePath string  `json:"source_path"`
+	SourcePath string `json:"source_path"`
 }
 
 // EnqueueJob enqueues a new ingest job in the queue.
@@ -545,6 +548,8 @@ func (s *Store) ListRules(ctx context.Context) ([]*ClassificationRule, error) {
 type PaperlessImportState struct {
 	ID                  int64  `json:"id"`
 	BaseURL             string `json:"base_url"`
+	TargetVault         string `json:"target_vault,omitempty"`
+	TargetArchive       string `json:"target_archive,omitempty"`
 	PaperlessDocumentID int    `json:"paperless_document_id"`
 	Status              string `json:"status"` // 'pending', 'imported', 'skipped', 'failed'
 	LastError           string `json:"last_error,omitempty"`
@@ -557,6 +562,14 @@ type PaperlessImportState struct {
 // same key overwrites the previous status, so a retried import always
 // reflects its most recent attempt.
 func (s *Store) UpsertPaperlessImportState(ctx context.Context, baseURL string, paperlessDocumentID int, status, lastError string) error {
+	return s.UpsertPaperlessImportStateForTarget(ctx, baseURL, "", "", paperlessDocumentID, status, lastError)
+}
+
+// UpsertPaperlessImportStateForTarget records the outcome for a Paperless
+// document under the concrete vault/archive target used by this run. The
+// target fields prevent a later import pointed at a different vault from
+// incorrectly treating an old successful row as safe to skip.
+func (s *Store) UpsertPaperlessImportStateForTarget(ctx context.Context, baseURL, targetVault, targetArchive string, paperlessDocumentID int, status, lastError string) error {
 	switch status {
 	case "pending", "imported", "skipped", "failed":
 	default:
@@ -567,13 +580,15 @@ func (s *Store) UpsertPaperlessImportState(ctx context.Context, baseURL string, 
 		lastErrVal = sql.NullString{String: lastError, Valid: true}
 	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO paperless_import_state (base_url, paperless_document_id, status, last_error)
-		VALUES (?, ?, ?, ?)
+		INSERT INTO paperless_import_state (base_url, target_vault, target_archive, paperless_document_id, status, last_error)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(base_url, paperless_document_id) DO UPDATE SET
+			target_vault = excluded.target_vault,
+			target_archive = excluded.target_archive,
 			status = excluded.status,
 			last_error = excluded.last_error,
 			updated_at = CURRENT_TIMESTAMP
-	`, baseURL, paperlessDocumentID, status, lastErrVal)
+	`, baseURL, targetVault, targetArchive, paperlessDocumentID, status, lastErrVal)
 	if err != nil {
 		return fmt.Errorf("upsert paperless import state: %w", err)
 	}
@@ -595,12 +610,33 @@ func (s *Store) PaperlessImportStatus(ctx context.Context, baseURL string, paper
 	return status, true, nil
 }
 
+// PaperlessImportStatusForTarget returns the status only when the stored
+// target matches the current vault/archive target. A row for another target is
+// intentionally treated as not found so a changed migration destination is not
+// skipped unsafely.
+func (s *Store) PaperlessImportStatusForTarget(ctx context.Context, baseURL, targetVault, targetArchive string, paperlessDocumentID int) (status string, found bool, err error) {
+	var storedVault, storedArchive string
+	err = s.db.QueryRowContext(ctx,
+		`SELECT status, target_vault, target_archive FROM paperless_import_state WHERE base_url = ? AND paperless_document_id = ?`,
+		baseURL, paperlessDocumentID).Scan(&status, &storedVault, &storedArchive)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("get paperless import state: %w", err)
+	}
+	if storedVault != targetVault || storedArchive != targetArchive {
+		return "", false, nil
+	}
+	return status, true, nil
+}
+
 // ListPaperlessImportState lists the recorded import state for all documents
 // from baseURL, ordered by Paperless document ID. When statusFilter is
 // non-empty only matching rows are returned.
 func (s *Store) ListPaperlessImportState(ctx context.Context, baseURL, statusFilter string) ([]*PaperlessImportState, error) {
 	query := `
-		SELECT id, base_url, paperless_document_id, status, last_error, created_at, updated_at
+		SELECT id, base_url, target_vault, target_archive, paperless_document_id, status, last_error, created_at, updated_at
 		FROM paperless_import_state
 		WHERE base_url = ?`
 	args := []any{baseURL}
@@ -620,7 +656,7 @@ func (s *Store) ListPaperlessImportState(ctx context.Context, baseURL, statusFil
 	for rows.Next() {
 		var st PaperlessImportState
 		var lastErr sql.NullString
-		if err := rows.Scan(&st.ID, &st.BaseURL, &st.PaperlessDocumentID, &st.Status, &lastErr, &st.CreatedAt, &st.UpdatedAt); err != nil {
+		if err := rows.Scan(&st.ID, &st.BaseURL, &st.TargetVault, &st.TargetArchive, &st.PaperlessDocumentID, &st.Status, &lastErr, &st.CreatedAt, &st.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan paperless import state: %w", err)
 		}
 		if lastErr.Valid {
@@ -646,4 +682,3 @@ func (s *Store) DeleteRule(ctx context.Context, id int64) error {
 	}
 	return nil
 }
-
