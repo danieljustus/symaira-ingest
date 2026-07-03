@@ -30,6 +30,7 @@ import (
 	"github.com/danieljustus/symaira-ingest/internal/ocr"
 	"github.com/danieljustus/symaira-ingest/internal/paperlessimport"
 	"github.com/danieljustus/symaira-ingest/internal/store"
+	"github.com/danieljustus/symaira-ingest/internal/vaultreview"
 	"github.com/danieljustus/symaira-ingest/internal/version"
 	"github.com/danieljustus/symaira-ingest/internal/writer"
 )
@@ -71,6 +72,16 @@ func run(args []string) error {
 		return runDoctor(args[1:])
 	case "setup":
 		return runSetup(args[1:])
+	case "validate-vault":
+		return runValidateVault(args[1:])
+	case "update":
+		return runUpdate(args[1:])
+	case "bulk-update":
+		return runBulkUpdate(args[1:])
+	case "apply-corrections":
+		return runApplyCorrections(args[1:])
+	case "review-report":
+		return runReviewReport(args[1:])
 	case "mcp":
 		return runMCP(args[1:])
 	default:
@@ -753,6 +764,10 @@ func runDoctorChecks(ctx context.Context, cfg *resolvedConfig, includePaperless 
 	if runtime.GOOS == "darwin" {
 		checkCommand(report, "tool.sips", "sips", doctorWarn)
 	}
+	checkOptionalCommand(report, "tool.optional.textutil", "textutil")
+	checkOptionalCommand(report, "tool.optional.pandoc", "pandoc")
+	checkOptionalCommand(report, "tool.optional.libreoffice", "libreoffice")
+	checkOptionalCommand(report, "tool.optional.soffice", "soffice")
 	if includePaperless {
 		checkPaperless(ctx, report, baseURL, token)
 	}
@@ -799,6 +814,15 @@ func checkCommand(report *doctorReport, name, command string, missing doctorStat
 	path, err := exec.LookPath(command)
 	if err != nil {
 		report.add(name, missing, fmt.Sprintf("%s not found in PATH", command))
+		return
+	}
+	report.add(name, doctorOK, path)
+}
+
+func checkOptionalCommand(report *doctorReport, name, command string) {
+	path, err := exec.LookPath(command)
+	if err != nil {
+		report.add(name, doctorOK, fmt.Sprintf("%s not found in PATH (optional)", command))
 		return
 	}
 	report.add(name, doctorOK, path)
@@ -990,6 +1014,194 @@ func printConfigDiff(w io.Writer, old, new string) {
 	for _, line := range strings.Split(strings.TrimRight(new, "\n"), "\n") {
 		fmt.Fprintf(w, "+ %s\n", line)
 	}
+}
+
+type stringList []string
+
+func (s *stringList) String() string { return strings.Join(*s, ",") }
+func (s *stringList) Set(v string) error {
+	for _, part := range strings.Split(v, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			*s = append(*s, part)
+		}
+	}
+	return nil
+}
+
+func runValidateVault(args []string) error {
+	fs := flag.NewFlagSet("validate-vault", flag.ContinueOnError)
+	jsonFlag := fs.Bool("json", false, "Output validation failures as JSON")
+	configureUsage(fs, "validate-vault [flags] <vault>", "Validate symingest Markdown frontmatter, archive links, hashes and Paperless IDs.")
+	help, err := parseFlags(fs, args, "invalid validate-vault flags")
+	if help || err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return exitcodes.Wrapf(nil, exitcodes.ExitNoInput, exitcodes.KindValidation, "validate-vault requires a vault path")
+	}
+	report, err := vaultreview.ValidateVault(fs.Arg(0))
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal, "vault validation failed")
+	}
+	if *jsonFlag {
+		data, err := json.MarshalIndent(report, "", "  ")
+		if err != nil {
+			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal, "failed to marshal validation report")
+		}
+		fmt.Fprintln(stdout, string(data))
+	} else {
+		fmt.Fprintf(stdout, "Vault validation: %d files, %d failures\n", report.Files, len(report.Failures))
+		for _, f := range report.Failures {
+			fmt.Fprintf(stdout, "%s: %s: %s\n", f.File, f.Check, f.Message)
+		}
+	}
+	if !report.OK() {
+		return exitcodes.Wrapf(nil, exitcodes.ExitConflict, exitcodes.KindConflict, "vault validation found %d failures", len(report.Failures))
+	}
+	return nil
+}
+
+func correctionFromFlags(fs *flag.FlagSet, paperlessID *int, addTags, removeTags *stringList, correspondent, documentType, storagePath *string) vaultreview.Correction {
+	c := vaultreview.Correction{PaperlessID: *paperlessID, AddTags: []string(*addTags), RemoveTags: []string(*removeTags)}
+	visited := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { visited[f.Name] = true })
+	if visited["correspondent"] {
+		c.Correspondent = correspondent
+	}
+	if visited["document-type"] {
+		c.DocumentType = documentType
+	}
+	if visited["storage-path"] {
+		c.StoragePath = storagePath
+	}
+	return c
+}
+
+func printUpdateResults(results []vaultreview.UpdateResult) {
+	for _, r := range results {
+		mode := "updated"
+		if r.DryRun {
+			mode = "would update"
+		} else if !r.Written {
+			mode = "unchanged"
+		}
+		fmt.Fprintf(stdout, "%s: %s (%s)\n", mode, r.File, strings.Join(r.Changes, ", "))
+	}
+}
+
+func runUpdate(args []string) error {
+	fs := flag.NewFlagSet("update", flag.ContinueOnError)
+	vault := fs.String("vault", "", "Vault path")
+	paperlessID := fs.Int("paperless-id", 0, "Paperless document ID to update")
+	dryRun := fs.Bool("dry-run", false, "Show exact frontmatter changes without writing")
+	var addTags, removeTags stringList
+	fs.Var(&addTags, "add-tag", "Tag to add (repeatable or comma-separated)")
+	fs.Var(&removeTags, "remove-tag", "Tag to remove (repeatable or comma-separated; inbox is protected)")
+	correspondent := fs.String("correspondent", "", "Set correspondent")
+	documentType := fs.String("document-type", "", "Set document type")
+	storagePath := fs.String("storage-path", "", "Set Paperless storage path metadata")
+	configureUsage(fs, "update [flags]", "Safely update one note frontmatter by Paperless ID.")
+	help, err := parseFlags(fs, args, "invalid update flags")
+	if help || err != nil {
+		return err
+	}
+	if *vault == "" {
+		return exitcodes.Wrapf(nil, exitcodes.ExitNoInput, exitcodes.KindValidation, "--vault is required")
+	}
+	res, err := vaultreview.ApplyCorrection(*vault, correctionFromFlags(fs, paperlessID, &addTags, &removeTags, correspondent, documentType, storagePath), *dryRun)
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation, "update failed")
+	}
+	printUpdateResults([]vaultreview.UpdateResult{*res})
+	return nil
+}
+
+func runBulkUpdate(args []string) error {
+	fs := flag.NewFlagSet("bulk-update", flag.ContinueOnError)
+	vault := fs.String("vault", "", "Vault path")
+	where := fs.String("where", "", "Selector, currently tag:<name>")
+	dryRun := fs.Bool("dry-run", false, "Show exact frontmatter changes without writing")
+	paperlessID := fs.Int("paperless-id", 0, "Ignored for bulk updates")
+	var addTags, removeTags stringList
+	fs.Var(&addTags, "add-tag", "Tag to add")
+	fs.Var(&removeTags, "remove-tag", "Tag to remove; inbox is protected")
+	correspondent := fs.String("correspondent", "", "Set correspondent")
+	documentType := fs.String("document-type", "", "Set document type")
+	storagePath := fs.String("storage-path", "", "Set Paperless storage path metadata")
+	configureUsage(fs, "bulk-update [flags]", "Safely update multiple notes selected by frontmatter.")
+	help, err := parseFlags(fs, args, "invalid bulk-update flags")
+	if help || err != nil {
+		return err
+	}
+	if *vault == "" || !strings.HasPrefix(*where, "tag:") {
+		return exitcodes.Wrapf(nil, exitcodes.ExitNoInput, exitcodes.KindValidation, "--vault and --where tag:<name> are required")
+	}
+	results, err := vaultreview.BulkUpdateByTag(*vault, strings.TrimPrefix(*where, "tag:"), correctionFromFlags(fs, paperlessID, &addTags, &removeTags, correspondent, documentType, storagePath), *dryRun)
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation, "bulk update failed")
+	}
+	printUpdateResults(results)
+	return nil
+}
+
+func runApplyCorrections(args []string) error {
+	fs := flag.NewFlagSet("apply-corrections", flag.ContinueOnError)
+	vault := fs.String("vault", "", "Vault path")
+	dryRun := fs.Bool("dry-run", false, "Show exact frontmatter changes without writing")
+	configureUsage(fs, "apply-corrections [flags] <corrections.yaml>", "Apply YAML corrections keyed by paperless_id.")
+	help, err := parseFlags(fs, args, "invalid apply-corrections flags")
+	if help || err != nil {
+		return err
+	}
+	if *vault == "" || fs.NArg() != 1 {
+		return exitcodes.Wrapf(nil, exitcodes.ExitNoInput, exitcodes.KindValidation, "--vault and corrections.yaml are required")
+	}
+	results, err := vaultreview.ApplyCorrectionsFile(*vault, fs.Arg(0), *dryRun)
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation, "apply corrections failed")
+	}
+	printUpdateResults(results)
+	return nil
+}
+
+func runReviewReport(args []string) error {
+	fs := flag.NewFlagSet("review-report", flag.ContinueOnError)
+	htmlPath := fs.String("html", "", "Write a local HTML review report")
+	jsonFlag := fs.Bool("json", false, "Output filtered review rows as JSON")
+	failed := fs.Bool("failed", false, "Show failed documents")
+	warningsOnly := fs.Bool("warnings", false, "Show documents with warnings or errors")
+	missingMetadata := fs.Bool("missing-metadata", false, "Show documents missing key metadata paths/MIME")
+	configureUsage(fs, "review-report [flags] <migration.json>", "Generate a human-reviewable migration report without document body text.")
+	help, err := parseFlags(fs, args, "invalid review-report flags")
+	if help || err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return exitcodes.Wrapf(nil, exitcodes.ExitNoInput, exitcodes.KindValidation, "review-report requires migration.json")
+	}
+	report, err := vaultreview.BuildReviewReport(fs.Arg(0), vaultreview.ReviewFilters{Failed: *failed, Warnings: *warningsOnly, MissingMetadata: *missingMetadata})
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation, "review report failed")
+	}
+	if *htmlPath != "" {
+		if err := vaultreview.WriteReviewHTML(*htmlPath, report); err != nil {
+			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal, "failed to write HTML review report")
+		}
+		fmt.Fprintf(stdout, "Review HTML written to %s\n", *htmlPath)
+	}
+	if *jsonFlag {
+		data, err := json.MarshalIndent(report, "", "  ")
+		if err != nil {
+			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal, "failed to marshal review report")
+		}
+		fmt.Fprintln(stdout, string(data))
+		return nil
+	}
+	for _, d := range report.Documents {
+		fmt.Fprintf(stdout, "document %d: %s mime=%s vault=%s archive=%s error=%s warnings=%d\n", d.ID, d.Status, d.MIME, d.VaultPath, d.ArchivePath, d.Error, len(d.Warnings))
+	}
+	return nil
 }
 
 func runMCP(args []string) error {

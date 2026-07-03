@@ -23,6 +23,12 @@ const (
 	KindText     Kind = "text/plain"
 	KindCSV      Kind = "text/csv"
 	KindMarkdown Kind = "text/markdown"
+	KindHTML     Kind = "text/html"
+	KindRTF      Kind = "application/rtf"
+	KindDOCX     Kind = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	KindXLSX     Kind = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+	KindODT      Kind = "application/vnd.oasis.opendocument.text"
+	KindEML      Kind = "message/rfc822"
 	KindUnknown  Kind = ""
 )
 
@@ -76,6 +82,18 @@ func Detect(path string) (Kind, error) {
 		return KindCSV, nil
 	case ".md", ".markdown":
 		return KindMarkdown, nil
+	case ".html", ".htm":
+		return KindHTML, nil
+	case ".rtf":
+		return KindRTF, nil
+	case ".docx":
+		return KindDOCX, nil
+	case ".xlsx":
+		return KindXLSX, nil
+	case ".odt":
+		return KindODT, nil
+	case ".eml":
+		return KindEML, nil
 	case ".pdf":
 		return KindPDF, nil
 	case ".png":
@@ -91,6 +109,19 @@ func Detect(path string) (Kind, error) {
 	}
 
 	return KindUnknown, fmt.Errorf("unsupported file type: %s", path)
+}
+
+func IsExplicitlyUnsupported(kind Kind) bool {
+	switch kind {
+	case KindHTML, KindRTF, KindDOCX, KindXLSX, KindODT, KindEML:
+		return true
+	default:
+		return false
+	}
+}
+
+func UnsupportedFormatError(kind Kind) error {
+	return fmt.Errorf("unsupported optional extraction format %q; install/configure an optional converter in a future release or exclude this file", kind)
 }
 
 func isHEIFBrand(brand string) bool {

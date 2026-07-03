@@ -54,3 +54,18 @@ func TestExtractText_Engine(t *testing.T) {
 		t.Fatalf("text = %q, want ocr", res.Text)
 	}
 }
+
+func TestExtractText_UnsupportedOptionalFormat(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mail.eml")
+	if err := os.WriteFile(path, []byte("Subject: hi\n\nbody"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	kind, err := extract.Detect(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := extractText(context.Background(), path, kind, &fakeEngine{result: &extract.Result{Text: "should not be used"}}); err == nil {
+		t.Fatal("expected deterministic unsupported-format error")
+	}
+}
