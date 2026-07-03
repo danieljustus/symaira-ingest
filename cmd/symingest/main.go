@@ -581,6 +581,10 @@ func runMCP(args []string) error {
 
 func runWatch(args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
+	processingDir := fs.String("processing-dir", "", "Move stable files here before enqueueing them")
+	processedDir := fs.String("processed-dir", "", "Move successfully processed source files here")
+	failedDir := fs.String("failed-dir", "", "Move failed source files here and write .error.json sidecars")
+	stableFor := fs.Duration("stable-for", time.Second, "How long a file must remain unchanged before enqueueing")
 	ocrLang, vault, archive, db := registerSharedFlags(fs)
 	configureUsage(fs, "watch [flags] <dir>", "Watch a directory for new or modified files and ingest them in the background.")
 	help, err := parseFlags(fs, args, "invalid watch flags")
@@ -624,7 +628,12 @@ func runWatch(args []string) error {
 			"failed to reset running jobs")
 	}
 
-	watcher, err := ingest.NewWatcher(st, inboxDir)
+	watcher, err := ingest.NewWatcherWithOptions(st, inboxDir, ingest.WatcherOptions{
+		StableFor:     *stableFor,
+		ProcessingDir: *processingDir,
+		ProcessedDir:  *processedDir,
+		FailedDir:     *failedDir,
+	})
 	if err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindInternal,
 			"failed to initialize watcher")
@@ -633,10 +642,12 @@ func runWatch(args []string) error {
 
 	engine := ocr.DefaultRunner(cfg.ocrLang)
 	pipeline := &ingest.Pipeline{
-		Engine:     engine,
-		Store:      st,
-		Writer:     &writer.NoteWriter{Vault: cfg.vault},
-		ArchiveDir: cfg.archive,
+		Engine:       engine,
+		Store:        st,
+		Writer:       &writer.NoteWriter{Vault: cfg.vault},
+		ArchiveDir:   cfg.archive,
+		ProcessedDir: *processedDir,
+		FailedDir:    *failedDir,
 	}
 
 	if err := watcher.Start(ctx); err != nil {

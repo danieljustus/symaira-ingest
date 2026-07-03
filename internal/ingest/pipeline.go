@@ -20,10 +20,12 @@ import (
 
 // Pipeline orchestrates extraction, persistence, and Markdown output.
 type Pipeline struct {
-	Engine     extract.Engine
-	Store      *store.Store
-	Writer     *writer.NoteWriter
-	ArchiveDir string
+	Engine       extract.Engine
+	Store        *store.Store
+	Writer       *writer.NoteWriter
+	ArchiveDir   string
+	ProcessedDir string
+	FailedDir    string
 }
 
 // ErrDuplicate is returned when a source has already been ingested.
