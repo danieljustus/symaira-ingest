@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/danieljustus/symaira-corekit/exitcodes"
 
 	"github.com/danieljustus/symaira-ingest/internal/config"
 	"github.com/danieljustus/symaira-ingest/internal/store"
@@ -165,6 +168,40 @@ func TestRun_ImportPaperless_StatusEmpty(t *testing.T) {
 	}
 }
 
+func TestRun_ImportPaperless_StatusUsesConfigBaseURL(t *testing.T) {
+	home := t.TempDir()
+	oldHome := os.Getenv("HOME")
+	os.Setenv("HOME", home)
+	defer os.Setenv("HOME", oldHome)
+	config.Loader.ResetCache()
+	defer config.Loader.ResetCache()
+
+	cfgDir := filepath.Join(home, ".config", "symingest")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte("paperless_base_url = \"https://paperless.from-config\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var sb strings.Builder
+	oldStdout := stdout
+	stdout = &sb
+	defer func() { stdout = oldStdout }()
+
+	err := run([]string{
+		"import", "paperless",
+		"-db", filepath.Join(home, "test.db"),
+		"-status",
+	})
+	if err != nil {
+		t.Fatalf("run(import paperless -status): %v", err)
+	}
+	if got := sb.String(); !strings.Contains(got, "https://paperless.from-config") {
+		t.Fatalf("status output did not use config base URL: %q", got)
+	}
+}
+
 func TestRun_ImportPaperless_StatusJSONAfterUpsert(t *testing.T) {
 	tempDB := filepath.Join(t.TempDir(), "test.db")
 	st, err := store.Open(tempDB)
@@ -198,6 +235,215 @@ func TestRun_ImportPaperless_StatusJSONAfterUpsert(t *testing.T) {
 			t.Fatalf("output missing %q:\n%s", want, out)
 		}
 	}
+}
+
+func TestRun_SetupWritesConfigWithoutTokenAndDoctorPasses(t *testing.T) {
+	home := t.TempDir()
+	oldHome := os.Getenv("HOME")
+	os.Setenv("HOME", home)
+	defer os.Setenv("HOME", oldHome)
+	config.Loader.ResetCache()
+	defer config.Loader.ResetCache()
+
+	toolsDir := t.TempDir()
+	writeTestBin(t, toolsDir, "tesseract", `#!/bin/sh
+if [ "$1" = "--list-langs" ]; then
+  echo "List of available languages (2):"
+  echo "eng"
+  echo "deu"
+  exit 0
+fi
+exit 0
+`)
+	writeTestBin(t, toolsDir, "pdftoppm", "#!/bin/sh\nexit 0\n")
+	writeTestBin(t, toolsDir, "sips", "#!/bin/sh\nexit 0\n")
+	oldPath := os.Getenv("PATH")
+	os.Setenv("PATH", toolsDir+string(os.PathListSeparator)+oldPath)
+	defer os.Setenv("PATH", oldPath)
+	oldToken := os.Getenv("PAPERLESS_TOKEN")
+	os.Setenv("PAPERLESS_TOKEN", "super-secret-token")
+	defer os.Setenv("PAPERLESS_TOKEN", oldToken)
+
+	vault := filepath.Join(home, "vault")
+	archive := filepath.Join(home, "archive")
+	db := filepath.Join(home, "data", "symingest.db")
+	inbox := filepath.Join(home, "inbox")
+	var sb strings.Builder
+	oldStdout := stdout
+	stdout = &sb
+	defer func() { stdout = oldStdout }()
+
+	if err := run([]string{
+		"setup",
+		"--vault", vault,
+		"--archive", archive,
+		"--db", db,
+		"--inbox", inbox,
+		"--ocr-lang", "eng",
+		"--paperless-base-url", "https://paperless.example",
+	}); err != nil {
+		t.Fatalf("run(setup): %v", err)
+	}
+	configPath := filepath.Join(home, ".config", "symingest", "config.toml")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	content := string(data)
+	for _, want := range []string{fmt.Sprintf("vault = %q", vault), fmt.Sprintf("archive_path = %q", archive), fmt.Sprintf("db_path = %q", db), fmt.Sprintf("inbox = %q", inbox), `ocr_lang = "eng"`, `paperless_base_url = "https://paperless.example"`} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("config missing %q:\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "super-secret-token") || strings.Contains(sb.String(), "super-secret-token") {
+		t.Fatalf("setup leaked Paperless token")
+	}
+
+	sb.Reset()
+	if err := run([]string{"setup", "--vault", vault, "--archive", archive, "--db", db, "--inbox", inbox, "--ocr-lang", "eng", "--paperless-base-url", "https://paperless.example"}); err != nil {
+		t.Fatalf("idempotent setup: %v", err)
+	}
+	if !strings.Contains(sb.String(), "already up to date") {
+		t.Fatalf("expected idempotent message, got %q", sb.String())
+	}
+
+	sb.Reset()
+	if err := run([]string{"doctor", "--json"}); err != nil {
+		t.Fatalf("doctor should pass generated config: %v\n%s", err, sb.String())
+	}
+	var report doctorReport
+	if err := json.Unmarshal([]byte(sb.String()), &report); err != nil {
+		t.Fatalf("doctor JSON: %v\n%s", err, sb.String())
+	}
+	if report.Status != doctorOK || report.Failures != 0 || report.Warnings != 0 {
+		t.Fatalf("doctor report = %+v", report)
+	}
+}
+
+func TestRun_SetupDryRunShowsDiffAndDoesNotWrite(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	var sb strings.Builder
+	oldStdout := stdout
+	stdout = &sb
+	defer func() { stdout = oldStdout }()
+
+	if err := run([]string{
+		"setup",
+		"--config", configPath,
+		"--vault", filepath.Join(dir, "vault"),
+		"--inbox", filepath.Join(dir, "inbox"),
+		"--paperless-base-url", "https://paperless.example",
+		"--dry-run",
+	}); err != nil {
+		t.Fatalf("dry-run setup: %v", err)
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("dry-run should not write config, stat err=%v", err)
+	}
+	if out := sb.String(); !strings.Contains(out, "+++ proposed") || !strings.Contains(out, "+ vault =") {
+		t.Fatalf("dry-run output missing diff:\n%s", out)
+	}
+}
+
+func TestRun_DoctorPaperlessJSONDoesNotLeakToken(t *testing.T) {
+	toolsDir := t.TempDir()
+	writeTestBin(t, toolsDir, "tesseract", `#!/bin/sh
+if [ "$1" = "--list-langs" ]; then
+  echo "List of available languages (1):"
+  echo "eng"
+  exit 0
+fi
+exit 0
+`)
+	writeTestBin(t, toolsDir, "pdftoppm", "#!/bin/sh\nexit 0\n")
+	writeTestBin(t, toolsDir, "sips", "#!/bin/sh\nexit 0\n")
+	oldPath := os.Getenv("PATH")
+	os.Setenv("PATH", toolsDir+string(os.PathListSeparator)+oldPath)
+	defer os.Setenv("PATH", oldPath)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Token secret-token" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		if r.URL.Path != "/api/documents/" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		fmt.Fprintln(w, `{"count": 12, "results": []}`)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	var sb strings.Builder
+	oldStdout := stdout
+	stdout = &sb
+	defer func() { stdout = oldStdout }()
+	err := run([]string{
+		"doctor", "--paperless", "--json",
+		"--vault", filepath.Join(dir, "vault"),
+		"--archive", filepath.Join(dir, "archive"),
+		"--db", filepath.Join(dir, "db.sqlite"),
+		"--inbox", filepath.Join(dir, "inbox"),
+		"--ocr-lang", "eng",
+		"--base-url", srv.URL,
+		"--token", "secret-token",
+	})
+	if err != nil {
+		t.Fatalf("doctor paperless: %v\n%s", err, sb.String())
+	}
+	if strings.Contains(sb.String(), "secret-token") {
+		t.Fatalf("doctor leaked token:\n%s", sb.String())
+	}
+	var report doctorReport
+	if err := json.Unmarshal([]byte(sb.String()), &report); err != nil {
+		t.Fatalf("doctor JSON: %v", err)
+	}
+	if report.Status != doctorOK {
+		t.Fatalf("report status = %s, want ok: %+v", report.Status, report)
+	}
+}
+
+func TestRun_DoctorExitCodesForWarningsAndFailures(t *testing.T) {
+	toolsDir := t.TempDir()
+	writeTestBin(t, toolsDir, "tesseract", `#!/bin/sh
+if [ "$1" = "--list-langs" ]; then
+  echo "eng"
+  exit 0
+fi
+exit 0
+`)
+	writeTestBin(t, toolsDir, "pdftoppm", "#!/bin/sh\nexit 0\n")
+	writeTestBin(t, toolsDir, "sips", "#!/bin/sh\nexit 0\n")
+	oldPath := os.Getenv("PATH")
+	os.Setenv("PATH", toolsDir+string(os.PathListSeparator)+oldPath)
+	defer os.Setenv("PATH", oldPath)
+
+	dir := t.TempDir()
+	oldStdout := stdout
+	stdout = &strings.Builder{}
+	defer func() { stdout = oldStdout }()
+
+	warnErr := run([]string{"doctor", "--vault", filepath.Join(dir, "vault"), "--archive", filepath.Join(dir, "archive"), "--db", filepath.Join(dir, "db.sqlite"), "--ocr-lang", "eng"})
+	if warnErr == nil || exitcodes.ExitCodeFromError(warnErr) != exitcodes.ExitNoInput {
+		t.Fatalf("warning-only doctor error = %v, code=%d", warnErr, exitcodes.ExitCodeFromError(warnErr))
+	}
+
+	oldPath = os.Getenv("PATH")
+	os.Setenv("PATH", t.TempDir())
+	defer os.Setenv("PATH", oldPath)
+	failErr := run([]string{"doctor", "--vault", filepath.Join(dir, "vault2"), "--archive", filepath.Join(dir, "archive2"), "--db", filepath.Join(dir, "db2.sqlite"), "--inbox", filepath.Join(dir, "inbox"), "--ocr-lang", "eng"})
+	if failErr == nil || exitcodes.ExitCodeFromError(failErr) != exitcodes.ExitGeneric {
+		t.Fatalf("failure doctor error = %v, code=%d", failErr, exitcodes.ExitCodeFromError(failErr))
+	}
+}
+
+func writeTestBin(t *testing.T, dir, name, script string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake %s: %v", name, err)
+	}
+	return path
 }
 
 func TestResolveConfig_FlagOverridesEnv(t *testing.T) {

@@ -8,9 +8,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -64,6 +67,10 @@ func run(args []string) error {
 		return runRules(args[1:])
 	case "import":
 		return runImport(args[1:])
+	case "doctor":
+		return runDoctor(args[1:])
+	case "setup":
+		return runSetup(args[1:])
 	case "mcp":
 		return runMCP(args[1:])
 	default:
@@ -82,6 +89,8 @@ Commands:
   ingest <file>       Ingest a file into the vault (one-shot)
   watch <dir>         Watch a directory for new/modified files and ingest in the background
   import paperless    Import documents from a Paperless-ngx instance
+  doctor              Validate production readiness
+  setup               Generate a production config file
   jobs                List ingestion jobs in the queue
   retry <id>          Retry a failed job by ID
   rules               Manage classification rules (list, add, delete)
@@ -219,12 +228,15 @@ func runImport(args []string) error {
 	if *baseURL == "" {
 		*baseURL = os.Getenv("PAPERLESS_URL")
 	}
+	if *baseURL == "" {
+		*baseURL = cfg.paperlessBaseURL
+	}
 	if *token == "" {
 		*token = os.Getenv("PAPERLESS_TOKEN")
 	}
 	if *baseURL == "" {
 		return exitcodes.Wrapf(nil, exitcodes.ExitConfig, exitcodes.KindConfig,
-			"base-url is required (use --base-url or the PAPERLESS_URL env var)")
+			"base-url is required (use --base-url, PAPERLESS_URL env, or paperless_base_url in config)")
 	}
 	if *token == "" && !*statusOnly {
 		return exitcodes.Wrapf(nil, exitcodes.ExitConfig, exitcodes.KindConfig,
@@ -469,10 +481,12 @@ func defaultArchivePath() (string, error) {
 }
 
 type resolvedConfig struct {
-	vault   string
-	archive string
-	db      string
-	ocrLang string
+	vault            string
+	archive          string
+	db               string
+	ocrLang          string
+	inbox            string
+	paperlessBaseURL string
 }
 
 // registerSharedFlags adds the shared CLI flags to fs and returns pointers to
@@ -540,11 +554,372 @@ func resolveConfig(fs *flag.FlagSet, ocrLang, vaultFlag, archiveFlag, dbFlag *st
 	}
 
 	return &resolvedConfig{
-		vault:   *vaultFlag,
-		archive: *archiveFlag,
-		db:      *dbFlag,
-		ocrLang: *ocrLang,
+		vault:            *vaultFlag,
+		archive:          *archiveFlag,
+		db:               *dbFlag,
+		ocrLang:          *ocrLang,
+		inbox:            cfg.Inbox,
+		paperlessBaseURL: cfg.PaperlessBaseURL,
 	}, nil
+}
+
+type doctorStatus string
+
+const (
+	doctorOK   doctorStatus = "ok"
+	doctorWarn doctorStatus = "warn"
+	doctorFail doctorStatus = "fail"
+)
+
+type doctorCheck struct {
+	Name    string       `json:"name"`
+	Status  doctorStatus `json:"status"`
+	Message string       `json:"message"`
+}
+
+type doctorReport struct {
+	Status   doctorStatus  `json:"status"`
+	Checks   []doctorCheck `json:"checks"`
+	Failures int           `json:"failures"`
+	Warnings int           `json:"warnings"`
+}
+
+func (r *doctorReport) add(name string, status doctorStatus, message string) {
+	r.Checks = append(r.Checks, doctorCheck{Name: name, Status: status, Message: message})
+	switch status {
+	case doctorFail:
+		r.Failures++
+	case doctorWarn:
+		r.Warnings++
+	}
+	if r.Failures > 0 {
+		r.Status = doctorFail
+	} else if r.Warnings > 0 {
+		r.Status = doctorWarn
+	} else {
+		r.Status = doctorOK
+	}
+}
+
+func runDoctor(args []string) error {
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	paperlessFlag := fs.Bool("paperless", false, "Check Paperless API connectivity as well")
+	jsonFlag := fs.Bool("json", false, "Output a stable JSON report")
+	baseURL := fs.String("base-url", "", "Paperless-ngx URL override (or PAPERLESS_URL / config)")
+	token := fs.String("token", "", "Paperless API token override (or PAPERLESS_TOKEN env); never printed")
+	inbox := fs.String("inbox", "", "Watch inbox directory override")
+	ocrLang, vault, archive, db := registerSharedFlags(fs)
+	configureUsage(fs, "doctor [flags]", "Validate local prerequisites, paths, OCR tools and optional Paperless connectivity.")
+	help, err := parseFlags(fs, args, "invalid doctor flags")
+	if help || err != nil {
+		return err
+	}
+	cfg, err := resolveConfig(fs, ocrLang, vault, archive, db)
+	if err != nil {
+		return err
+	}
+	if *inbox != "" {
+		cfg.inbox = *inbox
+	}
+	if *baseURL == "" {
+		*baseURL = os.Getenv("PAPERLESS_URL")
+	}
+	if *baseURL == "" {
+		*baseURL = cfg.paperlessBaseURL
+	}
+	if *token == "" {
+		*token = os.Getenv("PAPERLESS_TOKEN")
+	}
+
+	report := runDoctorChecks(context.Background(), cfg, *paperlessFlag, *baseURL, *token)
+	if *jsonFlag {
+		data, err := json.MarshalIndent(report, "", "  ")
+		if err != nil {
+			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal, "failed to marshal doctor report")
+		}
+		fmt.Fprintln(stdout, string(data))
+	} else {
+		printDoctorReport(stdout, report)
+	}
+	if report.Failures > 0 {
+		return exitcodes.Wrapf(nil, exitcodes.ExitGeneric, exitcodes.KindConfig, "doctor found %d hard blocker(s)", report.Failures)
+	}
+	if report.Warnings > 0 {
+		return exitcodes.Wrapf(nil, exitcodes.ExitNoInput, exitcodes.KindConfig, "doctor found %d warning(s)", report.Warnings)
+	}
+	return nil
+}
+
+func runDoctorChecks(ctx context.Context, cfg *resolvedConfig, includePaperless bool, baseURL, token string) *doctorReport {
+	report := &doctorReport{Status: doctorOK}
+	if cfg.vault == "" {
+		report.add("config.vault", doctorFail, "vault is not configured")
+	} else {
+		report.add("config.vault", doctorOK, cfg.vault)
+		checkWritableDir(report, "path.vault", cfg.vault)
+	}
+	if cfg.archive == "" {
+		report.add("config.archive", doctorFail, "archive path is not configured")
+	} else {
+		checkWritableDir(report, "path.archive", cfg.archive)
+	}
+	if cfg.db == "" {
+		report.add("config.db", doctorFail, "database path is not configured")
+	} else {
+		checkWritableDB(report, cfg.db)
+	}
+	if cfg.ocrLang == "" {
+		report.add("config.ocr_lang", doctorWarn, "ocr language not set; defaulting to eng")
+	} else {
+		report.add("config.ocr_lang", doctorOK, cfg.ocrLang)
+	}
+	if cfg.inbox == "" {
+		report.add("config.inbox", doctorWarn, "inbox is not configured; watch mode requires an explicit directory")
+	} else {
+		checkWritableDir(report, "path.inbox", cfg.inbox)
+	}
+	checkCommand(report, "tool.pdftoppm", "pdftoppm", doctorFail)
+	checkTesseract(report, cfg.ocrLang)
+	if runtime.GOOS == "darwin" {
+		checkCommand(report, "tool.sips", "sips", doctorWarn)
+	}
+	if includePaperless {
+		checkPaperless(ctx, report, baseURL, token)
+	}
+	return report
+}
+
+func checkWritableDir(report *doctorReport, name, dir string) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		report.add(name, doctorFail, fmt.Sprintf("cannot create directory: %v", err))
+		return
+	}
+	f, err := os.CreateTemp(dir, ".symingest-doctor-*")
+	if err != nil {
+		report.add(name, doctorFail, fmt.Sprintf("not writable: %v", err))
+		return
+	}
+	path := f.Name()
+	if err := f.Close(); err != nil {
+		report.add(name, doctorFail, fmt.Sprintf("temp file close failed: %v", err))
+		return
+	}
+	_ = os.Remove(path)
+	report.add(name, doctorOK, dir)
+}
+
+func checkWritableDB(report *doctorReport, dbPath string) {
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+		report.add("path.db", doctorFail, fmt.Sprintf("cannot create database directory: %v", err))
+		return
+	}
+	st, err := store.Open(dbPath)
+	if err != nil {
+		report.add("path.db", doctorFail, fmt.Sprintf("cannot open database: %v", err))
+		return
+	}
+	if err := st.Close(); err != nil {
+		report.add("path.db", doctorFail, fmt.Sprintf("cannot close database: %v", err))
+		return
+	}
+	report.add("path.db", doctorOK, dbPath)
+}
+
+func checkCommand(report *doctorReport, name, command string, missing doctorStatus) {
+	path, err := exec.LookPath(command)
+	if err != nil {
+		report.add(name, missing, fmt.Sprintf("%s not found in PATH", command))
+		return
+	}
+	report.add(name, doctorOK, path)
+}
+
+func checkTesseract(report *doctorReport, lang string) {
+	path, err := exec.LookPath("tesseract")
+	if err != nil {
+		report.add("tool.tesseract", doctorFail, "tesseract not found in PATH")
+		return
+	}
+	out, err := exec.Command(path, "--list-langs").CombinedOutput()
+	if err != nil {
+		report.add("tool.tesseract", doctorFail, fmt.Sprintf("tesseract --list-langs failed: %v", err))
+		return
+	}
+	if lang != "" && !languageListed(string(out), lang) {
+		report.add("tool.tesseract.lang", doctorFail, fmt.Sprintf("language %q is not installed", lang))
+		return
+	}
+	report.add("tool.tesseract", doctorOK, path)
+}
+
+func languageListed(output, lang string) bool {
+	for _, line := range strings.Split(output, "\n") {
+		if strings.TrimSpace(line) == lang {
+			return true
+		}
+	}
+	return false
+}
+
+func checkPaperless(ctx context.Context, report *doctorReport, baseURL, token string) {
+	if strings.TrimSpace(baseURL) == "" {
+		report.add("paperless.url", doctorFail, "Paperless base URL is not configured")
+		return
+	}
+	if strings.TrimSpace(token) == "" {
+		report.add("paperless.token", doctorFail, "Paperless token is missing (set PAPERLESS_TOKEN or pass --token)")
+		return
+	}
+	url := strings.TrimRight(baseURL, "/") + "/api/documents/?page_size=1"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		report.add("paperless.api", doctorFail, fmt.Sprintf("invalid Paperless URL: %v", err))
+		return
+	}
+	req.Header.Set("Authorization", "Token "+token)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		report.add("paperless.api", doctorFail, fmt.Sprintf("request failed: %v", err))
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		report.add("paperless.api", doctorFail, fmt.Sprintf("unexpected HTTP status %s", resp.Status))
+		return
+	}
+	var payload struct {
+		Count   int               `json:"count"`
+		Results []json.RawMessage `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		report.add("paperless.api", doctorFail, fmt.Sprintf("unexpected response JSON: %v", err))
+		return
+	}
+	report.add("paperless.api", doctorOK, fmt.Sprintf("reachable; %d documents reported", payload.Count))
+}
+
+func printDoctorReport(w io.Writer, report *doctorReport) {
+	fmt.Fprintf(w, "symingest doctor: %s (%d failures, %d warnings)\n", strings.ToUpper(string(report.Status)), report.Failures, report.Warnings)
+	for _, c := range report.Checks {
+		fmt.Fprintf(w, "[%s] %s: %s\n", strings.ToUpper(string(c.Status)), c.Name, c.Message)
+	}
+}
+
+type setupConfig struct {
+	Vault            string
+	ArchivePath      string
+	DBPath           string
+	Inbox            string
+	OCRLang          string
+	PaperlessBaseURL string
+}
+
+func runSetup(args []string) error {
+	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
+	vault := fs.String("vault", "", "Target vault directory")
+	archive := fs.String("archive", "", "Target archive directory")
+	db := fs.String("db", "", "SQLite database path")
+	inbox := fs.String("inbox", "", "Watch inbox directory")
+	ocrLang := fs.String("ocr-lang", "eng", "Default OCR language")
+	paperlessBaseURL := fs.String("paperless-base-url", "", "Paperless base URL; tokens are never written")
+	configPath := fs.String("config", "", "Config file path override (default: XDG config path)")
+	dryRun := fs.Bool("dry-run", false, "Print a diff without writing")
+	force := fs.Bool("force", false, "Overwrite an existing different config")
+	configureUsage(fs, "setup [flags]", "Generate an idempotent production config file without storing secrets.")
+	help, err := parseFlags(fs, args, "invalid setup flags")
+	if help || err != nil {
+		return err
+	}
+	if *configPath == "" {
+		path, err := defaultConfigPath()
+		if err != nil {
+			return err
+		}
+		*configPath = path
+	}
+	if *archive == "" {
+		path, err := defaultArchivePath()
+		if err != nil {
+			return err
+		}
+		*archive = path
+	}
+	if *db == "" {
+		path, err := defaultDBPath()
+		if err != nil {
+			return err
+		}
+		*db = path
+	}
+	if strings.TrimSpace(*vault) == "" {
+		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation, "--vault is required")
+	}
+	if strings.TrimSpace(*inbox) == "" {
+		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation, "--inbox is required")
+	}
+	if strings.TrimSpace(*paperlessBaseURL) == "" {
+		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation, "--paperless-base-url is required")
+	}
+	cfg := setupConfig{Vault: *vault, ArchivePath: *archive, DBPath: *db, Inbox: *inbox, OCRLang: *ocrLang, PaperlessBaseURL: *paperlessBaseURL}
+	content := renderSetupConfig(cfg)
+	current, readErr := os.ReadFile(*configPath)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return exitcodes.Wrap(readErr, exitcodes.ExitConfig, exitcodes.KindConfig, "failed to read existing config")
+	}
+	if *dryRun {
+		fmt.Fprintf(stdout, "Config dry-run: %s\n", *configPath)
+		printConfigDiff(stdout, string(current), content)
+		return nil
+	}
+	if readErr == nil && string(current) == content {
+		fmt.Fprintf(stdout, "Config already up to date: %s\n", *configPath)
+		return nil
+	}
+	if readErr == nil && !*force {
+		fmt.Fprintf(stdout, "Existing config differs: %s\n", *configPath)
+		printConfigDiff(stdout, string(current), content)
+		return exitcodes.Wrapf(nil, exitcodes.ExitConflict, exitcodes.KindConflict, "config differs; rerun with --force to overwrite")
+	}
+	if err := os.MkdirAll(filepath.Dir(*configPath), 0o700); err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig, "failed to create config directory")
+	}
+	if err := os.WriteFile(*configPath, []byte(content), 0o600); err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig, "failed to write config")
+	}
+	fmt.Fprintf(stdout, "Config written: %s\n", *configPath)
+	fmt.Fprintln(stdout, "Paperless token not written; use PAPERLESS_TOKEN or a secret manager.")
+	config.Loader.ResetCache()
+	return nil
+}
+
+func defaultConfigPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", exitcodes.Wrapf(err, exitcodes.ExitConfig, exitcodes.KindConfig, "cannot determine home directory; use --config explicitly")
+	}
+	return filepath.Join(home, ".config", "symingest", "config.toml"), nil
+}
+
+func renderSetupConfig(cfg setupConfig) string {
+	return fmt.Sprintf("vault = %q\narchive_path = %q\ndb_path = %q\ninbox = %q\nocr_lang = %q\npaperless_base_url = %q\n", cfg.Vault, cfg.ArchivePath, cfg.DBPath, cfg.Inbox, cfg.OCRLang, cfg.PaperlessBaseURL)
+}
+
+func printConfigDiff(w io.Writer, old, new string) {
+	if old == new {
+		fmt.Fprintln(w, "No changes.")
+		return
+	}
+	if old != "" {
+		fmt.Fprintln(w, "--- current")
+		for _, line := range strings.Split(strings.TrimRight(old, "\n"), "\n") {
+			fmt.Fprintf(w, "- %s\n", line)
+		}
+	}
+	fmt.Fprintln(w, "+++ proposed")
+	for _, line := range strings.Split(strings.TrimRight(new, "\n"), "\n") {
+		fmt.Fprintf(w, "+ %s\n", line)
+	}
 }
 
 func runMCP(args []string) error {
