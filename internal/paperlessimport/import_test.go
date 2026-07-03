@@ -635,10 +635,10 @@ func TestRun_RetryFailedUsesCurrentTargetAndCheckpoints(t *testing.T) {
 
 	vault := filepath.Join(dir, "vault")
 	archive := filepath.Join(dir, "archive")
-	if err := s.UpsertPaperlessImportStateForTarget(context.Background(), srv.URL, vault, archive, 1, "imported", ""); err != nil {
+	if err := s.UpsertPaperlessImportStateForTarget(context.Background(), srv.URL, vault, archive, 1, "imported", "", "", "", "fake-sha"); err != nil {
 		t.Fatalf("seed imported: %v", err)
 	}
-	if err := s.UpsertPaperlessImportStateForTarget(context.Background(), srv.URL, vault, archive, 2, "failed", "download timeout"); err != nil {
+	if err := s.UpsertPaperlessImportStateForTarget(context.Background(), srv.URL, vault, archive, 2, "failed", "download timeout", "", "", ""); err != nil {
 		t.Fatalf("seed failed: %v", err)
 	}
 	// Same document ID but a different target must not make the current target
