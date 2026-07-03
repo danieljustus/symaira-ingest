@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/danieljustus/symaira-ingest/internal/paperless"
+	"github.com/danieljustus/symaira-ingest/internal/version"
 	"github.com/danieljustus/symaira-ingest/internal/writer"
 	"gopkg.in/yaml.v3"
 )
@@ -30,6 +31,14 @@ type VerifyMismatch struct {
 // means the vault faithfully represents the Paperless archive. It never
 // contains document content, only IDs, field names, and paths.
 type VerifyReport struct {
+	RunID           string           `json:"run_id,omitempty"`
+	ToolVersion     string           `json:"tool_version,omitempty"`
+	Source          string           `json:"source,omitempty"`
+	SourceURL       string           `json:"source_url,omitempty"`
+	StartedAt       time.Time        `json:"started_at,omitempty"`
+	FinishedAt      time.Time        `json:"finished_at,omitempty"`
+	DurationSeconds float64          `json:"duration_seconds,omitempty"`
+	Mode            string           `json:"mode,omitempty"`
 	SourceDocuments int              `json:"source_documents"`
 	VaultNotes      int              `json:"vault_notes"`
 	Verified        int              `json:"verified"`
@@ -52,6 +61,7 @@ func (r *VerifyReport) Complete() bool {
 // originals they reference. It never downloads document content; the
 // comparison uses metadata only.
 func Verify(ctx context.Context, opts Options, vault string) (*VerifyReport, error) {
+	started := time.Now().UTC()
 	client := paperless.NewClient(opts.BaseURL, opts.Token)
 
 	docs, err := selectDocuments(ctx, client, opts)
@@ -68,7 +78,19 @@ func Verify(ctx context.Context, opts Options, vault string) (*VerifyReport, err
 		return nil, fmt.Errorf("scan vault notes: %w", err)
 	}
 
-	report := &VerifyReport{SourceDocuments: len(docs)}
+	report := &VerifyReport{
+		RunID:           newRunID(started),
+		ToolVersion:     version.Version,
+		Source:          "paperless",
+		SourceURL:       opts.BaseURL,
+		StartedAt:       started,
+		Mode:            "verify",
+		SourceDocuments: len(docs),
+	}
+	defer func() {
+		report.FinishedAt = time.Now().UTC()
+		report.DurationSeconds = report.FinishedAt.Sub(report.StartedAt).Seconds()
+	}()
 	for _, list := range notes {
 		report.VaultNotes += len(list)
 	}

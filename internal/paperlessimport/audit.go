@@ -42,19 +42,37 @@ var supportedMIMEDefaultExtensions = map[string]string{
 }
 
 // paperlessDownloadExtension returns the extension that should be used for
-// the downloaded Paperless payload. Paperless' file_type can be null on real
-// installations; when an archived/OCR PDF exists, /download returns that
-// archived file, otherwise it returns the original upload.
+// the downloaded Paperless payload based on Paperless metadata only.
 func paperlessDownloadExtension(doc paperless.Document) string {
-	for _, candidate := range []string{doc.FileType, doc.ArchivedFileName, doc.OriginalFileName} {
+	return paperlessDownloadExtensionWithMetadata(doc, paperless.DownloadMetadata{})
+}
+
+// paperlessDownloadExtensionWithMetadata applies the runtime evidence from the
+// /download response before falling back to Paperless metadata. The precedence
+// deliberately mirrors the migration contract: response filename, archived
+// filename, original filename, Paperless file_type, response content type,
+// metadata MIME, then an empty value for the caller to turn into .bin.
+func paperlessDownloadExtensionWithMetadata(doc paperless.Document, meta paperless.DownloadMetadata) string {
+	for _, candidate := range []string{meta.Filename, doc.ArchivedFileName, doc.OriginalFileName, doc.FileType} {
 		if ext := normalizeExtension(candidate); ext != "" {
 			return ext
 		}
 	}
-	if ext := supportedMIMEDefaultExtensions[strings.ToLower(strings.TrimSpace(doc.MimeType))]; ext != "" {
+	if ext := supportedMIMEDefaultExtensions[normalizeContentType(meta.ContentType)]; ext != "" {
+		return ext
+	}
+	if ext := supportedMIMEDefaultExtensions[normalizeContentType(doc.MimeType)]; ext != "" {
 		return ext
 	}
 	return ""
+}
+
+func normalizeContentType(candidate string) string {
+	ct := strings.ToLower(strings.TrimSpace(candidate))
+	if i := strings.Index(ct, ";"); i >= 0 {
+		ct = strings.TrimSpace(ct[:i])
+	}
+	return ct
 }
 
 func normalizeExtension(candidate string) string {
@@ -87,6 +105,8 @@ type AuditReport struct {
 	UnresolvedStoragePathIDs   []int `json:"unresolved_storage_path_ids,omitempty"`
 
 	UnsupportedFileTypes map[string]int `json:"unsupported_file_types,omitempty"`
+	ByExpectedExtension  map[string]int `json:"by_expected_extension,omitempty"`
+	RequiredTools        []string       `json:"required_tools,omitempty"`
 }
 
 // buildAuditReport inspects docs (and resolves names via lu) without
@@ -100,6 +120,7 @@ func buildAuditReport(docs []paperless.Document, lu *lookups) *AuditReport {
 		DocumentTypeCounts:   map[string]int{},
 		StoragePathCounts:    map[string]int{},
 		UnsupportedFileTypes: map[string]int{},
+		ByExpectedExtension:  map[string]int{},
 	}
 
 	unresolvedTags := map[int]bool{}
@@ -153,7 +174,14 @@ func buildAuditReport(docs []paperless.Document, lu *lookups) *AuditReport {
 		if ext == "" {
 			ext = "unknown"
 		}
-		if !supportedFileExtensions[ext] && supportedMIMEDefaultExtensions[strings.ToLower(strings.TrimSpace(doc.MimeType))] == "" {
+		r.ByExpectedExtension[ext]++
+		if needsPDFTools(ext) {
+			r.RequiredTools = addUniqueString(r.RequiredTools, "pdftoppm")
+			r.RequiredTools = addUniqueString(r.RequiredTools, "tesseract")
+		} else if needsImageOCR(ext) {
+			r.RequiredTools = addUniqueString(r.RequiredTools, "tesseract")
+		}
+		if !supportedFileExtensions[ext] && supportedMIMEDefaultExtensions[normalizeContentType(doc.MimeType)] == "" {
 			r.UnsupportedFileTypes[ext]++
 		}
 	}
@@ -176,4 +204,24 @@ func sortedKeys(set map[int]bool) []int {
 	}
 	sort.Ints(keys)
 	return keys
+}
+
+func addUniqueString(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func needsPDFTools(ext string) bool { return ext == "pdf" }
+
+func needsImageOCR(ext string) bool {
+	switch ext {
+	case "png", "jpg", "jpeg", "tiff", "tif", "webp", "heic", "heif":
+		return true
+	default:
+		return false
+	}
 }

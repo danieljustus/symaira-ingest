@@ -14,6 +14,10 @@ import (
 
 type Note struct {
 	SourcePath    string         `yaml:"source_path"`
+	ImportedFrom  string         `yaml:"imported_from,omitempty"`
+	ImportRunID   string         `yaml:"import_run_id,omitempty"`
+	SourceURI     string         `yaml:"source_uri,omitempty"`
+	DownloadURI   string         `yaml:"download_uri,omitempty"`
 	IngestedAt    time.Time      `yaml:"ingested_at"`
 	SHA256        string         `yaml:"sha256"`
 	MIME          string         `yaml:"mime"`
@@ -127,7 +131,7 @@ func fileExists(path string) bool {
 // WriteNote writes a Markdown note with YAML frontmatter atomically.
 // It returns the vault path and any error. A write failure must not leave
 // a partially written file behind.
-func (w *NoteWriter) WriteNote(sourcePath, sha256, mime, ocrEngine, text, archivePath string, ingestedAt time.Time, category string, tags []string, correspondent, documentType string, paperless *PaperlessMeta, layout *NoteLayout) (string, error) {
+func (w *NoteWriter) WriteNote(sourcePath, sha256, mime, ocrEngine, text, archivePath string, ingestedAt time.Time, category string, tags []string, correspondent, documentType, importedFrom, importRunID, sourceURI, downloadURI string, paperless *PaperlessMeta, layout *NoteLayout) (string, error) {
 	vaultPath := w.resolveNotePath(sourcePath, layout)
 	if err := os.MkdirAll(filepath.Dir(vaultPath), 0o700); err != nil {
 		return "", fmt.Errorf("create vault directory: %w", err)
@@ -135,6 +139,10 @@ func (w *NoteWriter) WriteNote(sourcePath, sha256, mime, ocrEngine, text, archiv
 
 	meta := Note{
 		SourcePath:    sourcePath,
+		ImportedFrom:  importedFrom,
+		ImportRunID:   importRunID,
+		SourceURI:     sourceURI,
+		DownloadURI:   downloadURI,
 		IngestedAt:    ingestedAt,
 		SHA256:        sha256,
 		MIME:          mime,

@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -188,26 +190,69 @@ func (c *Client) GetDocument(ctx context.Context, id int) (*Document, error) {
 	return &doc, nil
 }
 
+// DownloadMetadata captures response headers from a Paperless document
+// download. It is intentionally small and content-free so migration reports can
+// explain filename/MIME decisions without leaking document bodies.
+type DownloadMetadata struct {
+	ContentType        string `json:"content_type,omitempty"`
+	ContentDisposition string `json:"content_disposition,omitempty"`
+	Filename           string `json:"filename,omitempty"`
+}
+
 func (c *Client) DownloadDocument(ctx context.Context, id int, dst io.Writer) error {
+	_, err := c.DownloadDocumentWithMetadata(ctx, id, dst)
+	return err
+}
+
+func (c *Client) DownloadDocumentWithMetadata(ctx context.Context, id int, dst io.Writer) (DownloadMetadata, error) {
 	url := c.baseURL + "/api/documents/" + strconv.Itoa(id) + "/download/"
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return fmt.Errorf("create request: %w", err)
+		return DownloadMetadata{}, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Token "+c.token)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("execute request: %w", err)
+		return DownloadMetadata{}, fmt.Errorf("execute request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return apiError(resp)
+		return DownloadMetadata{}, apiError(resp)
 	}
 
-	_, err = io.Copy(dst, resp.Body)
-	return err
+	meta := DownloadMetadata{
+		ContentType:        resp.Header.Get("Content-Type"),
+		ContentDisposition: resp.Header.Get("Content-Disposition"),
+		Filename:           contentDispositionFilename(resp.Header.Get("Content-Disposition")),
+	}
+	if _, err := io.Copy(dst, resp.Body); err != nil {
+		return meta, err
+	}
+	return meta, nil
+}
+
+func contentDispositionFilename(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	_, params, err := mime.ParseMediaType(value)
+	if err != nil {
+		return ""
+	}
+	name := strings.TrimSpace(params["filename"])
+	if name == "" {
+		name = strings.TrimSpace(params["filename*"])
+	}
+	if name == "" {
+		return ""
+	}
+	base := filepath.Base(strings.ReplaceAll(name, "\\", "/"))
+	if base == "." || base == string(filepath.Separator) {
+		return ""
+	}
+	return base
 }
 
 func (c *Client) ListTags(ctx context.Context) ([]Tag, error) {
