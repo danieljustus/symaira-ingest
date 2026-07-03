@@ -379,9 +379,9 @@ func importOne(ctx context.Context, client *paperless.Client, doc paperless.Docu
 		return "", "", warnings, fmt.Errorf("close temp file: %w", err)
 	}
 
-	ext := doc.FileType
+	ext := paperlessDownloadExtension(doc)
 	if ext == "" {
-		ext = ".pdf"
+		ext = ".bin"
 	}
 	finalPath := tmpName + ext
 	if err := os.Rename(tmpName, finalPath); err != nil {

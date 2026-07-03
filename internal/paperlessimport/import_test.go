@@ -12,6 +12,7 @@ import (
 
 	"github.com/danieljustus/symaira-ingest/internal/extract"
 	"github.com/danieljustus/symaira-ingest/internal/ingest"
+	"github.com/danieljustus/symaira-ingest/internal/paperless"
 	"github.com/danieljustus/symaira-ingest/internal/store"
 	"github.com/danieljustus/symaira-ingest/internal/writer"
 )
@@ -898,6 +899,100 @@ func TestRun_ErrorStatus(t *testing.T) {
 	}, pipeline)
 	if err == nil {
 		t.Fatal("expected error for 401 status")
+	}
+}
+
+func TestRun_ImportsPaperlessCSVWhenFileTypeIsNull(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if handleEmptyLookups(w, r) {
+			return
+		}
+		switch r.URL.Path {
+		case "/api/documents/":
+			json.NewEncoder(w).Encode(map[string]any{
+				"count": 1,
+				"results": []map[string]any{
+					{
+						"id":                 13,
+						"title":              "Transactions",
+						"created_date":       "2026-07-02",
+						"mime_type":          "text/csv",
+						"original_file_name": "transactions.csv",
+					},
+				},
+				"next": nil,
+			})
+		case "/api/documents/13/download/":
+			w.Header().Set("Content-Type", "text/csv")
+			w.Write([]byte("date,description,amount\n2026-07-02,Test CSV,12.34\n"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "archive")
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	pipeline := &ingest.Pipeline{
+		Engine:     fakeEngine{},
+		Store:      s,
+		Writer:     &writer.NoteWriter{Vault: filepath.Join(dir, "vault")},
+		ArchiveDir: archive,
+	}
+
+	stats, err := Run(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, pipeline)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if stats.Imported != 1 || stats.Failed != 0 {
+		t.Fatalf("stats imported=%d failed=%d, want 1/0", stats.Imported, stats.Failed)
+	}
+
+	matches, _ := filepath.Glob(filepath.Join(dir, "vault", "*.md"))
+	if len(matches) != 1 {
+		t.Fatalf("expected 1 note, got %d", len(matches))
+	}
+	content, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(string(content), "mime: text/csv") || !contains(string(content), "Test CSV") {
+		t.Fatalf("note does not preserve CSV MIME/content:\n%s", content)
+	}
+	archiveMatches, _ := filepath.Glob(filepath.Join(archive, "*.csv"))
+	if len(archiveMatches) != 1 {
+		t.Fatalf("expected archived CSV, got %v", archiveMatches)
+	}
+}
+
+func TestBuildAuditReport_UsesEffectiveDownloadExtension(t *testing.T) {
+	lu := &lookups{
+		tags:           map[int]string{},
+		correspondents: map[int]string{},
+		documentTypes:  map[int]string{},
+		storagePaths:   map[int]string{},
+	}
+	docs := []paperless.Document{
+		{ID: 1, Title: "CSV", MimeType: "text/csv", OriginalFileName: "transactions.csv"},
+		{ID: 2, Title: "PNG with archive", MimeType: "image/png", OriginalFileName: "scan.png", ArchivedFileName: "scan.pdf"},
+		{ID: 3, Title: "TIFF raw extension", MimeType: "image/tiff", OriginalFileName: "scan.NEF"},
+		{ID: 4, Title: "Unsupported", MimeType: "application/vnd.ms-excel", OriginalFileName: "sheet.xlsx"},
+	}
+	audit := buildAuditReport(docs, lu)
+	if audit.UnsupportedFileTypes["unknown"] != 0 {
+		t.Fatalf("unknown unsupported count = %d, want 0", audit.UnsupportedFileTypes["unknown"])
+	}
+	if audit.UnsupportedFileTypes["csv"] != 0 || audit.UnsupportedFileTypes["pdf"] != 0 || audit.UnsupportedFileTypes["nef"] != 0 {
+		t.Fatalf("supported extensions flagged as unsupported: %v", audit.UnsupportedFileTypes)
+	}
+	if audit.UnsupportedFileTypes["xlsx"] != 1 {
+		t.Fatalf("xlsx unsupported count = %d, want 1 (all unsupported: %v)", audit.UnsupportedFileTypes["xlsx"], audit.UnsupportedFileTypes)
 	}
 }
 

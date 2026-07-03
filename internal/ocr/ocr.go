@@ -20,6 +20,7 @@ import (
 type Runner struct {
 	Tesseract string // path to tesseract binary
 	PDFToPPM  string // path to pdftoppm binary
+	SIPS      string // optional macOS image conversion tool for HEIC/HEIF
 	OCRLang   string // tesseract language, e.g. "eng" or "deu+eng"
 
 	langMu              sync.Mutex
@@ -36,6 +37,7 @@ func DefaultRunner(ocrLang string) *Runner {
 	return &Runner{
 		Tesseract: filepath.Clean("tesseract"),
 		PDFToPPM:  filepath.Clean("pdftoppm"),
+		SIPS:      filepath.Clean("sips"),
 		OCRLang:   ocrLang,
 	}
 }
@@ -80,8 +82,10 @@ func (r *Runner) AvailableForPDF() error {
 // Extract implements extract.Engine.
 func (r *Runner) Extract(ctx context.Context, path string, kind extract.Kind) (*extract.Result, error) {
 	switch kind {
-	case extract.KindPNG, extract.KindJPEG, extract.KindTIFF:
+	case extract.KindPNG, extract.KindJPEG, extract.KindTIFF, extract.KindWebP:
 		return r.extractImage(ctx, path)
+	case extract.KindHEIC:
+		return r.extractHEIC(ctx, path)
 	case extract.KindPDF:
 		return r.extractPDF(ctx, path)
 	default:
@@ -223,6 +227,32 @@ func (r *Runner) extractImage(ctx context.Context, path string) (*extract.Result
 		MIME:   "image/ocr",
 		Engine: "tesseract",
 	}, nil
+}
+
+func (r *Runner) extractHEIC(ctx context.Context, path string) (*extract.Result, error) {
+	sipsPath, err := cleanToolPath("sips", r.SIPS)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := exec.LookPath(sipsPath); err != nil {
+		return nil, fmt.Errorf("sips not found on PATH; HEIC/HEIF OCR requires macOS sips conversion before tesseract: %w", err)
+	}
+	dir, err := os.MkdirTemp("", "symingest-heic-*")
+	if err != nil {
+		return nil, fmt.Errorf("create temp dir: %w", err)
+	}
+	defer os.RemoveAll(dir)
+	converted := filepath.Join(dir, "converted.png")
+	if _, err := r.runTool(ctx, sipsPath, "-s", "format", "png", path, "--out", converted); err != nil {
+		return nil, fmt.Errorf("sips HEIC conversion failed: %w", err)
+	}
+	res, err := r.extractImage(ctx, converted)
+	if err != nil {
+		return nil, err
+	}
+	res.MIME = "image/heic"
+	res.Engine = "sips+tesseract"
+	return res, nil
 }
 
 func (r *Runner) extractPDF(ctx context.Context, path string) (*extract.Result, error) {

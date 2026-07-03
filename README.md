@@ -5,12 +5,13 @@
 
 Document ingestion + OCR core for the [Symaira](https://github.com/danieljustus?tab=repositories&q=symaira) ecosystem.
 
-Drop a scanned PDF or an image into a folder → get a searchable, classified **Markdown** note out. Think of it as a Paperless-ngx "consume" pipeline that emits plain Markdown + YAML frontmatter instead of a proprietary archive.
+Drop a scanned PDF, image, or text-like export into a folder → get a searchable, classified **Markdown** note out. Think of it as a Paperless-ngx "consume" pipeline that emits plain Markdown + YAML frontmatter instead of a proprietary archive.
 
 ## What is this / Why use it?
 
 - **Standalone CLI + MCP server** — no external services required, runs entirely on your machine
-- **OCR for scanned documents** — extracts text from PDFs and images using Tesseract
+- **OCR for scanned documents** — extracts text from PDFs and images using Tesseract (`pdf`, `png`, `jpeg`, `tiff`, `webp`, plus `heic/heif` on macOS via `sips`)
+- **Text-like imports** — preserves plain text, Markdown, and CSV files without forcing them through OCR
 - **Markdown output** — produces clean, searchable Markdown with YAML frontmatter instead of proprietary formats
 - **MCP integration** — works as an MCP tool for AI-powered document processing workflows
 - **Classification rules** — automatically categorize documents based on content patterns
@@ -26,6 +27,7 @@ go install github.com/danieljustus/symaira-ingest/cmd/symingest@latest
 - Go 1.26.4+
 - `tesseract` (for OCR)
 - `pdftoppm` (for PDF rendering)
+- `sips` on macOS for direct HEIC/HEIF OCR when Paperless has no archived PDF rendition
 
 ## Usage
 
