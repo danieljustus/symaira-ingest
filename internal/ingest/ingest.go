@@ -16,6 +16,14 @@ type IngestOptions struct {
 	PresetTags          []string
 	PresetCorrespondent string
 	PresetDocumentType  string
+	// SourcePathOverride, when set, is written to the note frontmatter instead
+	// of the temporary local processing path. It must not affect extraction,
+	// hashing, archive writes, or store source paths.
+	SourcePathOverride string
+	ImportedFrom       string
+	ImportRunID        string
+	SourceURI          string
+	DownloadURI        string
 	// Paperless carries traceability metadata when the source originates
 	// from a Paperless-ngx migration. Nil for ordinary ingests.
 	Paperless *writer.PaperlessMeta
@@ -27,6 +35,7 @@ type IngestOptions struct {
 // Result is the outcome of a one-shot ingest.
 type Result struct {
 	SourcePath    string
+	SHA256        string
 	Kind          extract.Kind
 	Extract       *extract.Result
 	VaultPath     string

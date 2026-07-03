@@ -278,6 +278,33 @@ func TestDownloadDocument(t *testing.T) {
 	}
 }
 
+func TestDownloadDocumentWithMetadata(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/documents/5/download/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="ledger.csv"`)
+		w.Write([]byte("a,b\n1,2\n"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "test-token")
+	var buf []byte
+	meta, err := c.DownloadDocumentWithMetadata(context.Background(), 5, (*mockWriter)(&buf))
+	if err != nil {
+		t.Fatalf("DownloadDocumentWithMetadata: %v", err)
+	}
+	if meta.ContentType != "text/csv; charset=utf-8" {
+		t.Fatalf("ContentType = %q, want text/csv header", meta.ContentType)
+	}
+	if meta.Filename != "ledger.csv" {
+		t.Fatalf("Filename = %q, want ledger.csv", meta.Filename)
+	}
+	if string(buf) != "a,b\n1,2\n" {
+		t.Fatalf("downloaded body = %q", string(buf))
+	}
+}
+
 func TestDownloadDocument_SlowBodyDoesNotUseWholeRequestTimeout(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/documents/5/download/", func(w http.ResponseWriter, r *http.Request) {

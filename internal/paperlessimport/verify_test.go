@@ -120,6 +120,9 @@ func TestVerify_CompleteAfterImport(t *testing.T) {
 	if report.SourceDocuments != 2 || report.VaultNotes != 2 || report.Verified != 2 {
 		t.Errorf("report = %+v, want source=2 notes=2 verified=2", report)
 	}
+	if report.RunID == "" || report.ToolVersion == "" || report.Source != "paperless" || report.SourceURL != srv.URL || report.Mode != "verify" {
+		t.Errorf("verify report metadata incomplete: %+v", report)
+	}
 }
 
 func TestVerify_MissingDocument(t *testing.T) {
@@ -515,9 +518,9 @@ func TestVerify_DocumentTypeMismatch(t *testing.T) {
 				"count": 1,
 				"results": []map[string]any{{
 					"id": 1, "title": "Doc 1",
-					"created_date": "2026-01-15T00:00:00Z",
-					"created":      "2026-01-15T00:00:00Z",
-					"file_type":    ".txt",
+					"created_date":  "2026-01-15T00:00:00Z",
+					"created":       "2026-01-15T00:00:00Z",
+					"file_type":     ".txt",
 					"document_type": map[string]any{"id": 2, "name": "Invoice"},
 				}},
 				"next": nil,
@@ -529,9 +532,9 @@ func TestVerify_DocumentTypeMismatch(t *testing.T) {
 			if id == "1" {
 				json.NewEncoder(w).Encode(map[string]any{
 					"id": 1, "title": "Doc 1",
-					"created_date": "2026-01-15T00:00:00Z",
-					"created":      "2026-01-15T00:00:00Z",
-					"file_type":    ".txt",
+					"created_date":  "2026-01-15T00:00:00Z",
+					"created":       "2026-01-15T00:00:00Z",
+					"file_type":     ".txt",
 					"document_type": map[string]any{"id": 2, "name": "Invoice"},
 				})
 				return
@@ -803,11 +806,11 @@ func TestCompareMetadata_NilPaperless(t *testing.T) {
 		storagePaths:   map[int]string{4: "Archive"},
 	}
 	doc := paperless.Document{
-		ID:            1,
-		Title:         "Doc 1",
-		Created:       paperless.FlexDate{Time: time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)},
-		Tags:          []paperless.Ref{{ID: 1}},
-		StoragePath:   &paperless.Ref{ID: 4},
+		ID:          1,
+		Title:       "Doc 1",
+		Created:     paperless.FlexDate{Time: time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)},
+		Tags:        []paperless.Ref{{ID: 1}},
+		StoragePath: &paperless.Ref{ID: 4},
 	}
 	note := &writer.Note{
 		Tags:          []string{"tag1"},
