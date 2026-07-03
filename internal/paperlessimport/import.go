@@ -2,12 +2,16 @@ package paperlessimport
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/danieljustus/symaira-ingest/internal/ingest"
@@ -21,6 +25,14 @@ type Stats struct {
 	Failed   int
 	Total    int
 	Warnings []string
+
+	RunID       string
+	ToolVersion string
+	Source      string
+	SourceURL   string
+	Mode        string
+	StartedAt   time.Time
+	FinishedAt  time.Time
 
 	// SelectedIDs lists the Paperless document IDs chosen for this run, in
 	// processing order. It lets a bounded pilot import report exactly which
@@ -39,11 +51,21 @@ type Stats struct {
 
 // DocumentResult is the outcome of processing a single Paperless document.
 type DocumentResult struct {
-	ID          int    `json:"id"`
-	Status      string `json:"status"` // imported | skipped | failed | would-import
-	Reason      string `json:"reason,omitempty"`
-	VaultPath   string `json:"vault_path,omitempty"`
-	ArchivePath string `json:"archive_path,omitempty"`
+	ID                     int      `json:"id"`
+	Status                 string   `json:"status"` // imported | skipped | failed | would-import | planned
+	Reason                 string   `json:"reason,omitempty"`
+	Error                  string   `json:"error,omitempty"`
+	Stage                  string   `json:"stage,omitempty"`
+	VaultPath              string   `json:"vault_path,omitempty"`
+	ArchivePath            string   `json:"archive_path,omitempty"`
+	SHA256                 string   `json:"sha256,omitempty"`
+	MIME                   string   `json:"mime,omitempty"`
+	ExpectedExtension      string   `json:"expected_extension,omitempty"`
+	ActualArchiveExtension string   `json:"actual_archive_extension,omitempty"`
+	ImportRunID            string   `json:"import_run_id,omitempty"`
+	SourceURI              string   `json:"source_uri,omitempty"`
+	DownloadURI            string   `json:"download_uri,omitempty"`
+	Warnings               []string `json:"warnings,omitempty"`
 }
 
 func boundedErrorString(err error) string {
@@ -63,6 +85,28 @@ type Options struct {
 	Token   string
 	Since   time.Time
 	DryRun  bool
+	Plan    bool
+	Resume  bool
+
+	// RetryFailed restricts a real import to documents whose current-target
+	// Paperless import state is recorded as failed.
+	RetryFailed bool
+
+	// Concurrency bounds concurrent document processing. The default is 1 so
+	// existing serial behavior is preserved unless explicitly requested.
+	Concurrency int
+
+	// CheckpointEvery prints progress summaries after every N processed
+	// documents. Zero disables periodic checkpoints.
+	CheckpointEvery int
+
+	// TargetVault and TargetArchive identify the concrete destination used for
+	// resume safety. When empty they are derived from the supplied pipeline.
+	TargetVault   string
+	TargetArchive string
+
+	// Progress receives operator progress/checkpoint output. Nil means stderr.
+	Progress io.Writer
 
 	// Limit caps the number of documents processed this run to the first N
 	// of the listed archive (newest first). Zero means no limit. Ignored
@@ -238,8 +282,125 @@ func selectDocuments(ctx context.Context, client *paperless.Client, opts Options
 	return docs, nil
 }
 
+type stagedError struct {
+	stage string
+	err   error
+}
+
+func (e *stagedError) Error() string { return e.err.Error() }
+func (e *stagedError) Unwrap() error { return e.err }
+
+func stageError(stage string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &stagedError{stage: stage, err: err}
+}
+
+func stageFromError(err error) string {
+	var se *stagedError
+	if errors.As(err, &se) && se.stage != "" {
+		return se.stage
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "download"):
+		return "download"
+	case strings.Contains(msg, "detect source type"):
+		return "detect"
+	case strings.Contains(msg, "extract text"):
+		return "extract"
+	case strings.Contains(msg, "archive file"):
+		return "archive"
+	case strings.Contains(msg, "write note"):
+		return "write"
+	case strings.Contains(msg, "record document"), strings.Contains(msg, "set vault path"), strings.Contains(msg, "complete job"):
+		return "metadata"
+	default:
+		return "import"
+	}
+}
+
+func paperlessSourceURI(id int) string   { return fmt.Sprintf("paperless://documents/%d", id) }
+func paperlessDownloadURI(id int) string { return paperlessSourceURI(id) + "/download" }
+
+func hashFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func newRunID(t time.Time) string { return "paperless-" + t.Format("20060102T150405.000000000Z") }
+
+func plannedDocumentResult(doc paperless.Document, runID, status string) DocumentResult {
+	ext := paperlessDownloadExtension(doc)
+	if ext == "" {
+		ext = ".bin"
+	}
+	return DocumentResult{
+		ID:                doc.ID,
+		Status:            status,
+		MIME:              doc.MimeType,
+		ExpectedExtension: ext,
+		ImportRunID:       runID,
+		SourceURI:         paperlessSourceURI(doc.ID),
+		DownloadURI:       paperlessDownloadURI(doc.ID),
+	}
+}
+
+func progressWriter(opts Options) io.Writer {
+	if opts.Progress != nil {
+		return opts.Progress
+	}
+	return os.Stderr
+}
+
+func importTargets(opts Options, pipeline *ingest.Pipeline) (vault, archive string) {
+	vault = opts.TargetVault
+	archive = opts.TargetArchive
+	if vault == "" && pipeline != nil && pipeline.Writer != nil {
+		vault = pipeline.Writer.Vault
+	}
+	if archive == "" && pipeline != nil {
+		archive = pipeline.ArchiveDir
+	}
+	return vault, archive
+}
+
+func formatETA(start time.Time, processed, total int) string {
+	if processed <= 0 || total <= processed {
+		return "0s"
+	}
+	elapsed := time.Since(start)
+	if elapsed <= 0 {
+		return "unknown"
+	}
+	remaining := total - processed
+	eta := time.Duration(float64(elapsed) / float64(processed) * float64(remaining))
+	return eta.Round(time.Second).String()
+}
+
+func printCheckpoint(w io.Writer, stats *Stats) {
+	processed := stats.Imported + stats.Skipped + stats.Failed
+	elapsed := time.Since(stats.StartedAt)
+	rate := 0.0
+	if elapsed > 0 {
+		rate = float64(processed) / elapsed.Minutes()
+	}
+	fmt.Fprintf(w, "checkpoint: processed=%d/%d imported=%d skipped=%d failed=%d rate=%.1f/min eta=%s\n",
+		processed, stats.Total, stats.Imported, stats.Skipped, stats.Failed, rate, formatETA(stats.StartedAt, processed, stats.Total))
+}
+
 func Run(ctx context.Context, opts Options, pipeline *ingest.Pipeline) (*Stats, error) {
 	client := paperless.NewClient(opts.BaseURL, opts.Token)
+	started := time.Now().UTC()
 
 	docs, err := selectDocuments(ctx, client, opts)
 	if err != nil {
@@ -251,69 +412,209 @@ func Run(ctx context.Context, opts Options, pipeline *ingest.Pipeline) (*Stats, 
 		return nil, fmt.Errorf("load lookup maps: %w", err)
 	}
 
-	stats := &Stats{Total: len(docs)}
+	mode := "import"
+	if opts.Plan {
+		mode = "plan"
+	} else if opts.DryRun {
+		mode = "dry-run"
+	} else if opts.RetryFailed {
+		mode = "retry-failed"
+	} else if opts.Resume {
+		mode = "resume"
+	}
+
+	stats := &Stats{
+		Total:     len(docs),
+		RunID:     newRunID(started),
+		Source:    "paperless",
+		SourceURL: opts.BaseURL,
+		Mode:      mode,
+		StartedAt: started,
+	}
+	defer func() { stats.FinishedAt = time.Now().UTC() }()
 	stats.SelectedIDs = make([]int, 0, len(docs))
 	for _, doc := range docs {
 		stats.SelectedIDs = append(stats.SelectedIDs, doc.ID)
 	}
 
-	if opts.DryRun {
+	if opts.Plan || opts.DryRun {
+		status := "would-import"
+		verb := "would import"
+		if opts.Plan {
+			status = "planned"
+			verb = "planned"
+		}
 		for i, doc := range docs {
 			if err := ctx.Err(); err != nil {
 				return stats, err
 			}
-			fmt.Fprintf(os.Stderr, "[%d/%d] would import: %s (created: %s)\n", i+1, stats.Total, doc.Title, doc.CreatedDate.Format("2006-01-02"))
+			fmt.Fprintf(os.Stderr, "[%d/%d] %s: %s (created: %s)\n", i+1, stats.Total, verb, doc.Title, doc.CreatedDate.Format("2006-01-02"))
 			stats.Skipped++
-			stats.Results = append(stats.Results, DocumentResult{ID: doc.ID, Status: "would-import"})
+			stats.Results = append(stats.Results, plannedDocumentResult(doc, stats.RunID, status))
 		}
 		stats.Audit = buildAuditReport(docs, lu)
 		printAuditReport(stats.Audit)
 		return stats, nil
 	}
 
-	for i, doc := range docs {
-		if err := ctx.Err(); err != nil {
-			return stats, err
-		}
-		fmt.Fprintf(os.Stderr, "[%d/%d] %s\n", i+1, stats.Total, doc.Title)
+	progressOut := progressWriter(opts)
+	targetVault, targetArchive := importTargets(opts, pipeline)
+	concurrency := opts.Concurrency
+	if concurrency < 1 {
+		concurrency = 1
+	}
 
-		if status, found, serr := pipeline.Store.PaperlessImportStatus(ctx, opts.BaseURL, doc.ID); serr == nil && found && status == "imported" {
-			fmt.Fprintf(os.Stderr, "  skipped (already imported in a previous run)\n")
-			stats.Skipped++
-			stats.Results = append(stats.Results, DocumentResult{ID: doc.ID, Status: "skipped", Reason: "already imported in a previous run"})
-			if err := ctx.Err(); err != nil {
-				return stats, err
-			}
-			continue
-		}
-
-		vaultPath, archivePath, warnings, err := importOne(ctx, client, doc, lu, pipeline, opts.PreserveStoragePaths)
+	results := make([]DocumentResult, len(docs))
+	recorded := make([]bool, len(docs))
+	var mu sync.Mutex
+	var progressMu sync.Mutex
+	record := func(i int, result DocumentResult, warnings []string, outcome string) {
+		mu.Lock()
+		defer mu.Unlock()
 		stats.Warnings = append(stats.Warnings, warnings...)
+		switch outcome {
+		case "imported":
+			stats.Imported++
+		case "skipped":
+			stats.Skipped++
+		case "failed":
+			stats.Failed++
+		}
+		results[i] = result
+		recorded[i] = true
+		processed := stats.Imported + stats.Skipped + stats.Failed
+		if opts.CheckpointEvery > 0 && processed%opts.CheckpointEvery == 0 {
+			progressMu.Lock()
+			printCheckpoint(progressOut, stats)
+			progressMu.Unlock()
+		}
+	}
+
+	processDoc := func(i int) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		doc := docs[i]
+		progressMu.Lock()
+		fmt.Fprintf(progressOut, "[%d/%d] %s\n", i+1, stats.Total, doc.Title)
+		progressMu.Unlock()
+
+		status, found, serr := pipeline.Store.PaperlessImportStatusForTarget(ctx, opts.BaseURL, targetVault, targetArchive, doc.ID)
+		if serr != nil {
+			mu.Lock()
+			stats.Warnings = append(stats.Warnings, fmt.Sprintf("document %d: read import state: %v", doc.ID, serr))
+			mu.Unlock()
+		}
+		if serr == nil && found && status == "imported" {
+			progressMu.Lock()
+			fmt.Fprintf(progressOut, "  skipped (already imported in a previous run)\n")
+			progressMu.Unlock()
+			result := plannedDocumentResult(doc, stats.RunID, "skipped")
+			result.Reason = "already imported in a previous run"
+			record(i, result, nil, "skipped")
+			return ctx.Err()
+		}
+		if opts.RetryFailed && (!found || status != "failed") {
+			result := plannedDocumentResult(doc, stats.RunID, "skipped")
+			result.Reason = "not recorded as failed for this target"
+			record(i, result, nil, "skipped")
+			return ctx.Err()
+		}
+
+		result, warnings, err := importOne(ctx, client, doc, lu, pipeline, opts.PreserveStoragePaths, stats.RunID)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
-				return stats, ctxErr
+				return ctxErr
 			}
-			fmt.Fprintf(os.Stderr, "  failed: %v\n", err)
-			stats.Failed++
+			progressMu.Lock()
+			fmt.Fprintf(progressOut, "  failed: %v\n", err)
+			progressMu.Unlock()
 			reason := boundedErrorString(err)
-			stats.Results = append(stats.Results, DocumentResult{ID: doc.ID, Status: "failed", Reason: reason})
-			if serr := pipeline.Store.UpsertPaperlessImportState(ctx, opts.BaseURL, doc.ID, "failed", reason); serr != nil {
-				stats.Warnings = append(stats.Warnings, fmt.Sprintf("document %d: record import state: %v", doc.ID, serr))
+			result.Status = "failed"
+			result.Error = reason
+			if result.Stage == "" {
+				result.Stage = stageFromError(err)
 			}
-			continue
+			if serr := pipeline.Store.UpsertPaperlessImportStateForTarget(ctx, opts.BaseURL, targetVault, targetArchive, doc.ID, "failed", reason, result.VaultPath, result.ArchivePath, result.SHA256); serr != nil {
+				warnings = append(warnings, fmt.Sprintf("document %d: record import state: %v", doc.ID, serr))
+			}
+			record(i, result, warnings, "failed")
+			return nil
 		}
-		if serr := pipeline.Store.UpsertPaperlessImportState(ctx, opts.BaseURL, doc.ID, "imported", ""); serr != nil {
-			stats.Warnings = append(stats.Warnings, fmt.Sprintf("document %d: record import state: %v", doc.ID, serr))
+		// Every Paperless ID must be mapped to its vault/archive path in the
+		// import state, including duplicate-content documents that point at the
+		// canonical note. Use "imported" in the state so later runs and
+		// verification can treat the source document as accounted for.
+		stateStatus := "imported"
+		if result.Status == "skipped" {
+			stateStatus = "imported"
 		}
-		stats.Imported++
-		result := DocumentResult{ID: doc.ID, Status: "imported", VaultPath: vaultPath, ArchivePath: archivePath}
-		if vaultPath == "" {
-			result.Reason = "duplicate content; note already present in the vault"
+		if serr := pipeline.Store.UpsertPaperlessImportStateForTarget(ctx, opts.BaseURL, targetVault, targetArchive, doc.ID, stateStatus, "", result.VaultPath, result.ArchivePath, result.SHA256); serr != nil {
+			warnings = append(warnings, fmt.Sprintf("document %d: record import state: %v", doc.ID, serr))
 		}
-		stats.Results = append(stats.Results, result)
-		if err := ctx.Err(); err != nil {
-			return stats, err
+		record(i, result, warnings, result.Status)
+		return ctx.Err()
+	}
+
+	if concurrency == 1 || len(docs) <= 1 {
+		for i := range docs {
+			if err := processDoc(i); err != nil {
+				return stats, err
+			}
 		}
+	} else {
+		jobs := make(chan int)
+		var wg sync.WaitGroup
+		var errMu sync.Mutex
+		var firstErr error
+		setErr := func(err error) {
+			if err == nil {
+				return
+			}
+			errMu.Lock()
+			defer errMu.Unlock()
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+		workerCount := concurrency
+		if workerCount > len(docs) {
+			workerCount = len(docs)
+		}
+		for w := 0; w < workerCount; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := range jobs {
+					if ctx.Err() != nil {
+						setErr(ctx.Err())
+						continue
+					}
+					setErr(processDoc(i))
+				}
+			}()
+		}
+		for i := range docs {
+			if ctx.Err() != nil {
+				setErr(ctx.Err())
+				break
+			}
+			jobs <- i
+		}
+		close(jobs)
+		wg.Wait()
+		if firstErr != nil {
+			return stats, firstErr
+		}
+	}
+
+	for i := range results {
+		if recorded[i] {
+			stats.Results = append(stats.Results, results[i])
+		}
+	}
+	if opts.CheckpointEvery > 0 && stats.Total > 0 {
+		printCheckpoint(progressOut, stats)
 	}
 
 	return stats, nil
@@ -363,45 +664,61 @@ func paperlessNoteBaseName(doc paperless.Document) string {
 // importOne downloads and ingests a single document, returning the written
 // vault and archive paths on success. A content duplicate returns empty paths
 // with a nil error (the document is already represented in the vault).
-func importOne(ctx context.Context, client *paperless.Client, doc paperless.Document, lu *lookups, pipeline *ingest.Pipeline, preserveStoragePaths bool) (vaultPath, archivePath string, warnings []string, err error) {
+func importOne(ctx context.Context, client *paperless.Client, doc paperless.Document, lu *lookups, pipeline *ingest.Pipeline, preserveStoragePaths bool, runID string) (DocumentResult, []string, error) {
+	result := plannedDocumentResult(doc, runID, "")
+	var warnings []string
+
 	tmpFile, err := os.CreateTemp("", "symingest-import-*.tmp")
+
 	if err != nil {
-		return "", "", warnings, fmt.Errorf("create temp file: %w", err)
+		return result, warnings, stageError("download", fmt.Errorf("create temp file: %w", err))
 	}
 	tmpName := tmpFile.Name()
 	defer os.Remove(tmpName)
 
-	if err := client.DownloadDocument(ctx, doc.ID, tmpFile); err != nil {
+	downloadMeta, err := client.DownloadDocumentWithMetadata(ctx, doc.ID, tmpFile)
+	if err != nil {
 		tmpFile.Close()
-		return "", "", warnings, fmt.Errorf("download document: %w", err)
+		return result, warnings, stageError("download", fmt.Errorf("download document: %w", err))
 	}
 	if err := tmpFile.Close(); err != nil {
-		return "", "", warnings, fmt.Errorf("close temp file: %w", err)
+		return result, warnings, stageError("download", fmt.Errorf("close temp file: %w", err))
+	}
+	if ct := normalizeContentType(downloadMeta.ContentType); ct != "" {
+		result.MIME = ct
 	}
 
-	ext := paperlessDownloadExtension(doc)
+	ext := paperlessDownloadExtensionWithMetadata(doc, downloadMeta)
 	if ext == "" {
 		ext = ".bin"
 	}
+	result.ExpectedExtension = ext
 	finalPath := tmpName + ext
 	if err := os.Rename(tmpName, finalPath); err != nil {
-		return "", "", warnings, fmt.Errorf("rename temp file: %w", err)
+		return result, warnings, stageError("download", fmt.Errorf("rename temp file: %w", err))
 	}
 	defer os.Remove(finalPath)
 
+	result.SHA256, err = hashFile(finalPath)
+	if err != nil {
+		return result, warnings, stageError("download", fmt.Errorf("hash downloaded file: %w", err))
+	}
+
 	meta := resolveDocMeta(doc, lu)
 	warnings = append(warnings, meta.Warnings...)
+	result.Warnings = append(result.Warnings, meta.Warnings...)
 	tags := meta.Tags
 	correspondent := meta.Correspondent
 	documentType := meta.DocumentType
 	storagePath := meta.StoragePath
 
-	var layout *writer.NoteLayout
+	baseName := paperlessNoteBaseName(doc)
+	if !preserveStoragePaths {
+		baseName = fmt.Sprintf("paperless-%d-%s", doc.ID, baseName)
+	}
+	layout := &writer.NoteLayout{BaseName: baseName}
 	if preserveStoragePaths {
-		layout = &writer.NoteLayout{
-			Subdir:   writer.SanitizeStoragePath(storagePath),
-			BaseName: paperlessNoteBaseName(doc),
-		}
+		layout.Subdir = writer.SanitizeStoragePath(storagePath)
 	}
 
 	preset := &ingest.IngestOptions{
@@ -410,6 +727,11 @@ func importOne(ctx context.Context, client *paperless.Client, doc paperless.Docu
 		PresetCorrespondent: correspondent,
 		PresetDocumentType:  documentType,
 		Layout:              layout,
+		SourcePathOverride:  result.DownloadURI,
+		ImportedFrom:        "paperless",
+		ImportRunID:         runID,
+		SourceURI:           result.SourceURI,
+		DownloadURI:         result.DownloadURI,
 		Paperless: &writer.PaperlessMeta{
 			DocumentID:       doc.ID,
 			Title:            doc.Title,
@@ -428,11 +750,27 @@ func importOne(ctx context.Context, client *paperless.Client, doc paperless.Docu
 	if err != nil {
 		if errors.Is(err, ingest.ErrDuplicate) {
 			log.Printf("  skipped (duplicate): %s", doc.Title)
-			return "", "", warnings, nil
+			result.Status = "skipped"
+			result.Reason = "duplicate content; note already present in the vault"
+			var dup *ingest.DuplicateError
+			if errors.As(err, &dup) {
+				result.VaultPath = dup.VaultPath
+				result.ArchivePath = dup.ArchivePath
+				result.ActualArchiveExtension = filepath.Ext(dup.ArchivePath)
+			}
+			return result, warnings, nil
 		}
-		return "", "", warnings, fmt.Errorf("ingest: %w", err)
+		return result, warnings, stageError(stageFromError(err), fmt.Errorf("ingest: %w", err))
 	}
 
 	log.Printf("  imported: %s → vault", doc.Title)
-	return res.VaultPath, res.ArchivePath, warnings, nil
+	result.Status = "imported"
+	result.VaultPath = res.VaultPath
+	result.ArchivePath = res.ArchivePath
+	result.SHA256 = res.SHA256
+	if result.MIME == "" {
+		result.MIME = res.Extract.MIME
+	}
+	result.ActualArchiveExtension = filepath.Ext(res.ArchivePath)
+	return result, warnings, nil
 }

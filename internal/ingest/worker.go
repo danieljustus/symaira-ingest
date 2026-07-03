@@ -53,6 +53,7 @@ func StartWorker(ctx context.Context, p *Pipeline) {
 				if failErr := p.Store.FailJob(ctx, job.ID, err.Error()); failErr != nil {
 					fmt.Fprintf(os.Stderr, "[Worker] Failed to record failure for job %d: %v\n", job.ID, failErr)
 				}
+				moveFailedSource(job.SourcePath, p.FailedDir, "process", err)
 				time.Sleep(10 * time.Millisecond)
 				continue
 			}
@@ -63,6 +64,7 @@ func StartWorker(ctx context.Context, p *Pipeline) {
 				if failErr := p.Store.FailJob(ctx, job.ID, fmt.Sprintf("set vault/archive paths: %v", err)); failErr != nil {
 					fmt.Fprintf(os.Stderr, "[Worker] Failed to record failure for job %d: %v\n", job.ID, failErr)
 				}
+				moveFailedSource(job.SourcePath, p.FailedDir, "metadata", err)
 				time.Sleep(10 * time.Millisecond)
 				continue
 			}
@@ -73,8 +75,32 @@ func StartWorker(ctx context.Context, p *Pipeline) {
 				continue
 			}
 
+			moveProcessedSource(job.SourcePath, p.ProcessedDir)
 			fmt.Fprintf(os.Stderr, "[Worker] Job %d completed successfully. Note written: %s\n", job.ID, res.VaultPath)
 			time.Sleep(10 * time.Millisecond)
 		}
+	}
+}
+
+func moveProcessedSource(path, processedDir string) {
+	if processedDir == "" || processedDir == "." {
+		return
+	}
+	if _, err := moveFileToDir(path, processedDir); err != nil {
+		fmt.Fprintf(os.Stderr, "[Worker] Failed to move processed file %s: %v\n", path, err)
+	}
+}
+
+func moveFailedSource(path, failedDir, stage string, err error) {
+	if failedDir == "" || failedDir == "." {
+		return
+	}
+	failedPath, moveErr := moveFileToDir(path, failedDir)
+	if moveErr != nil {
+		fmt.Fprintf(os.Stderr, "[Worker] Failed to move failed file %s: %v\n", path, moveErr)
+		return
+	}
+	if sidecarErr := writeFailureSidecar(failedPath, stage, err); sidecarErr != nil {
+		fmt.Fprintf(os.Stderr, "[Worker] Failed to write error sidecar for %s: %v\n", failedPath, sidecarErr)
 	}
 }

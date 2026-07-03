@@ -110,7 +110,7 @@ func TestVerify_CompleteAfterImport(t *testing.T) {
 
 	vault := importForVerify(t, srv.URL, Options{})
 
-	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault)
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault, nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -119,6 +119,9 @@ func TestVerify_CompleteAfterImport(t *testing.T) {
 	}
 	if report.SourceDocuments != 2 || report.VaultNotes != 2 || report.Verified != 2 {
 		t.Errorf("report = %+v, want source=2 notes=2 verified=2", report)
+	}
+	if report.RunID == "" || report.ToolVersion == "" || report.Source != "paperless" || report.SourceURL != srv.URL || report.Mode != "verify" {
+		t.Errorf("verify report metadata incomplete: %+v", report)
 	}
 }
 
@@ -130,7 +133,7 @@ func TestVerify_MissingDocument(t *testing.T) {
 	// Import only document 1, leaving document 2 missing from the vault.
 	vault := importForVerify(t, srv.URL, Options{IDs: []int{1}})
 
-	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault)
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault, nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -162,7 +165,7 @@ func TestVerify_MissingArchivedOriginal(t *testing.T) {
 		t.Fatalf("remove archive: %v", err)
 	}
 
-	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault)
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault, nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -189,7 +192,7 @@ func TestVerify_MetadataMismatch(t *testing.T) {
 	note := notes[1][0]
 	tamperNoteCorrespondent(t, vault, note, "Wrong Corp")
 
-	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault)
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault, nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -255,7 +258,7 @@ func TestVerify_DuplicateNotes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault)
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault, nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -328,7 +331,7 @@ func TestVerify_StoragePathMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault)
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault, nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -404,7 +407,7 @@ func TestVerify_CreatedDateMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault)
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault, nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -486,7 +489,7 @@ func TestVerify_TagsMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault)
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault, nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -515,9 +518,9 @@ func TestVerify_DocumentTypeMismatch(t *testing.T) {
 				"count": 1,
 				"results": []map[string]any{{
 					"id": 1, "title": "Doc 1",
-					"created_date": "2026-01-15T00:00:00Z",
-					"created":      "2026-01-15T00:00:00Z",
-					"file_type":    ".txt",
+					"created_date":  "2026-01-15T00:00:00Z",
+					"created":       "2026-01-15T00:00:00Z",
+					"file_type":     ".txt",
 					"document_type": map[string]any{"id": 2, "name": "Invoice"},
 				}},
 				"next": nil,
@@ -529,9 +532,9 @@ func TestVerify_DocumentTypeMismatch(t *testing.T) {
 			if id == "1" {
 				json.NewEncoder(w).Encode(map[string]any{
 					"id": 1, "title": "Doc 1",
-					"created_date": "2026-01-15T00:00:00Z",
-					"created":      "2026-01-15T00:00:00Z",
-					"file_type":    ".txt",
+					"created_date":  "2026-01-15T00:00:00Z",
+					"created":       "2026-01-15T00:00:00Z",
+					"file_type":     ".txt",
 					"document_type": map[string]any{"id": 2, "name": "Invoice"},
 				})
 				return
@@ -564,7 +567,7 @@ func TestVerify_DocumentTypeMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault)
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault, nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -589,7 +592,7 @@ func TestVerify_EmptyVault(t *testing.T) {
 
 	// Use a non-existent vault directory.
 	vault := filepath.Join(t.TempDir(), "nonexistent-vault")
-	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault)
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault, nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -608,7 +611,7 @@ func TestVerify_NonDirectoryVault(t *testing.T) {
 	if err := os.WriteFile(vault, []byte("some content"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault)
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault, nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -783,7 +786,7 @@ func TestVerify_MissingArchivePathEmpty(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault)
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault, nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -803,11 +806,11 @@ func TestCompareMetadata_NilPaperless(t *testing.T) {
 		storagePaths:   map[int]string{4: "Archive"},
 	}
 	doc := paperless.Document{
-		ID:            1,
-		Title:         "Doc 1",
-		Created:       paperless.FlexDate{Time: time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)},
-		Tags:          []paperless.Ref{{ID: 1}},
-		StoragePath:   &paperless.Ref{ID: 4},
+		ID:          1,
+		Title:       "Doc 1",
+		Created:     paperless.FlexDate{Time: time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)},
+		Tags:        []paperless.Ref{{ID: 1}},
+		StoragePath: &paperless.Ref{ID: 4},
 	}
 	note := &writer.Note{
 		Tags:          []string{"tag1"},

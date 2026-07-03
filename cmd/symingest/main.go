@@ -8,9 +8,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -27,6 +30,7 @@ import (
 	"github.com/danieljustus/symaira-ingest/internal/ocr"
 	"github.com/danieljustus/symaira-ingest/internal/paperlessimport"
 	"github.com/danieljustus/symaira-ingest/internal/store"
+	"github.com/danieljustus/symaira-ingest/internal/vaultreview"
 	"github.com/danieljustus/symaira-ingest/internal/version"
 	"github.com/danieljustus/symaira-ingest/internal/writer"
 )
@@ -64,6 +68,20 @@ func run(args []string) error {
 		return runRules(args[1:])
 	case "import":
 		return runImport(args[1:])
+	case "doctor":
+		return runDoctor(args[1:])
+	case "setup":
+		return runSetup(args[1:])
+	case "validate-vault":
+		return runValidateVault(args[1:])
+	case "update":
+		return runUpdate(args[1:])
+	case "bulk-update":
+		return runBulkUpdate(args[1:])
+	case "apply-corrections":
+		return runApplyCorrections(args[1:])
+	case "review-report":
+		return runReviewReport(args[1:])
 	case "mcp":
 		return runMCP(args[1:])
 	default:
@@ -82,6 +100,8 @@ Commands:
   ingest <file>       Ingest a file into the vault (one-shot)
   watch <dir>         Watch a directory for new/modified files and ingest in the background
   import paperless    Import documents from a Paperless-ngx instance
+  doctor              Validate production readiness
+  setup               Generate a production config file
   jobs                List ingestion jobs in the queue
   retry <id>          Retry a failed job by ID
   rules               Manage classification rules (list, add, delete)
@@ -189,12 +209,19 @@ func runImport(args []string) error {
 	idsStr := fs.String("ids", "", "Import only these Paperless document IDs (comma-separated); takes precedence over --since and --limit")
 	preserveStoragePaths := fs.Bool("preserve-storage-paths", false, "Place notes under vault subdirectories derived from each document's Paperless storage path")
 	dryRun := fs.Bool("dry-run", false, "List what would be imported without writing")
-	reportPath := fs.String("report", "", "Write a JSON migration report to this path (works with --dry-run and real imports)")
+	plan := fs.Bool("plan", false, "Plan a Paperless import without downloading document bodies or writing vault/archive/import-state")
+	resume := fs.Bool("resume", false, "Resume an interrupted import by skipping documents already imported for this target")
+	retryFailed := fs.Bool("retry-failed", false, "Retry only documents recorded as failed for this target")
+	concurrency := fs.Int("concurrency", 1, "Maximum number of Paperless documents to process concurrently")
+	checkpointEvery := fs.Int("checkpoint-every", 0, "Print a progress checkpoint after every N processed documents; 0 disables checkpoints")
+	reportPath := fs.String("report", "", "Write a JSON migration report to this path (works with --plan, --dry-run and real imports)")
 	verify := fs.Bool("verify", false, "Verify a completed import against the Paperless source instead of importing")
 	statusOnly := fs.Bool("status", false, "List per-document import status from a previous run, then exit")
+	statusSummary := fs.Bool("summary", false, "With --status, print counts by import status")
+	statusFailed := fs.Bool("failed", false, "With --status, show only failed documents")
 	jsonFlag := fs.Bool("json", false, "With --status or --verify, output the result as JSON")
 	ocrLang, vault, archive, db := registerSharedFlags(fs)
-	configureUsage(fs, "import paperless [flags]", "Import documents from a Paperless-ngx instance into the vault. Use --limit or --ids to run a small, inspectable pilot before a full migration; both bounds apply to --dry-run and real imports alike. Imports are resumable: a document already recorded as imported is skipped on a re-run, and a document that previously failed is retried automatically.")
+	configureUsage(fs, "import paperless [flags]", "Import documents from a Paperless-ngx instance into the vault. Use --plan, --dry-run, --limit, or --ids to run a small, inspectable pilot before a full migration; bounds apply to --plan, --dry-run and real imports alike. Imports are resumable: a document already recorded as imported is skipped on a re-run, and a document that previously failed is retried automatically.")
 
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
 		fs.Usage()
@@ -218,19 +245,39 @@ func runImport(args []string) error {
 	if *baseURL == "" {
 		*baseURL = os.Getenv("PAPERLESS_URL")
 	}
+	if *baseURL == "" {
+		*baseURL = cfg.paperlessBaseURL
+	}
 	if *token == "" {
 		*token = os.Getenv("PAPERLESS_TOKEN")
 	}
 	if *baseURL == "" {
 		return exitcodes.Wrapf(nil, exitcodes.ExitConfig, exitcodes.KindConfig,
-			"base-url is required (use --base-url or the PAPERLESS_URL env var)")
+			"base-url is required (use --base-url, PAPERLESS_URL env, or paperless_base_url in config)")
 	}
 	if *token == "" && !*statusOnly {
 		return exitcodes.Wrapf(nil, exitcodes.ExitConfig, exitcodes.KindConfig,
 			"token is required (use --token or the PAPERLESS_TOKEN env var)")
 	}
 
-	if cfg.vault == "" && !*statusOnly {
+	if *plan && *dryRun {
+		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation,
+			"--plan and --dry-run are mutually exclusive")
+	}
+	if *retryFailed && (*plan || *dryRun) {
+		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation,
+			"--retry-failed is only valid for real imports")
+	}
+	if *concurrency < 1 {
+		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation,
+			"invalid concurrency %d; must be at least 1", *concurrency)
+	}
+	if *checkpointEvery < 0 {
+		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation,
+			"invalid checkpoint interval %d; must be zero or positive", *checkpointEvery)
+	}
+
+	if cfg.vault == "" && !*statusOnly && !*plan && !*dryRun {
 		return exitcodes.Wrapf(nil, exitcodes.ExitConfig, exitcodes.KindConfig,
 			"no vault configured; use --vault, SYMINGEST_VAULT env, or set vault in ~/.config/symingest/config.toml")
 	}
@@ -243,10 +290,30 @@ func runImport(args []string) error {
 		}
 		defer st.Close()
 
-		states, err := st.ListPaperlessImportState(context.Background(), *baseURL, "")
+		statusFilter := ""
+		if *statusFailed {
+			statusFilter = "failed"
+		}
+		states, err := st.ListPaperlessImportState(context.Background(), *baseURL, statusFilter)
 		if err != nil {
 			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
 				"failed to list paperless import status")
+		}
+
+		if *statusSummary {
+			summary := buildPaperlessStatusSummary(*baseURL, states)
+			if *jsonFlag {
+				data, err := json.MarshalIndent(summary, "", "  ")
+				if err != nil {
+					return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
+						"failed to marshal import status summary to JSON")
+				}
+				fmt.Fprintln(stdout, string(data))
+				return nil
+			}
+			fmt.Fprintf(stdout, "Paperless import status for %s: total=%d imported=%d skipped=%d failed=%d pending=%d\n",
+				summary.BaseURL, summary.Total, summary.Imported, summary.Skipped, summary.Failed, summary.Pending)
+			return nil
 		}
 
 		if *jsonFlag {
@@ -300,14 +367,24 @@ func runImport(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	var st *store.Store
+	{
+		var err error
+		st, err = store.Open(cfg.db)
+		if err != nil {
+			return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
+				"failed to open document store")
+		}
+		defer st.Close()
+	}
+
 	if *verify {
-		report, err := paperlessimport.Verify(ctx, paperlessimport.Options{
-			BaseURL: *baseURL,
-			Token:   *token,
-			Since:   since,
-			Limit:   *limit,
-			IDs:     ids,
-		}, cfg.vault)
+		report, err := paperlessimport.Verify(ctx, paperlessimport.Options{BaseURL: *baseURL,
+			Token: *token,
+			Since: since,
+			Limit: *limit,
+			IDs:   ids,
+		}, cfg.vault, st)
 		if err != nil {
 			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
 				"verification failed")
@@ -330,13 +407,6 @@ func runImport(args []string) error {
 		return nil
 	}
 
-	st, err := store.Open(cfg.db)
-	if err != nil {
-		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
-			"failed to open document store")
-	}
-	defer st.Close()
-
 	engine := ocr.DefaultRunner(cfg.ocrLang)
 	pipeline := &ingest.Pipeline{
 		Engine:     engine,
@@ -350,9 +420,16 @@ func runImport(args []string) error {
 		Token:                *token,
 		Since:                since,
 		DryRun:               *dryRun,
+		Plan:                 *plan,
+		Resume:               *resume,
+		RetryFailed:          *retryFailed,
+		Concurrency:          *concurrency,
+		CheckpointEvery:      *checkpointEvery,
 		Limit:                *limit,
 		IDs:                  ids,
 		PreserveStoragePaths: *preserveStoragePaths,
+		TargetVault:          cfg.vault,
+		TargetArchive:        cfg.archive,
 	}
 
 	stats, err := paperlessimport.Run(ctx, opts, pipeline)
@@ -361,15 +438,19 @@ func runImport(args []string) error {
 			"import failed")
 	}
 
-	fmt.Fprintf(stdout, "Import complete: %d imported, %d skipped, %d failed (of %d total)\n",
-		stats.Imported, stats.Skipped, stats.Failed, stats.Total)
+	if *plan {
+		fmt.Fprintf(stdout, "Import plan complete: %d documents analyzed, %d unsupported type groups\n", stats.Total, len(stats.Audit.UnsupportedFileTypes))
+	} else {
+		fmt.Fprintf(stdout, "Import complete: %d imported, %d skipped, %d failed (of %d total)\n",
+			stats.Imported, stats.Skipped, stats.Failed, stats.Total)
+	}
 	// For a bounded pilot run, echo exactly which documents were selected so
 	// the operator can inspect them. Document content is never printed.
 	if (*limit > 0 || len(ids) > 0) && len(stats.SelectedIDs) > 0 {
 		fmt.Fprintf(stdout, "Selected document IDs: %s\n", joinInts(stats.SelectedIDs))
 	}
 	if *reportPath != "" {
-		if err := paperlessimport.WriteMigrationReport(*reportPath, stats.BuildMigrationReport(*dryRun)); err != nil {
+		if err := paperlessimport.WriteMigrationReport(*reportPath, stats.BuildMigrationReport(*dryRun || *plan)); err != nil {
 			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
 				"failed to write migration report")
 		}
@@ -382,6 +463,32 @@ func runImport(args []string) error {
 }
 
 // printVerifyReport writes a human-readable migration verification summary.
+type paperlessStatusSummary struct {
+	BaseURL  string `json:"base_url"`
+	Total    int    `json:"total"`
+	Imported int    `json:"imported"`
+	Skipped  int    `json:"skipped"`
+	Failed   int    `json:"failed"`
+	Pending  int    `json:"pending"`
+}
+
+func buildPaperlessStatusSummary(baseURL string, states []*store.PaperlessImportState) paperlessStatusSummary {
+	s := paperlessStatusSummary{BaseURL: baseURL, Total: len(states)}
+	for _, st := range states {
+		switch st.Status {
+		case "imported":
+			s.Imported++
+		case "skipped":
+			s.Skipped++
+		case "failed":
+			s.Failed++
+		case "pending":
+			s.Pending++
+		}
+	}
+	return s
+}
+
 func printVerifyReport(w io.Writer, r *paperlessimport.VerifyReport) {
 	fmt.Fprintf(w, "Migration verification: %d source documents, %d vault notes, %d verified\n",
 		r.SourceDocuments, r.VaultNotes, r.Verified)
@@ -458,10 +565,12 @@ func defaultArchivePath() (string, error) {
 }
 
 type resolvedConfig struct {
-	vault   string
-	archive string
-	db      string
-	ocrLang string
+	vault            string
+	archive          string
+	db               string
+	ocrLang          string
+	inbox            string
+	paperlessBaseURL string
 }
 
 // registerSharedFlags adds the shared CLI flags to fs and returns pointers to
@@ -529,11 +638,573 @@ func resolveConfig(fs *flag.FlagSet, ocrLang, vaultFlag, archiveFlag, dbFlag *st
 	}
 
 	return &resolvedConfig{
-		vault:   *vaultFlag,
-		archive: *archiveFlag,
-		db:      *dbFlag,
-		ocrLang: *ocrLang,
+		vault:            *vaultFlag,
+		archive:          *archiveFlag,
+		db:               *dbFlag,
+		ocrLang:          *ocrLang,
+		inbox:            cfg.Inbox,
+		paperlessBaseURL: cfg.PaperlessBaseURL,
 	}, nil
+}
+
+type doctorStatus string
+
+const (
+	doctorOK   doctorStatus = "ok"
+	doctorWarn doctorStatus = "warn"
+	doctorFail doctorStatus = "fail"
+)
+
+type doctorCheck struct {
+	Name    string       `json:"name"`
+	Status  doctorStatus `json:"status"`
+	Message string       `json:"message"`
+}
+
+type doctorReport struct {
+	Status   doctorStatus  `json:"status"`
+	Checks   []doctorCheck `json:"checks"`
+	Failures int           `json:"failures"`
+	Warnings int           `json:"warnings"`
+}
+
+func (r *doctorReport) add(name string, status doctorStatus, message string) {
+	r.Checks = append(r.Checks, doctorCheck{Name: name, Status: status, Message: message})
+	switch status {
+	case doctorFail:
+		r.Failures++
+	case doctorWarn:
+		r.Warnings++
+	}
+	if r.Failures > 0 {
+		r.Status = doctorFail
+	} else if r.Warnings > 0 {
+		r.Status = doctorWarn
+	} else {
+		r.Status = doctorOK
+	}
+}
+
+func runDoctor(args []string) error {
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	paperlessFlag := fs.Bool("paperless", false, "Check Paperless API connectivity as well")
+	jsonFlag := fs.Bool("json", false, "Output a stable JSON report")
+	baseURL := fs.String("base-url", "", "Paperless-ngx URL override (or PAPERLESS_URL / config)")
+	token := fs.String("token", "", "Paperless API token override (or PAPERLESS_TOKEN env); never printed")
+	inbox := fs.String("inbox", "", "Watch inbox directory override")
+	ocrLang, vault, archive, db := registerSharedFlags(fs)
+	configureUsage(fs, "doctor [flags]", "Validate local prerequisites, paths, OCR tools and optional Paperless connectivity.")
+	help, err := parseFlags(fs, args, "invalid doctor flags")
+	if help || err != nil {
+		return err
+	}
+	cfg, err := resolveConfig(fs, ocrLang, vault, archive, db)
+	if err != nil {
+		return err
+	}
+	if *inbox != "" {
+		cfg.inbox = *inbox
+	}
+	if *baseURL == "" {
+		*baseURL = os.Getenv("PAPERLESS_URL")
+	}
+	if *baseURL == "" {
+		*baseURL = cfg.paperlessBaseURL
+	}
+	if *token == "" {
+		*token = os.Getenv("PAPERLESS_TOKEN")
+	}
+
+	report := runDoctorChecks(context.Background(), cfg, *paperlessFlag, *baseURL, *token)
+	if *jsonFlag {
+		data, err := json.MarshalIndent(report, "", "  ")
+		if err != nil {
+			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal, "failed to marshal doctor report")
+		}
+		fmt.Fprintln(stdout, string(data))
+	} else {
+		printDoctorReport(stdout, report)
+	}
+	if report.Failures > 0 {
+		return exitcodes.Wrapf(nil, exitcodes.ExitGeneric, exitcodes.KindConfig, "doctor found %d hard blocker(s)", report.Failures)
+	}
+	if report.Warnings > 0 {
+		return exitcodes.Wrapf(nil, exitcodes.ExitNoInput, exitcodes.KindConfig, "doctor found %d warning(s)", report.Warnings)
+	}
+	return nil
+}
+
+func runDoctorChecks(ctx context.Context, cfg *resolvedConfig, includePaperless bool, baseURL, token string) *doctorReport {
+	report := &doctorReport{Status: doctorOK}
+	if cfg.vault == "" {
+		report.add("config.vault", doctorFail, "vault is not configured")
+	} else {
+		report.add("config.vault", doctorOK, cfg.vault)
+		checkWritableDir(report, "path.vault", cfg.vault)
+	}
+	if cfg.archive == "" {
+		report.add("config.archive", doctorFail, "archive path is not configured")
+	} else {
+		checkWritableDir(report, "path.archive", cfg.archive)
+	}
+	if cfg.db == "" {
+		report.add("config.db", doctorFail, "database path is not configured")
+	} else {
+		checkWritableDB(report, cfg.db)
+	}
+	if cfg.ocrLang == "" {
+		report.add("config.ocr_lang", doctorWarn, "ocr language not set; defaulting to eng")
+	} else {
+		report.add("config.ocr_lang", doctorOK, cfg.ocrLang)
+	}
+	if cfg.inbox == "" {
+		report.add("config.inbox", doctorWarn, "inbox is not configured; watch mode requires an explicit directory")
+	} else {
+		checkWritableDir(report, "path.inbox", cfg.inbox)
+	}
+	checkCommand(report, "tool.pdftoppm", "pdftoppm", doctorFail)
+	checkTesseract(report, cfg.ocrLang)
+	if runtime.GOOS == "darwin" {
+		checkCommand(report, "tool.sips", "sips", doctorWarn)
+	}
+	checkOptionalCommand(report, "tool.optional.textutil", "textutil")
+	checkOptionalCommand(report, "tool.optional.pandoc", "pandoc")
+	checkOptionalCommand(report, "tool.optional.libreoffice", "libreoffice")
+	checkOptionalCommand(report, "tool.optional.soffice", "soffice")
+	if includePaperless {
+		checkPaperless(ctx, report, baseURL, token)
+	}
+	return report
+}
+
+func checkWritableDir(report *doctorReport, name, dir string) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		report.add(name, doctorFail, fmt.Sprintf("cannot create directory: %v", err))
+		return
+	}
+	f, err := os.CreateTemp(dir, ".symingest-doctor-*")
+	if err != nil {
+		report.add(name, doctorFail, fmt.Sprintf("not writable: %v", err))
+		return
+	}
+	path := f.Name()
+	if err := f.Close(); err != nil {
+		report.add(name, doctorFail, fmt.Sprintf("temp file close failed: %v", err))
+		return
+	}
+	_ = os.Remove(path)
+	report.add(name, doctorOK, dir)
+}
+
+func checkWritableDB(report *doctorReport, dbPath string) {
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+		report.add("path.db", doctorFail, fmt.Sprintf("cannot create database directory: %v", err))
+		return
+	}
+	st, err := store.Open(dbPath)
+	if err != nil {
+		report.add("path.db", doctorFail, fmt.Sprintf("cannot open database: %v", err))
+		return
+	}
+	if err := st.Close(); err != nil {
+		report.add("path.db", doctorFail, fmt.Sprintf("cannot close database: %v", err))
+		return
+	}
+	report.add("path.db", doctorOK, dbPath)
+}
+
+func checkCommand(report *doctorReport, name, command string, missing doctorStatus) {
+	path, err := exec.LookPath(command)
+	if err != nil {
+		report.add(name, missing, fmt.Sprintf("%s not found in PATH", command))
+		return
+	}
+	report.add(name, doctorOK, path)
+}
+
+func checkOptionalCommand(report *doctorReport, name, command string) {
+	path, err := exec.LookPath(command)
+	if err != nil {
+		report.add(name, doctorOK, fmt.Sprintf("%s not found in PATH (optional)", command))
+		return
+	}
+	report.add(name, doctorOK, path)
+}
+
+func checkTesseract(report *doctorReport, lang string) {
+	path, err := exec.LookPath("tesseract")
+	if err != nil {
+		report.add("tool.tesseract", doctorFail, "tesseract not found in PATH")
+		return
+	}
+	out, err := exec.Command(path, "--list-langs").CombinedOutput()
+	if err != nil {
+		report.add("tool.tesseract", doctorFail, fmt.Sprintf("tesseract --list-langs failed: %v", err))
+		return
+	}
+	if lang != "" && !languageListed(string(out), lang) {
+		report.add("tool.tesseract.lang", doctorFail, fmt.Sprintf("language %q is not installed", lang))
+		return
+	}
+	report.add("tool.tesseract", doctorOK, path)
+}
+
+func languageListed(output, lang string) bool {
+	for _, line := range strings.Split(output, "\n") {
+		if strings.TrimSpace(line) == lang {
+			return true
+		}
+	}
+	return false
+}
+
+func checkPaperless(ctx context.Context, report *doctorReport, baseURL, token string) {
+	if strings.TrimSpace(baseURL) == "" {
+		report.add("paperless.url", doctorFail, "Paperless base URL is not configured")
+		return
+	}
+	if strings.TrimSpace(token) == "" {
+		report.add("paperless.token", doctorFail, "Paperless token is missing (set PAPERLESS_TOKEN or pass --token)")
+		return
+	}
+	url := strings.TrimRight(baseURL, "/") + "/api/documents/?page_size=1"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		report.add("paperless.api", doctorFail, fmt.Sprintf("invalid Paperless URL: %v", err))
+		return
+	}
+	req.Header.Set("Authorization", "Token "+token)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		report.add("paperless.api", doctorFail, fmt.Sprintf("request failed: %v", err))
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		report.add("paperless.api", doctorFail, fmt.Sprintf("unexpected HTTP status %s", resp.Status))
+		return
+	}
+	var payload struct {
+		Count   int               `json:"count"`
+		Results []json.RawMessage `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		report.add("paperless.api", doctorFail, fmt.Sprintf("unexpected response JSON: %v", err))
+		return
+	}
+	report.add("paperless.api", doctorOK, fmt.Sprintf("reachable; %d documents reported", payload.Count))
+}
+
+func printDoctorReport(w io.Writer, report *doctorReport) {
+	fmt.Fprintf(w, "symingest doctor: %s (%d failures, %d warnings)\n", strings.ToUpper(string(report.Status)), report.Failures, report.Warnings)
+	for _, c := range report.Checks {
+		fmt.Fprintf(w, "[%s] %s: %s\n", strings.ToUpper(string(c.Status)), c.Name, c.Message)
+	}
+}
+
+type setupConfig struct {
+	Vault            string
+	ArchivePath      string
+	DBPath           string
+	Inbox            string
+	OCRLang          string
+	PaperlessBaseURL string
+}
+
+func runSetup(args []string) error {
+	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
+	vault := fs.String("vault", "", "Target vault directory")
+	archive := fs.String("archive", "", "Target archive directory")
+	db := fs.String("db", "", "SQLite database path")
+	inbox := fs.String("inbox", "", "Watch inbox directory")
+	ocrLang := fs.String("ocr-lang", "eng", "Default OCR language")
+	paperlessBaseURL := fs.String("paperless-base-url", "", "Paperless base URL; tokens are never written")
+	configPath := fs.String("config", "", "Config file path override (default: XDG config path)")
+	dryRun := fs.Bool("dry-run", false, "Print a diff without writing")
+	force := fs.Bool("force", false, "Overwrite an existing different config")
+	configureUsage(fs, "setup [flags]", "Generate an idempotent production config file without storing secrets.")
+	help, err := parseFlags(fs, args, "invalid setup flags")
+	if help || err != nil {
+		return err
+	}
+	if *configPath == "" {
+		path, err := defaultConfigPath()
+		if err != nil {
+			return err
+		}
+		*configPath = path
+	}
+	if *archive == "" {
+		path, err := defaultArchivePath()
+		if err != nil {
+			return err
+		}
+		*archive = path
+	}
+	if *db == "" {
+		path, err := defaultDBPath()
+		if err != nil {
+			return err
+		}
+		*db = path
+	}
+	if strings.TrimSpace(*vault) == "" {
+		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation, "--vault is required")
+	}
+	if strings.TrimSpace(*inbox) == "" {
+		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation, "--inbox is required")
+	}
+	if strings.TrimSpace(*paperlessBaseURL) == "" {
+		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation, "--paperless-base-url is required")
+	}
+	cfg := setupConfig{Vault: *vault, ArchivePath: *archive, DBPath: *db, Inbox: *inbox, OCRLang: *ocrLang, PaperlessBaseURL: *paperlessBaseURL}
+	content := renderSetupConfig(cfg)
+	current, readErr := os.ReadFile(*configPath)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return exitcodes.Wrap(readErr, exitcodes.ExitConfig, exitcodes.KindConfig, "failed to read existing config")
+	}
+	if *dryRun {
+		fmt.Fprintf(stdout, "Config dry-run: %s\n", *configPath)
+		printConfigDiff(stdout, string(current), content)
+		return nil
+	}
+	if readErr == nil && string(current) == content {
+		fmt.Fprintf(stdout, "Config already up to date: %s\n", *configPath)
+		return nil
+	}
+	if readErr == nil && !*force {
+		fmt.Fprintf(stdout, "Existing config differs: %s\n", *configPath)
+		printConfigDiff(stdout, string(current), content)
+		return exitcodes.Wrapf(nil, exitcodes.ExitConflict, exitcodes.KindConflict, "config differs; rerun with --force to overwrite")
+	}
+	if err := os.MkdirAll(filepath.Dir(*configPath), 0o700); err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig, "failed to create config directory")
+	}
+	if err := os.WriteFile(*configPath, []byte(content), 0o600); err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig, "failed to write config")
+	}
+	fmt.Fprintf(stdout, "Config written: %s\n", *configPath)
+	fmt.Fprintln(stdout, "Paperless token not written; use PAPERLESS_TOKEN or a secret manager.")
+	config.Loader.ResetCache()
+	return nil
+}
+
+func defaultConfigPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", exitcodes.Wrapf(err, exitcodes.ExitConfig, exitcodes.KindConfig, "cannot determine home directory; use --config explicitly")
+	}
+	return filepath.Join(home, ".config", "symingest", "config.toml"), nil
+}
+
+func renderSetupConfig(cfg setupConfig) string {
+	return fmt.Sprintf("vault = %q\narchive_path = %q\ndb_path = %q\ninbox = %q\nocr_lang = %q\npaperless_base_url = %q\n", cfg.Vault, cfg.ArchivePath, cfg.DBPath, cfg.Inbox, cfg.OCRLang, cfg.PaperlessBaseURL)
+}
+
+func printConfigDiff(w io.Writer, old, new string) {
+	if old == new {
+		fmt.Fprintln(w, "No changes.")
+		return
+	}
+	if old != "" {
+		fmt.Fprintln(w, "--- current")
+		for _, line := range strings.Split(strings.TrimRight(old, "\n"), "\n") {
+			fmt.Fprintf(w, "- %s\n", line)
+		}
+	}
+	fmt.Fprintln(w, "+++ proposed")
+	for _, line := range strings.Split(strings.TrimRight(new, "\n"), "\n") {
+		fmt.Fprintf(w, "+ %s\n", line)
+	}
+}
+
+type stringList []string
+
+func (s *stringList) String() string { return strings.Join(*s, ",") }
+func (s *stringList) Set(v string) error {
+	for _, part := range strings.Split(v, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			*s = append(*s, part)
+		}
+	}
+	return nil
+}
+
+func runValidateVault(args []string) error {
+	fs := flag.NewFlagSet("validate-vault", flag.ContinueOnError)
+	jsonFlag := fs.Bool("json", false, "Output validation failures as JSON")
+	configureUsage(fs, "validate-vault [flags] <vault>", "Validate symingest Markdown frontmatter, archive links, hashes and Paperless IDs.")
+	help, err := parseFlags(fs, args, "invalid validate-vault flags")
+	if help || err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return exitcodes.Wrapf(nil, exitcodes.ExitNoInput, exitcodes.KindValidation, "validate-vault requires a vault path")
+	}
+	report, err := vaultreview.ValidateVault(fs.Arg(0))
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal, "vault validation failed")
+	}
+	if *jsonFlag {
+		data, err := json.MarshalIndent(report, "", "  ")
+		if err != nil {
+			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal, "failed to marshal validation report")
+		}
+		fmt.Fprintln(stdout, string(data))
+	} else {
+		fmt.Fprintf(stdout, "Vault validation: %d files, %d failures\n", report.Files, len(report.Failures))
+		for _, f := range report.Failures {
+			fmt.Fprintf(stdout, "%s: %s: %s\n", f.File, f.Check, f.Message)
+		}
+	}
+	if !report.OK() {
+		return exitcodes.Wrapf(nil, exitcodes.ExitConflict, exitcodes.KindConflict, "vault validation found %d failures", len(report.Failures))
+	}
+	return nil
+}
+
+func correctionFromFlags(fs *flag.FlagSet, paperlessID *int, addTags, removeTags *stringList, correspondent, documentType, storagePath *string) vaultreview.Correction {
+	c := vaultreview.Correction{PaperlessID: *paperlessID, AddTags: []string(*addTags), RemoveTags: []string(*removeTags)}
+	visited := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { visited[f.Name] = true })
+	if visited["correspondent"] {
+		c.Correspondent = correspondent
+	}
+	if visited["document-type"] {
+		c.DocumentType = documentType
+	}
+	if visited["storage-path"] {
+		c.StoragePath = storagePath
+	}
+	return c
+}
+
+func printUpdateResults(results []vaultreview.UpdateResult) {
+	for _, r := range results {
+		mode := "updated"
+		if r.DryRun {
+			mode = "would update"
+		} else if !r.Written {
+			mode = "unchanged"
+		}
+		fmt.Fprintf(stdout, "%s: %s (%s)\n", mode, r.File, strings.Join(r.Changes, ", "))
+	}
+}
+
+func runUpdate(args []string) error {
+	fs := flag.NewFlagSet("update", flag.ContinueOnError)
+	vault := fs.String("vault", "", "Vault path")
+	paperlessID := fs.Int("paperless-id", 0, "Paperless document ID to update")
+	dryRun := fs.Bool("dry-run", false, "Show exact frontmatter changes without writing")
+	var addTags, removeTags stringList
+	fs.Var(&addTags, "add-tag", "Tag to add (repeatable or comma-separated)")
+	fs.Var(&removeTags, "remove-tag", "Tag to remove (repeatable or comma-separated; inbox is protected)")
+	correspondent := fs.String("correspondent", "", "Set correspondent")
+	documentType := fs.String("document-type", "", "Set document type")
+	storagePath := fs.String("storage-path", "", "Set Paperless storage path metadata")
+	configureUsage(fs, "update [flags]", "Safely update one note frontmatter by Paperless ID.")
+	help, err := parseFlags(fs, args, "invalid update flags")
+	if help || err != nil {
+		return err
+	}
+	if *vault == "" {
+		return exitcodes.Wrapf(nil, exitcodes.ExitNoInput, exitcodes.KindValidation, "--vault is required")
+	}
+	res, err := vaultreview.ApplyCorrection(*vault, correctionFromFlags(fs, paperlessID, &addTags, &removeTags, correspondent, documentType, storagePath), *dryRun)
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation, "update failed")
+	}
+	printUpdateResults([]vaultreview.UpdateResult{*res})
+	return nil
+}
+
+func runBulkUpdate(args []string) error {
+	fs := flag.NewFlagSet("bulk-update", flag.ContinueOnError)
+	vault := fs.String("vault", "", "Vault path")
+	where := fs.String("where", "", "Selector, currently tag:<name>")
+	dryRun := fs.Bool("dry-run", false, "Show exact frontmatter changes without writing")
+	paperlessID := fs.Int("paperless-id", 0, "Ignored for bulk updates")
+	var addTags, removeTags stringList
+	fs.Var(&addTags, "add-tag", "Tag to add")
+	fs.Var(&removeTags, "remove-tag", "Tag to remove; inbox is protected")
+	correspondent := fs.String("correspondent", "", "Set correspondent")
+	documentType := fs.String("document-type", "", "Set document type")
+	storagePath := fs.String("storage-path", "", "Set Paperless storage path metadata")
+	configureUsage(fs, "bulk-update [flags]", "Safely update multiple notes selected by frontmatter.")
+	help, err := parseFlags(fs, args, "invalid bulk-update flags")
+	if help || err != nil {
+		return err
+	}
+	if *vault == "" || !strings.HasPrefix(*where, "tag:") {
+		return exitcodes.Wrapf(nil, exitcodes.ExitNoInput, exitcodes.KindValidation, "--vault and --where tag:<name> are required")
+	}
+	results, err := vaultreview.BulkUpdateByTag(*vault, strings.TrimPrefix(*where, "tag:"), correctionFromFlags(fs, paperlessID, &addTags, &removeTags, correspondent, documentType, storagePath), *dryRun)
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation, "bulk update failed")
+	}
+	printUpdateResults(results)
+	return nil
+}
+
+func runApplyCorrections(args []string) error {
+	fs := flag.NewFlagSet("apply-corrections", flag.ContinueOnError)
+	vault := fs.String("vault", "", "Vault path")
+	dryRun := fs.Bool("dry-run", false, "Show exact frontmatter changes without writing")
+	configureUsage(fs, "apply-corrections [flags] <corrections.yaml>", "Apply YAML corrections keyed by paperless_id.")
+	help, err := parseFlags(fs, args, "invalid apply-corrections flags")
+	if help || err != nil {
+		return err
+	}
+	if *vault == "" || fs.NArg() != 1 {
+		return exitcodes.Wrapf(nil, exitcodes.ExitNoInput, exitcodes.KindValidation, "--vault and corrections.yaml are required")
+	}
+	results, err := vaultreview.ApplyCorrectionsFile(*vault, fs.Arg(0), *dryRun)
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation, "apply corrections failed")
+	}
+	printUpdateResults(results)
+	return nil
+}
+
+func runReviewReport(args []string) error {
+	fs := flag.NewFlagSet("review-report", flag.ContinueOnError)
+	htmlPath := fs.String("html", "", "Write a local HTML review report")
+	jsonFlag := fs.Bool("json", false, "Output filtered review rows as JSON")
+	failed := fs.Bool("failed", false, "Show failed documents")
+	warningsOnly := fs.Bool("warnings", false, "Show documents with warnings or errors")
+	missingMetadata := fs.Bool("missing-metadata", false, "Show documents missing key metadata paths/MIME")
+	configureUsage(fs, "review-report [flags] <migration.json>", "Generate a human-reviewable migration report without document body text.")
+	help, err := parseFlags(fs, args, "invalid review-report flags")
+	if help || err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return exitcodes.Wrapf(nil, exitcodes.ExitNoInput, exitcodes.KindValidation, "review-report requires migration.json")
+	}
+	report, err := vaultreview.BuildReviewReport(fs.Arg(0), vaultreview.ReviewFilters{Failed: *failed, Warnings: *warningsOnly, MissingMetadata: *missingMetadata})
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation, "review report failed")
+	}
+	if *htmlPath != "" {
+		if err := vaultreview.WriteReviewHTML(*htmlPath, report); err != nil {
+			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal, "failed to write HTML review report")
+		}
+		fmt.Fprintf(stdout, "Review HTML written to %s\n", *htmlPath)
+	}
+	if *jsonFlag {
+		data, err := json.MarshalIndent(report, "", "  ")
+		if err != nil {
+			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal, "failed to marshal review report")
+		}
+		fmt.Fprintln(stdout, string(data))
+		return nil
+	}
+	for _, d := range report.Documents {
+		fmt.Fprintf(stdout, "document %d: %s mime=%s vault=%s archive=%s error=%s warnings=%d\n", d.ID, d.Status, d.MIME, d.VaultPath, d.ArchivePath, d.Error, len(d.Warnings))
+	}
+	return nil
 }
 
 func runMCP(args []string) error {
@@ -570,6 +1241,10 @@ func runMCP(args []string) error {
 
 func runWatch(args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
+	processingDir := fs.String("processing-dir", "", "Move stable files here before enqueueing them")
+	processedDir := fs.String("processed-dir", "", "Move successfully processed source files here")
+	failedDir := fs.String("failed-dir", "", "Move failed source files here and write .error.json sidecars")
+	stableFor := fs.Duration("stable-for", time.Second, "How long a file must remain unchanged before enqueueing")
 	ocrLang, vault, archive, db := registerSharedFlags(fs)
 	configureUsage(fs, "watch [flags] <dir>", "Watch a directory for new or modified files and ingest them in the background.")
 	help, err := parseFlags(fs, args, "invalid watch flags")
@@ -613,7 +1288,12 @@ func runWatch(args []string) error {
 			"failed to reset running jobs")
 	}
 
-	watcher, err := ingest.NewWatcher(st, inboxDir)
+	watcher, err := ingest.NewWatcherWithOptions(st, inboxDir, ingest.WatcherOptions{
+		StableFor:     *stableFor,
+		ProcessingDir: *processingDir,
+		ProcessedDir:  *processedDir,
+		FailedDir:     *failedDir,
+	})
 	if err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindInternal,
 			"failed to initialize watcher")
@@ -622,10 +1302,12 @@ func runWatch(args []string) error {
 
 	engine := ocr.DefaultRunner(cfg.ocrLang)
 	pipeline := &ingest.Pipeline{
-		Engine:     engine,
-		Store:      st,
-		Writer:     &writer.NoteWriter{Vault: cfg.vault},
-		ArchiveDir: cfg.archive,
+		Engine:       engine,
+		Store:        st,
+		Writer:       &writer.NoteWriter{Vault: cfg.vault},
+		ArchiveDir:   cfg.archive,
+		ProcessedDir: *processedDir,
+		FailedDir:    *failedDir,
 	}
 
 	if err := watcher.Start(ctx); err != nil {

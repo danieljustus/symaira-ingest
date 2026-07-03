@@ -16,6 +16,14 @@ type IngestOptions struct {
 	PresetTags          []string
 	PresetCorrespondent string
 	PresetDocumentType  string
+	// SourcePathOverride, when set, is written to the note frontmatter instead
+	// of the temporary local processing path. It must not affect extraction,
+	// hashing, archive writes, or store source paths.
+	SourcePathOverride string
+	ImportedFrom       string
+	ImportRunID        string
+	SourceURI          string
+	DownloadURI        string
 	// Paperless carries traceability metadata when the source originates
 	// from a Paperless-ngx migration. Nil for ordinary ingests.
 	Paperless *writer.PaperlessMeta
@@ -27,6 +35,7 @@ type IngestOptions struct {
 // Result is the outcome of a one-shot ingest.
 type Result struct {
 	SourcePath    string
+	SHA256        string
 	Kind          extract.Kind
 	Extract       *extract.Result
 	VaultPath     string
@@ -44,6 +53,8 @@ func extractText(ctx context.Context, source string, kind extract.Kind, engine e
 	switch kind {
 	case extract.KindText, extract.KindMarkdown, extract.KindCSV:
 		res, err = extract.ReadTextKind(ctx, source, kind)
+	case extract.KindHTML, extract.KindRTF, extract.KindDOCX, extract.KindXLSX, extract.KindODT, extract.KindEML:
+		return nil, extract.UnsupportedFormatError(kind)
 	default:
 		if engine == nil {
 			return nil, fmt.Errorf("no extraction engine available for %q", kind)
