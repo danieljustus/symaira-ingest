@@ -749,6 +749,7 @@ func runRetry(args []string) error {
 
 func runRules(args []string) error {
 	fs := flag.NewFlagSet("rules", flag.ContinueOnError)
+	jsonFlag := fs.Bool("json", false, "Output rules in JSON format")
 	ocrLang, vault, archive, db := registerSharedFlags(fs)
 	configureUsage(fs, "rules [flags] [command]", "Manage classification rules. Patterns are case-insensitive substrings matched against extracted document text, not filename globs.\n\nCommands:\n  list                         List all classification rules\n  add <pattern> <kind> <value> Add a classification rule\n  delete <id>                  Delete a classification rule by ID\n\nKinds for add command: category, tag, correspondent, document_type")
 	help, err := parseFlags(fs, args, "invalid rules flags")
@@ -777,7 +778,7 @@ func runRules(args []string) error {
 
 	switch remaining[0] {
 	case "list":
-		return listRules(ctx, st)
+		return listRules(ctx, st, *jsonFlag)
 	case "add":
 		return addRule(ctx, st, remaining[1:])
 	case "delete":
@@ -801,11 +802,25 @@ Kinds for add command: category, tag, correspondent, document_type`)
 	return nil
 }
 
-func listRules(ctx context.Context, st *store.Store) error {
+func listRules(ctx context.Context, st *store.Store, outputJSON bool) error {
 	rules, err := st.ListRules(ctx)
 	if err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
 			"failed to list rules")
+	}
+
+	if outputJSON {
+		if rules == nil {
+			fmt.Fprintln(stdout, "[]")
+			return nil
+		}
+		data, err := json.MarshalIndent(rules, "", "  ")
+		if err != nil {
+			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
+				"failed to marshal rules to JSON")
+		}
+		fmt.Fprintln(stdout, string(data))
+		return nil
 	}
 
 	if len(rules) == 0 {

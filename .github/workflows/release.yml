@@ -84,6 +84,53 @@ jobs:
             done
           done
 
+      - name: Build macOS GUI App and Package as DMG
+        run: |
+          # 1. Build universal Go CLI binary for embedding
+          GOOS=darwin GOARCH=amd64 go build -o symingest-amd64 ./cmd/symingest
+          GOOS=darwin GOARCH=arm64 go build -o symingest-arm64 ./cmd/symingest
+          lipo -create -output symingest symingest-amd64 symingest-arm64
+          rm symingest-amd64 symingest-arm64
+          
+          # 2. Install XcodeGen and create-dmg
+          brew install xcodegen create-dmg
+          
+          # 3. Generate Xcode project
+          xcodegen --spec client/project.yml
+          
+          # 4. Build the macOS SwiftUI App
+          xcodebuild -project client/Symingest.xcodeproj -scheme Symingest -configuration Release -derivedDataPath build_dd -destination 'platform=macOS' build
+          
+          # 5. Sign the App Bundle if certificate available
+          if [ -n "${CODESIGN_IDENTITY:-}" ]; then
+            codesign -s "$CODESIGN_IDENTITY" --timestamp --options runtime --deep build_dd/Build/Products/Release/Symingest.app
+            echo "Signed Symingest.app"
+          else
+            echo "App building unsigned"
+          fi
+          
+          # 6. Create staging and package DMG
+          mkdir -p dist/dmg_staging
+          cp -R build_dd/Build/Products/Release/Symingest.app dist/dmg_staging/
+          
+          create-dmg \
+            --volname "Symingest" \
+            --window-pos 200 120 \
+            --window-size 600 300 \
+            --icon-size 100 \
+            --icon "Symingest.app" 175 120 \
+            --hide-extension "Symingest.app" \
+            --app-drop-link 425 120 \
+            dist/Symingest.dmg \
+            dist/dmg_staging/
+
+      - name: Upload DMG to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Symingest.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Clean up signing material
         if: always()
         run: |
