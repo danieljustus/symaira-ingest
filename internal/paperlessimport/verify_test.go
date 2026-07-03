@@ -110,7 +110,7 @@ func TestVerify_CompleteAfterImport(t *testing.T) {
 
 	vault := importForVerify(t, srv.URL, Options{})
 
-	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault)
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault, nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestVerify_MissingDocument(t *testing.T) {
 	// Import only document 1, leaving document 2 missing from the vault.
 	vault := importForVerify(t, srv.URL, Options{IDs: []int{1}})
 
-	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault)
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault, nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestVerify_MissingArchivedOriginal(t *testing.T) {
 		t.Fatalf("remove archive: %v", err)
 	}
 
-	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault)
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault, nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestVerify_MetadataMismatch(t *testing.T) {
 	note := notes[1][0]
 	tamperNoteCorrespondent(t, vault, note, "Wrong Corp")
 
-	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault)
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault, nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -258,7 +258,7 @@ func TestVerify_DuplicateNotes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault)
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault, nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -331,7 +331,7 @@ func TestVerify_StoragePathMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault)
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault, nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -407,7 +407,7 @@ func TestVerify_CreatedDateMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault)
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault, nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -489,7 +489,7 @@ func TestVerify_TagsMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault)
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault, nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -567,7 +567,7 @@ func TestVerify_DocumentTypeMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault)
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault, nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -592,7 +592,7 @@ func TestVerify_EmptyVault(t *testing.T) {
 
 	// Use a non-existent vault directory.
 	vault := filepath.Join(t.TempDir(), "nonexistent-vault")
-	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault)
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault, nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -611,7 +611,7 @@ func TestVerify_NonDirectoryVault(t *testing.T) {
 	if err := os.WriteFile(vault, []byte("some content"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault)
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault, nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -786,7 +786,7 @@ func TestVerify_MissingArchivePathEmpty(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault)
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault, nil)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}

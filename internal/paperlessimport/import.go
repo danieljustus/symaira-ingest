@@ -2,6 +2,8 @@ package paperlessimport
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -322,6 +324,19 @@ func stageFromError(err error) string {
 func paperlessSourceURI(id int) string   { return fmt.Sprintf("paperless://documents/%d", id) }
 func paperlessDownloadURI(id int) string { return paperlessSourceURI(id) + "/download" }
 
+func hashFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 func newRunID(t time.Time) string { return "paperless-" + t.Format("20060102T150405.000000000Z") }
 
 func plannedDocumentResult(doc paperless.Document, runID, status string) DocumentResult {
@@ -520,16 +535,24 @@ func Run(ctx context.Context, opts Options, pipeline *ingest.Pipeline) (*Stats, 
 			if result.Stage == "" {
 				result.Stage = stageFromError(err)
 			}
-			if serr := pipeline.Store.UpsertPaperlessImportStateForTarget(ctx, opts.BaseURL, targetVault, targetArchive, doc.ID, "failed", reason); serr != nil {
+			if serr := pipeline.Store.UpsertPaperlessImportStateForTarget(ctx, opts.BaseURL, targetVault, targetArchive, doc.ID, "failed", reason, result.VaultPath, result.ArchivePath, result.SHA256); serr != nil {
 				warnings = append(warnings, fmt.Sprintf("document %d: record import state: %v", doc.ID, serr))
 			}
 			record(i, result, warnings, "failed")
 			return nil
 		}
-		if serr := pipeline.Store.UpsertPaperlessImportStateForTarget(ctx, opts.BaseURL, targetVault, targetArchive, doc.ID, "imported", ""); serr != nil {
+		// Every Paperless ID must be mapped to its vault/archive path in the
+		// import state, including duplicate-content documents that point at the
+		// canonical note. Use "imported" in the state so later runs and
+		// verification can treat the source document as accounted for.
+		stateStatus := "imported"
+		if result.Status == "skipped" {
+			stateStatus = "imported"
+		}
+		if serr := pipeline.Store.UpsertPaperlessImportStateForTarget(ctx, opts.BaseURL, targetVault, targetArchive, doc.ID, stateStatus, "", result.VaultPath, result.ArchivePath, result.SHA256); serr != nil {
 			warnings = append(warnings, fmt.Sprintf("document %d: record import state: %v", doc.ID, serr))
 		}
-		record(i, result, warnings, "imported")
+		record(i, result, warnings, result.Status)
 		return ctx.Err()
 	}
 
@@ -646,6 +669,7 @@ func importOne(ctx context.Context, client *paperless.Client, doc paperless.Docu
 	var warnings []string
 
 	tmpFile, err := os.CreateTemp("", "symingest-import-*.tmp")
+
 	if err != nil {
 		return result, warnings, stageError("download", fmt.Errorf("create temp file: %w", err))
 	}
@@ -674,6 +698,11 @@ func importOne(ctx context.Context, client *paperless.Client, doc paperless.Docu
 		return result, warnings, stageError("download", fmt.Errorf("rename temp file: %w", err))
 	}
 	defer os.Remove(finalPath)
+
+	result.SHA256, err = hashFile(finalPath)
+	if err != nil {
+		return result, warnings, stageError("download", fmt.Errorf("hash downloaded file: %w", err))
+	}
 
 	meta := resolveDocMeta(doc, lu)
 	warnings = append(warnings, meta.Warnings...)

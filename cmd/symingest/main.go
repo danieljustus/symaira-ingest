@@ -367,14 +367,24 @@ func runImport(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	var st *store.Store
+	{
+		var err error
+		st, err = store.Open(cfg.db)
+		if err != nil {
+			return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
+				"failed to open document store")
+		}
+		defer st.Close()
+	}
+
 	if *verify {
-		report, err := paperlessimport.Verify(ctx, paperlessimport.Options{
-			BaseURL: *baseURL,
-			Token:   *token,
-			Since:   since,
-			Limit:   *limit,
-			IDs:     ids,
-		}, cfg.vault)
+		report, err := paperlessimport.Verify(ctx, paperlessimport.Options{BaseURL: *baseURL,
+			Token: *token,
+			Since: since,
+			Limit: *limit,
+			IDs:   ids,
+		}, cfg.vault, st)
 		if err != nil {
 			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
 				"verification failed")
@@ -396,13 +406,6 @@ func runImport(args []string) error {
 		}
 		return nil
 	}
-
-	st, err := store.Open(cfg.db)
-	if err != nil {
-		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
-			"failed to open document store")
-	}
-	defer st.Close()
 
 	engine := ocr.DefaultRunner(cfg.ocrLang)
 	pipeline := &ingest.Pipeline{
