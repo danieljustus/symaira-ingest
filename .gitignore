@@ -31,3 +31,11 @@ docs/*
 .github/prerelease/
 .github/review/
 .omo/
+
+# Xcode / Swift
+build/
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+DerivedData/
+.build/
