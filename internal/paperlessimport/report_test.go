@@ -72,6 +72,12 @@ func TestBuildMigrationReport_RealImport(t *testing.T) {
 	if d.VaultPath == "" || d.ArchivePath == "" {
 		t.Errorf("imported document should record vault and archive paths, got %+v", d)
 	}
+	if report.RunID == "" || report.ToolVersion == "" || report.Source != "paperless" || report.SourceURL != srv.URL || report.Mode != "import" {
+		t.Errorf("report metadata incomplete: %+v", report)
+	}
+	if d.SHA256 == "" || d.ExpectedExtension == "" || d.ActualArchiveExtension == "" || d.ImportRunID == "" || d.SourceURI == "" || d.DownloadURI == "" {
+		t.Errorf("document report missing audit fields: %+v", d)
+	}
 }
 
 func TestBuildMigrationReport_DryRunCarriesAudit(t *testing.T) {

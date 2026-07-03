@@ -12,7 +12,7 @@ func TestWriteNote(t *testing.T) {
 	vault := t.TempDir()
 	source := "/tmp/scans/invoice.pdf"
 	w := &NoteWriter{Vault: vault}
-	path, err := w.WriteNote(source, "deadbeef", "application/pdf", "tesseract", "hello", "", time.Unix(0, 0).UTC(), "invoice", []string{"financial"}, "Acme Corp", "Invoice", nil, nil)
+	path, err := w.WriteNote(source, "deadbeef", "application/pdf", "tesseract", "hello", "", time.Unix(0, 0).UTC(), "invoice", []string{"financial"}, "Acme Corp", "Invoice", "", "", "", "", nil, nil)
 	if err != nil {
 		t.Fatalf("WriteNote: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestWriteNote_PaperlessMeta(t *testing.T) {
 		URL:              "https://paperless.local/documents/42",
 	}
 
-	path, err := w.WriteNote(source, "deadbeef", "application/pdf", "tesseract", "hello", "", time.Unix(0, 0).UTC(), "invoice", []string{"financial"}, "Acme Corp", "Invoice", pm, nil)
+	path, err := w.WriteNote(source, "deadbeef", "application/pdf", "tesseract", "hello", "", time.Unix(0, 0).UTC(), "invoice", []string{"financial"}, "Acme Corp", "Invoice", "", "", "", "", pm, nil)
 	if err != nil {
 		t.Fatalf("WriteNote: %v", err)
 	}
@@ -90,11 +90,54 @@ func TestWriteNote_PaperlessMeta(t *testing.T) {
 	}
 }
 
+func TestWriteNote_PaperlessTraceabilityFields(t *testing.T) {
+	vault := t.TempDir()
+	w := &NoteWriter{Vault: vault}
+	path, err := w.WriteNote(
+		"paperless://documents/42/download",
+		"deadbeef",
+		"application/pdf",
+		"tesseract",
+		"hello",
+		"",
+		time.Unix(0, 0).UTC(),
+		"",
+		nil,
+		"",
+		"",
+		"paperless",
+		"paperless-20260703T100000Z",
+		"paperless://documents/42",
+		"paperless://documents/42/download",
+		&PaperlessMeta{DocumentID: 42},
+		&NoteLayout{BaseName: "doc-42"},
+	)
+	if err != nil {
+		t.Fatalf("WriteNote: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(data)
+	for _, needle := range []string{
+		"source_path: paperless://documents/42/download",
+		"imported_from: paperless",
+		"import_run_id: paperless-20260703T100000Z",
+		"source_uri: paperless://documents/42",
+		"download_uri: paperless://documents/42/download",
+	} {
+		if !strings.Contains(out, needle) {
+			t.Fatalf("output missing %q:\n%s", needle, out)
+		}
+	}
+}
+
 func TestWriteNote_NoPaperlessMeta_OmitsBlock(t *testing.T) {
 	vault := t.TempDir()
 	w := &NoteWriter{Vault: vault}
 
-	path, err := w.WriteNote("/tmp/plain.txt", "abc", "text/plain", "", "body", "", time.Now().UTC(), "", nil, "", "", nil, nil)
+	path, err := w.WriteNote("/tmp/plain.txt", "abc", "text/plain", "", "body", "", time.Now().UTC(), "", nil, "", "", "", "", "", "", nil, nil)
 	if err != nil {
 		t.Fatalf("WriteNote: %v", err)
 	}
@@ -111,7 +154,7 @@ func TestWriteNote_NoPaperlessMeta_OmitsBlock(t *testing.T) {
 func TestWriteNote_Atomic(t *testing.T) {
 	vault := t.TempDir()
 	w := &NoteWriter{Vault: vault}
-	path, err := w.WriteNote("/tmp/a.txt", "abc", "text/plain", "", "body", "", time.Now().UTC(), "", nil, "", "", nil, nil)
+	path, err := w.WriteNote("/tmp/a.txt", "abc", "text/plain", "", "body", "", time.Now().UTC(), "", nil, "", "", "", "", "", "", nil, nil)
 	if err != nil {
 		t.Fatalf("WriteNote: %v", err)
 	}
@@ -168,7 +211,7 @@ func TestWriteNote_Golden(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			path, err := w.WriteNote(tc.sourcePath, tc.sha256, tc.mime, tc.ocrEngine, tc.text, "", fixedTime, "", nil, "", "", nil, nil)
+			path, err := w.WriteNote(tc.sourcePath, tc.sha256, tc.mime, tc.ocrEngine, tc.text, "", fixedTime, "", nil, "", "", "", "", "", "", nil, nil)
 			if err != nil {
 				t.Fatalf("WriteNote failed: %v", err)
 			}
@@ -245,7 +288,7 @@ func TestWriteNote_LayoutSubdirAndBaseName(t *testing.T) {
 	w := &NoteWriter{Vault: vault}
 	layout := &NoteLayout{Subdir: filepath.Join("Finance", "Invoices"), BaseName: "acme-invoice"}
 
-	path, err := w.WriteNote("/tmp/symingest-import-xyz.tmp.pdf", "abc", "application/pdf", "tesseract", "body", "", time.Now().UTC(), "", nil, "", "", nil, layout)
+	path, err := w.WriteNote("/tmp/symingest-import-xyz.tmp.pdf", "abc", "application/pdf", "tesseract", "body", "", time.Now().UTC(), "", nil, "", "", "", "", "", "", nil, layout)
 	if err != nil {
 		t.Fatalf("WriteNote: %v", err)
 	}
@@ -278,11 +321,11 @@ func TestWriteNote_LayoutCollisionDeterministic(t *testing.T) {
 	w := &NoteWriter{Vault: vault}
 	layout := &NoteLayout{Subdir: "Docs", BaseName: "scan"}
 
-	first, err := w.WriteNote("/tmp/a.pdf", "h1", "application/pdf", "", "one", "", time.Now().UTC(), "", nil, "", "", nil, layout)
+	first, err := w.WriteNote("/tmp/a.pdf", "h1", "application/pdf", "", "one", "", time.Now().UTC(), "", nil, "", "", "", "", "", "", nil, layout)
 	if err != nil {
 		t.Fatalf("WriteNote first: %v", err)
 	}
-	second, err := w.WriteNote("/tmp/b.pdf", "h2", "application/pdf", "", "two", "", time.Now().UTC(), "", nil, "", "", nil, layout)
+	second, err := w.WriteNote("/tmp/b.pdf", "h2", "application/pdf", "", "two", "", time.Now().UTC(), "", nil, "", "", "", "", "", "", nil, layout)
 	if err != nil {
 		t.Fatalf("WriteNote second: %v", err)
 	}
@@ -301,7 +344,7 @@ func TestWriteNote_LayoutCollisionDeterministic(t *testing.T) {
 func TestWriteNote_NilLayoutStaysFlat(t *testing.T) {
 	vault := t.TempDir()
 	w := &NoteWriter{Vault: vault}
-	path, err := w.WriteNote("/tmp/scans/invoice.pdf", "h", "application/pdf", "", "body", "", time.Now().UTC(), "", nil, "", "", nil, nil)
+	path, err := w.WriteNote("/tmp/scans/invoice.pdf", "h", "application/pdf", "", "body", "", time.Now().UTC(), "", nil, "", "", "", "", "", "", nil, nil)
 	if err != nil {
 		t.Fatalf("WriteNote: %v", err)
 	}
