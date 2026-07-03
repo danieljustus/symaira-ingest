@@ -53,6 +53,8 @@ func extractText(ctx context.Context, source string, kind extract.Kind, engine e
 	switch kind {
 	case extract.KindText, extract.KindMarkdown, extract.KindCSV:
 		res, err = extract.ReadTextKind(ctx, source, kind)
+	case extract.KindHTML, extract.KindRTF, extract.KindDOCX, extract.KindXLSX, extract.KindODT, extract.KindEML:
+		return nil, extract.UnsupportedFormatError(kind)
 	default:
 		if engine == nil {
 			return nil, fmt.Errorf("no extraction engine available for %q", kind)

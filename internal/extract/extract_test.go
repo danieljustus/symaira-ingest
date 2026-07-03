@@ -24,6 +24,12 @@ func TestDetect(t *testing.T) {
 		{"text", []byte("hello world"), ".txt", KindText},
 		{"csv", []byte("date,amount\n2026-07-02,12.34\n"), ".csv", KindCSV},
 		{"markdown", []byte("# hi"), ".md", KindMarkdown},
+		{"html", []byte("<html><body>hi</body></html>"), ".html", KindHTML},
+		{"rtf", []byte("{\\rtf1 hi}"), ".rtf", KindRTF},
+		{"docx", []byte("PK\x03\x04fake"), ".docx", KindDOCX},
+		{"xlsx", []byte("PK\x03\x04fake"), ".xlsx", KindXLSX},
+		{"odt", []byte("PK\x03\x04fake"), ".odt", KindODT},
+		{"eml", []byte("Subject: hi\n\nbody"), ".eml", KindEML},
 	}
 
 	for _, tc := range cases {
