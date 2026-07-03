@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/danieljustus/symaira-ingest/internal/ingest"
@@ -82,6 +84,27 @@ type Options struct {
 	Since   time.Time
 	DryRun  bool
 	Plan    bool
+	Resume  bool
+
+	// RetryFailed restricts a real import to documents whose current-target
+	// Paperless import state is recorded as failed.
+	RetryFailed bool
+
+	// Concurrency bounds concurrent document processing. The default is 1 so
+	// existing serial behavior is preserved unless explicitly requested.
+	Concurrency int
+
+	// CheckpointEvery prints progress summaries after every N processed
+	// documents. Zero disables periodic checkpoints.
+	CheckpointEvery int
+
+	// TargetVault and TargetArchive identify the concrete destination used for
+	// resume safety. When empty they are derived from the supplied pipeline.
+	TargetVault   string
+	TargetArchive string
+
+	// Progress receives operator progress/checkpoint output. Nil means stderr.
+	Progress io.Writer
 
 	// Limit caps the number of documents processed this run to the first N
 	// of the listed archive (newest first). Zero means no limit. Ignored
@@ -317,6 +340,49 @@ func plannedDocumentResult(doc paperless.Document, runID, status string) Documen
 	}
 }
 
+func progressWriter(opts Options) io.Writer {
+	if opts.Progress != nil {
+		return opts.Progress
+	}
+	return os.Stderr
+}
+
+func importTargets(opts Options, pipeline *ingest.Pipeline) (vault, archive string) {
+	vault = opts.TargetVault
+	archive = opts.TargetArchive
+	if vault == "" && pipeline != nil && pipeline.Writer != nil {
+		vault = pipeline.Writer.Vault
+	}
+	if archive == "" && pipeline != nil {
+		archive = pipeline.ArchiveDir
+	}
+	return vault, archive
+}
+
+func formatETA(start time.Time, processed, total int) string {
+	if processed <= 0 || total <= processed {
+		return "0s"
+	}
+	elapsed := time.Since(start)
+	if elapsed <= 0 {
+		return "unknown"
+	}
+	remaining := total - processed
+	eta := time.Duration(float64(elapsed) / float64(processed) * float64(remaining))
+	return eta.Round(time.Second).String()
+}
+
+func printCheckpoint(w io.Writer, stats *Stats) {
+	processed := stats.Imported + stats.Skipped + stats.Failed
+	elapsed := time.Since(stats.StartedAt)
+	rate := 0.0
+	if elapsed > 0 {
+		rate = float64(processed) / elapsed.Minutes()
+	}
+	fmt.Fprintf(w, "checkpoint: processed=%d/%d imported=%d skipped=%d failed=%d rate=%.1f/min eta=%s\n",
+		processed, stats.Total, stats.Imported, stats.Skipped, stats.Failed, rate, formatETA(stats.StartedAt, processed, stats.Total))
+}
+
 func Run(ctx context.Context, opts Options, pipeline *ingest.Pipeline) (*Stats, error) {
 	client := paperless.NewClient(opts.BaseURL, opts.Token)
 	started := time.Now().UTC()
@@ -336,6 +402,10 @@ func Run(ctx context.Context, opts Options, pipeline *ingest.Pipeline) (*Stats, 
 		mode = "plan"
 	} else if opts.DryRun {
 		mode = "dry-run"
+	} else if opts.RetryFailed {
+		mode = "retry-failed"
+	} else if opts.Resume {
+		mode = "resume"
 	}
 
 	stats := &Stats{
@@ -372,52 +442,156 @@ func Run(ctx context.Context, opts Options, pipeline *ingest.Pipeline) (*Stats, 
 		return stats, nil
 	}
 
-	for i, doc := range docs {
-		if err := ctx.Err(); err != nil {
-			return stats, err
-		}
-		fmt.Fprintf(os.Stderr, "[%d/%d] %s\n", i+1, stats.Total, doc.Title)
+	progressOut := progressWriter(opts)
+	targetVault, targetArchive := importTargets(opts, pipeline)
+	concurrency := opts.Concurrency
+	if concurrency < 1 {
+		concurrency = 1
+	}
 
-		if status, found, serr := pipeline.Store.PaperlessImportStatus(ctx, opts.BaseURL, doc.ID); serr == nil && found && status == "imported" {
-			fmt.Fprintf(os.Stderr, "  skipped (already imported in a previous run)\n")
+	results := make([]DocumentResult, len(docs))
+	recorded := make([]bool, len(docs))
+	var mu sync.Mutex
+	var progressMu sync.Mutex
+	record := func(i int, result DocumentResult, warnings []string, outcome string) {
+		mu.Lock()
+		defer mu.Unlock()
+		stats.Warnings = append(stats.Warnings, warnings...)
+		switch outcome {
+		case "imported":
+			stats.Imported++
+		case "skipped":
 			stats.Skipped++
+		case "failed":
+			stats.Failed++
+		}
+		results[i] = result
+		recorded[i] = true
+		processed := stats.Imported + stats.Skipped + stats.Failed
+		if opts.CheckpointEvery > 0 && processed%opts.CheckpointEvery == 0 {
+			progressMu.Lock()
+			printCheckpoint(progressOut, stats)
+			progressMu.Unlock()
+		}
+	}
+
+	processDoc := func(i int) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		doc := docs[i]
+		progressMu.Lock()
+		fmt.Fprintf(progressOut, "[%d/%d] %s\n", i+1, stats.Total, doc.Title)
+		progressMu.Unlock()
+
+		status, found, serr := pipeline.Store.PaperlessImportStatusForTarget(ctx, opts.BaseURL, targetVault, targetArchive, doc.ID)
+		if serr != nil {
+			mu.Lock()
+			stats.Warnings = append(stats.Warnings, fmt.Sprintf("document %d: read import state: %v", doc.ID, serr))
+			mu.Unlock()
+		}
+		if serr == nil && found && status == "imported" {
+			progressMu.Lock()
+			fmt.Fprintf(progressOut, "  skipped (already imported in a previous run)\n")
+			progressMu.Unlock()
 			result := plannedDocumentResult(doc, stats.RunID, "skipped")
 			result.Reason = "already imported in a previous run"
-			stats.Results = append(stats.Results, result)
-			if err := ctx.Err(); err != nil {
-				return stats, err
-			}
-			continue
+			record(i, result, nil, "skipped")
+			return ctx.Err()
+		}
+		if opts.RetryFailed && (!found || status != "failed") {
+			result := plannedDocumentResult(doc, stats.RunID, "skipped")
+			result.Reason = "not recorded as failed for this target"
+			record(i, result, nil, "skipped")
+			return ctx.Err()
 		}
 
 		result, warnings, err := importOne(ctx, client, doc, lu, pipeline, opts.PreserveStoragePaths, stats.RunID)
-		stats.Warnings = append(stats.Warnings, warnings...)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
-				return stats, ctxErr
+				return ctxErr
 			}
-			fmt.Fprintf(os.Stderr, "  failed: %v\n", err)
-			stats.Failed++
+			progressMu.Lock()
+			fmt.Fprintf(progressOut, "  failed: %v\n", err)
+			progressMu.Unlock()
 			reason := boundedErrorString(err)
 			result.Status = "failed"
 			result.Error = reason
 			if result.Stage == "" {
 				result.Stage = stageFromError(err)
 			}
-			stats.Results = append(stats.Results, result)
-			if serr := pipeline.Store.UpsertPaperlessImportState(ctx, opts.BaseURL, doc.ID, "failed", reason); serr != nil {
-				stats.Warnings = append(stats.Warnings, fmt.Sprintf("document %d: record import state: %v", doc.ID, serr))
+			if serr := pipeline.Store.UpsertPaperlessImportStateForTarget(ctx, opts.BaseURL, targetVault, targetArchive, doc.ID, "failed", reason); serr != nil {
+				warnings = append(warnings, fmt.Sprintf("document %d: record import state: %v", doc.ID, serr))
 			}
-			continue
+			record(i, result, warnings, "failed")
+			return nil
 		}
-		if serr := pipeline.Store.UpsertPaperlessImportState(ctx, opts.BaseURL, doc.ID, "imported", ""); serr != nil {
-			stats.Warnings = append(stats.Warnings, fmt.Sprintf("document %d: record import state: %v", doc.ID, serr))
+		if serr := pipeline.Store.UpsertPaperlessImportStateForTarget(ctx, opts.BaseURL, targetVault, targetArchive, doc.ID, "imported", ""); serr != nil {
+			warnings = append(warnings, fmt.Sprintf("document %d: record import state: %v", doc.ID, serr))
 		}
-		stats.Imported++
-		stats.Results = append(stats.Results, result)
-		if err := ctx.Err(); err != nil {
-			return stats, err
+		record(i, result, warnings, "imported")
+		return ctx.Err()
+	}
+
+	if concurrency == 1 || len(docs) <= 1 {
+		for i := range docs {
+			if err := processDoc(i); err != nil {
+				return stats, err
+			}
 		}
+	} else {
+		jobs := make(chan int)
+		var wg sync.WaitGroup
+		var errMu sync.Mutex
+		var firstErr error
+		setErr := func(err error) {
+			if err == nil {
+				return
+			}
+			errMu.Lock()
+			defer errMu.Unlock()
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+		workerCount := concurrency
+		if workerCount > len(docs) {
+			workerCount = len(docs)
+		}
+		for w := 0; w < workerCount; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := range jobs {
+					if ctx.Err() != nil {
+						setErr(ctx.Err())
+						continue
+					}
+					setErr(processDoc(i))
+				}
+			}()
+		}
+		for i := range docs {
+			if ctx.Err() != nil {
+				setErr(ctx.Err())
+				break
+			}
+			jobs <- i
+		}
+		close(jobs)
+		wg.Wait()
+		if firstErr != nil {
+			return stats, firstErr
+		}
+	}
+
+	for i := range results {
+		if recorded[i] {
+			stats.Results = append(stats.Results, results[i])
+		}
+	}
+	if opts.CheckpointEvery > 0 && stats.Total > 0 {
+		printCheckpoint(progressOut, stats)
 	}
 
 	return stats, nil

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/danieljustus/symaira-corekit/fsutil"
@@ -50,6 +51,7 @@ type PaperlessMeta struct {
 // NoteWriter writes deduplicated Markdown sidecars into a vault.
 type NoteWriter struct {
 	Vault string
+	mu    sync.Mutex
 }
 
 // NoteLayout optionally overrides where a note is written within the vault.
@@ -132,6 +134,9 @@ func fileExists(path string) bool {
 // It returns the vault path and any error. A write failure must not leave
 // a partially written file behind.
 func (w *NoteWriter) WriteNote(sourcePath, sha256, mime, ocrEngine, text, archivePath string, ingestedAt time.Time, category string, tags []string, correspondent, documentType, importedFrom, importRunID, sourceURI, downloadURI string, paperless *PaperlessMeta, layout *NoteLayout) (string, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	vaultPath := w.resolveNotePath(sourcePath, layout)
 	if err := os.MkdirAll(filepath.Dir(vaultPath), 0o700); err != nil {
 		return "", fmt.Errorf("create vault directory: %w", err)

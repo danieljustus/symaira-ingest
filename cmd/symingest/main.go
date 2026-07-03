@@ -199,9 +199,15 @@ func runImport(args []string) error {
 	preserveStoragePaths := fs.Bool("preserve-storage-paths", false, "Place notes under vault subdirectories derived from each document's Paperless storage path")
 	dryRun := fs.Bool("dry-run", false, "List what would be imported without writing")
 	plan := fs.Bool("plan", false, "Plan a Paperless import without downloading document bodies or writing vault/archive/import-state")
+	resume := fs.Bool("resume", false, "Resume an interrupted import by skipping documents already imported for this target")
+	retryFailed := fs.Bool("retry-failed", false, "Retry only documents recorded as failed for this target")
+	concurrency := fs.Int("concurrency", 1, "Maximum number of Paperless documents to process concurrently")
+	checkpointEvery := fs.Int("checkpoint-every", 0, "Print a progress checkpoint after every N processed documents; 0 disables checkpoints")
 	reportPath := fs.String("report", "", "Write a JSON migration report to this path (works with --plan, --dry-run and real imports)")
 	verify := fs.Bool("verify", false, "Verify a completed import against the Paperless source instead of importing")
 	statusOnly := fs.Bool("status", false, "List per-document import status from a previous run, then exit")
+	statusSummary := fs.Bool("summary", false, "With --status, print counts by import status")
+	statusFailed := fs.Bool("failed", false, "With --status, show only failed documents")
 	jsonFlag := fs.Bool("json", false, "With --status or --verify, output the result as JSON")
 	ocrLang, vault, archive, db := registerSharedFlags(fs)
 	configureUsage(fs, "import paperless [flags]", "Import documents from a Paperless-ngx instance into the vault. Use --plan, --dry-run, --limit, or --ids to run a small, inspectable pilot before a full migration; bounds apply to --plan, --dry-run and real imports alike. Imports are resumable: a document already recorded as imported is skipped on a re-run, and a document that previously failed is retried automatically.")
@@ -247,6 +253,18 @@ func runImport(args []string) error {
 		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation,
 			"--plan and --dry-run are mutually exclusive")
 	}
+	if *retryFailed && (*plan || *dryRun) {
+		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation,
+			"--retry-failed is only valid for real imports")
+	}
+	if *concurrency < 1 {
+		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation,
+			"invalid concurrency %d; must be at least 1", *concurrency)
+	}
+	if *checkpointEvery < 0 {
+		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation,
+			"invalid checkpoint interval %d; must be zero or positive", *checkpointEvery)
+	}
 
 	if cfg.vault == "" && !*statusOnly && !*plan && !*dryRun {
 		return exitcodes.Wrapf(nil, exitcodes.ExitConfig, exitcodes.KindConfig,
@@ -261,10 +279,30 @@ func runImport(args []string) error {
 		}
 		defer st.Close()
 
-		states, err := st.ListPaperlessImportState(context.Background(), *baseURL, "")
+		statusFilter := ""
+		if *statusFailed {
+			statusFilter = "failed"
+		}
+		states, err := st.ListPaperlessImportState(context.Background(), *baseURL, statusFilter)
 		if err != nil {
 			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
 				"failed to list paperless import status")
+		}
+
+		if *statusSummary {
+			summary := buildPaperlessStatusSummary(*baseURL, states)
+			if *jsonFlag {
+				data, err := json.MarshalIndent(summary, "", "  ")
+				if err != nil {
+					return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
+						"failed to marshal import status summary to JSON")
+				}
+				fmt.Fprintln(stdout, string(data))
+				return nil
+			}
+			fmt.Fprintf(stdout, "Paperless import status for %s: total=%d imported=%d skipped=%d failed=%d pending=%d\n",
+				summary.BaseURL, summary.Total, summary.Imported, summary.Skipped, summary.Failed, summary.Pending)
+			return nil
 		}
 
 		if *jsonFlag {
@@ -369,9 +407,15 @@ func runImport(args []string) error {
 		Since:                since,
 		DryRun:               *dryRun,
 		Plan:                 *plan,
+		Resume:               *resume,
+		RetryFailed:          *retryFailed,
+		Concurrency:          *concurrency,
+		CheckpointEvery:      *checkpointEvery,
 		Limit:                *limit,
 		IDs:                  ids,
 		PreserveStoragePaths: *preserveStoragePaths,
+		TargetVault:          cfg.vault,
+		TargetArchive:        cfg.archive,
 	}
 
 	stats, err := paperlessimport.Run(ctx, opts, pipeline)
@@ -405,6 +449,32 @@ func runImport(args []string) error {
 }
 
 // printVerifyReport writes a human-readable migration verification summary.
+type paperlessStatusSummary struct {
+	BaseURL  string `json:"base_url"`
+	Total    int    `json:"total"`
+	Imported int    `json:"imported"`
+	Skipped  int    `json:"skipped"`
+	Failed   int    `json:"failed"`
+	Pending  int    `json:"pending"`
+}
+
+func buildPaperlessStatusSummary(baseURL string, states []*store.PaperlessImportState) paperlessStatusSummary {
+	s := paperlessStatusSummary{BaseURL: baseURL, Total: len(states)}
+	for _, st := range states {
+		switch st.Status {
+		case "imported":
+			s.Imported++
+		case "skipped":
+			s.Skipped++
+		case "failed":
+			s.Failed++
+		case "pending":
+			s.Pending++
+		}
+	}
+	return s
+}
+
 func printVerifyReport(w io.Writer, r *paperlessimport.VerifyReport) {
 	fmt.Fprintf(w, "Migration verification: %d source documents, %d vault notes, %d verified\n",
 		r.SourceDocuments, r.VaultNotes, r.Verified)
