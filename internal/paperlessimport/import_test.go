@@ -174,8 +174,8 @@ func TestRun_DryRun_AuditReport(t *testing.T) {
 	if len(audit.UnresolvedTagIDs) != 1 || audit.UnresolvedTagIDs[0] != 99 {
 		t.Errorf("UnresolvedTagIDs = %v, want [99]", audit.UnresolvedTagIDs)
 	}
-	if audit.UnsupportedFileTypes["xlsx"] != 1 {
-		t.Errorf("UnsupportedFileTypes[xlsx] = %d, want 1", audit.UnsupportedFileTypes["xlsx"])
+	if audit.UnsupportedFileTypes["xlsx"] != 0 {
+		t.Errorf("UnsupportedFileTypes[xlsx] = %d, want 0 after native XLSX support", audit.UnsupportedFileTypes["xlsx"])
 	}
 	if stats.Imported != 0 {
 		t.Errorf("stats.Imported = %d, want 0 (dry-run must not write anything)", stats.Imported)
@@ -1166,8 +1166,8 @@ func TestBuildAuditReport_UsesEffectiveDownloadExtension(t *testing.T) {
 	if audit.UnsupportedFileTypes["csv"] != 0 || audit.UnsupportedFileTypes["pdf"] != 0 || audit.UnsupportedFileTypes["nef"] != 0 {
 		t.Fatalf("supported extensions flagged as unsupported: %v", audit.UnsupportedFileTypes)
 	}
-	if audit.UnsupportedFileTypes["xlsx"] != 1 {
-		t.Fatalf("xlsx unsupported count = %d, want 1 (all unsupported: %v)", audit.UnsupportedFileTypes["xlsx"], audit.UnsupportedFileTypes)
+	if audit.UnsupportedFileTypes["xlsx"] != 0 {
+		t.Fatalf("xlsx unsupported count = %d, want 0 after native XLSX support (all unsupported: %v)", audit.UnsupportedFileTypes["xlsx"], audit.UnsupportedFileTypes)
 	}
 }
 

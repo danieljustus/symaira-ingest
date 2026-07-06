@@ -47,6 +47,10 @@ public struct DependencyReport: Sendable {
     public let tesseractPath: String?
     public let pdftoppmPath: String?
     public let sipsPath: String?
+    public let textutilPath: String?
+    public let pandocPath: String?
+    public let libreOfficePath: String?
+    public let sofficePath: String?
 
     public var isComplete: Bool {
         return symingestPath != nil && tesseractPath != nil && pdftoppmPath != nil
@@ -95,7 +99,20 @@ public final class CLIClient: Sendable {
         let tess = searchPathFor("tesseract")
         let pdf = searchPathFor("pdftoppm")
         let sips = searchPathFor("sips")
-        return DependencyReport(symingestPath: sym, tesseractPath: tess, pdftoppmPath: pdf, sipsPath: sips)
+        let textutil = searchPathFor("textutil")
+        let pandoc = searchPathFor("pandoc")
+        let libreOffice = searchPathFor("libreoffice")
+        let soffice = searchPathFor("soffice")
+        return DependencyReport(
+            symingestPath: sym,
+            tesseractPath: tess,
+            pdftoppmPath: pdf,
+            sipsPath: sips,
+            textutilPath: textutil,
+            pandocPath: pandoc,
+            libreOfficePath: libreOffice,
+            sofficePath: soffice
+        )
     }
 
     private func applyConfigEnvironment(_ config: CLIConfigSnapshot, to env: inout [String: String]) {

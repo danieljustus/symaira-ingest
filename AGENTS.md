@@ -8,7 +8,7 @@ Document ingestion + OCR core for the Symaira ecosystem.
 
 - **Language:** Go 1.26.4 (CGO-free, `modernc.org/sqlite`)
 - **Built on:** `symaira-corekit`
-- **External tools (shelled out):** `tesseract`, `pdftoppm`, macOS `sips`; optional converters such as `textutil`, `pandoc`, and `soffice` are discovery-only until format support is implemented
+- **External tools (shelled out):** `tesseract`, `pdftoppm`, macOS `sips`; native extractors cover HTML, RTF, DOCX, XLSX, ODT, and EML; optional converters such as `textutil`, `pandoc`, and `soffice` are discovered by `doctor` as fallback/debug context
 - **License:** Apache-2.0
 - **Status:** Active CLI + MCP + macOS-client project. Paperless migration gates exist, but full replacement readiness is still tracked in `docs/plans/symingest-completion-roadmap.md`.
 

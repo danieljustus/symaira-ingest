@@ -399,6 +399,20 @@ exit 0
 	if report.Status != doctorOK || report.Failures != 0 || report.Warnings != 0 {
 		t.Fatalf("doctor report = %+v", report)
 	}
+	for _, name := range []string{"tool.optional.textutil", "tool.optional.pandoc", "tool.optional.libreoffice", "tool.optional.soffice"} {
+		if !doctorReportHasCheck(report, name) {
+			t.Fatalf("doctor report missing optional converter check %q: %+v", name, report.Checks)
+		}
+	}
+}
+
+func doctorReportHasCheck(report doctorReport, name string) bool {
+	for _, check := range report.Checks {
+		if check.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRun_SetupDryRunShowsDiffAndDoesNotWrite(t *testing.T) {

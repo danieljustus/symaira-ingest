@@ -26,6 +26,13 @@ var supportedFileExtensions = map[string]bool{
 	"csv":      true,
 	"md":       true,
 	"markdown": true,
+	"html":     true,
+	"htm":      true,
+	"rtf":      true,
+	"docx":     true,
+	"xlsx":     true,
+	"odt":      true,
+	"eml":      true,
 }
 
 var supportedMIMEDefaultExtensions = map[string]string{
@@ -39,6 +46,13 @@ var supportedMIMEDefaultExtensions = map[string]string{
 	"text/plain":      ".txt",
 	"text/csv":        ".csv",
 	"text/markdown":   ".md",
+	"text/html":       ".html",
+	"application/rtf": ".rtf",
+	"text/rtf":        ".rtf",
+	"application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":       ".xlsx",
+	"application/vnd.oasis.opendocument.text":                                 ".odt",
+	"message/rfc822": ".eml",
 }
 
 // paperlessDownloadExtension returns the extension that should be used for

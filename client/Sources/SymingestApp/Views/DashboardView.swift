@@ -110,7 +110,7 @@ struct DashboardView: View {
                         Text(isIngesting ? "Ingesting Document..." : "Drag & Drop Files Here")
                             .font(.headline)
                             .foregroundStyle(Theme.textPrimary)
-                        Text("Accepts PDF, PNG, JPEG, HEIC, TIFF, DOCX, CSV, TXT")
+                        Text("Accepts PDF, images, HEIC/HEIF, TXT, CSV, Markdown, HTML, RTF, DOCX, XLSX, ODT, EML")
                             .font(.caption)
                             .foregroundStyle(Theme.textSecondary)
                     }

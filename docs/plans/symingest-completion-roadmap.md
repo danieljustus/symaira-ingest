@@ -74,23 +74,23 @@ Do not tag releases, push branches, install persistent LaunchAgents, overwrite p
 
 **Goal:** every advertised accepted format really works, or the UI/docs stop claiming it.
 
-- [ ] Fix feature truthfulness: Dashboard currently mentions DOCX; core currently marks DOCX/XLSX/HTML/RTF/ODT/EML as unsupported optional formats.
-- [ ] Implement or explicitly hide/defer DOCX extraction.
-- [ ] Implement or explicitly hide/defer RTF extraction.
-- [ ] Implement or explicitly hide/defer HTML extraction.
-- [ ] Implement or explicitly hide/defer ODT extraction.
-- [ ] Implement or explicitly hide/defer XLSX extraction.
-- [ ] Implement or explicitly hide/defer EML extraction.
-- [ ] Add optional converter discovery to doctor:
+- [x] Fix feature truthfulness: Dashboard/README/AGENTS now match core support.
+- [x] Implement native DOCX text extraction.
+- [x] Implement native RTF text extraction.
+- [x] Implement native HTML text extraction.
+- [x] Implement native ODT text extraction.
+- [x] Implement native XLSX text extraction.
+- [x] Implement native EML text extraction, preferring plain text and ignoring attachments.
+- [x] Add optional converter discovery to doctor:
   - `textutil`,
   - `pandoc`,
   - `soffice`/LibreOffice.
-- [ ] Add fixtures and golden tests for every supported format.
-- [ ] Add OCR-quality metadata or report fields:
+- [x] Add fixtures/tests and CLI smokes for every newly supported structured format.
+- [ ] Later quality pass: add richer OCR/report metadata if needed:
   - pages processed,
-  - extracted character count,
-  - low-body warning.
-- [ ] Add text-first PDF extraction before OCR fallback if not already supported.
+  - extracted character count in frontmatter/report,
+  - low-body warning beyond the existing `validate-vault --min-body-length` gate.
+- [ ] Later quality pass: add text-first PDF extraction before OCR fallback.
 
 **Exit gate:** advertised formats match implementation; unsupported formats fail with useful diagnostics; tests cover all supported formats.
 

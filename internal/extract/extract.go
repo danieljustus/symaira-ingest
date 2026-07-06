@@ -112,16 +112,11 @@ func Detect(path string) (Kind, error) {
 }
 
 func IsExplicitlyUnsupported(kind Kind) bool {
-	switch kind {
-	case KindHTML, KindRTF, KindDOCX, KindXLSX, KindODT, KindEML:
-		return true
-	default:
-		return false
-	}
+	return false
 }
 
 func UnsupportedFormatError(kind Kind) error {
-	return fmt.Errorf("unsupported optional extraction format %q; install/configure an optional converter in a future release or exclude this file", kind)
+	return fmt.Errorf("unsupported extraction format %q", kind)
 }
 
 func isHEIFBrand(brand string) bool {

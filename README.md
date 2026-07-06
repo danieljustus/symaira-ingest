@@ -11,7 +11,7 @@ Drop a scanned PDF, image, or text-like export into a folder → get a searchabl
 
 - **Standalone CLI + MCP server** — no external services required, runs entirely on your machine
 - **OCR for scanned documents** — extracts text from PDFs and images using Tesseract (`pdf`, `png`, `jpeg`, `tiff`, `webp`, plus `heic/heif` on macOS via `sips`)
-- **Text-like imports** — preserves plain text, Markdown, and CSV files without forcing them through OCR
+- **Text and structured imports** — preserves plain text, Markdown, CSV, HTML, RTF, DOCX, XLSX, ODT and EML without forcing them through OCR
 - **Markdown output** — produces clean, searchable Markdown with YAML frontmatter instead of proprietary formats
 - **MCP integration** — works as an MCP tool for AI-powered document processing workflows
 - **Classification rules** — automatically categorize documents based on content patterns
