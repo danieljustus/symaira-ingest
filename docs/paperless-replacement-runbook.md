@@ -112,38 +112,47 @@ symingest import paperless --status --json
 **Pass criteria (Gate C):**
 
 - `import-report.json` shows `failed: 0` and `imported + skipped == total`.
+- The import command exits `0`. A run with any failed document exits non-zero by design; do not continue to verification until a re-run or `--retry-failed` reaches `failed: 0`.
 
 ## 4. Post-import verification — Gate D
 
 The verifier is the completeness gate. It re-reads the Paperless source and
-compares it against the generated notes and archived originals, without
-downloading document content.
+compares it against the generated notes and archived originals. Use `--deep` for
+final cutover evidence: it re-downloads every selected Paperless original and
+compares its SHA-256 with the archived original.
 
 ```bash
-symingest import paperless --verify --json > verify-report.json
+symingest import paperless --verify --deep --json > verify-report.json
 echo "exit code: $?"
 ```
 
 The command exits non-zero if any document is missing, duplicated, missing its
-archived original, or has drifted metadata (tags, correspondent, document type,
-storage path, created date).
+archived original, has drifted metadata (tags, correspondent, document type,
+storage path, created date), or deep verification finds a source/archive hash
+mismatch.
 
 **Pass criteria (Gate D):**
 
 - Exit code `0`.
-- `verify-report.json`: `missing`, `duplicate`, `missing_archive`, and
-  `mismatches` are all empty, and `verified == source_documents`.
+- `verify-report.json`: `missing`, `duplicate`, `missing_archive`,
+  `hash_mismatch`, `source_hash_mismatch`, and `mismatches` are all empty;
+  `verified == source_documents`; with `--deep`, `deep_verified == source_documents`.
 
 If Gate D fails, the report names the affected document IDs and fields. Fix the
 cause (re-import the missing documents, correct metadata in Paperless, remove
 duplicate notes) and re-verify.
 
-## 5. Search validation with symseek — Gate E
+## 5. Vault/search validation with symseek — Gate E
 
-`symingest` writes Markdown + frontmatter and stops there; indexing and search
-belong to [`symseek`](https://github.com/danieljustus/symaira-seek). Point
-`symseek` at the vault and confirm that migrated documents are findable. Consult
-the `symseek` README for its exact CLI; the steps are:
+`validate-vault` catches structural vault problems and can also act as an OCR quality tripwire. Then `symseek` owns indexing/search.
+
+```bash
+symingest validate-vault --min-body-length 40 "$SYMINGEST_VAULT"
+```
+
+`--min-body-length` fails notes whose extracted Markdown body is empty or suspiciously short. Adjust the threshold if you intentionally imported very short text snippets.
+
+Point [`symseek`](https://github.com/danieljustus/symaira-seek) at the vault and confirm that migrated documents are findable. Consult the `symseek` README for its exact CLI; the steps are:
 
 1. Index the vault with `symseek`.
 2. Search for several documents you know exist (by title, correspondent, and a
@@ -152,12 +161,27 @@ the `symseek` README for its exact CLI; the steps are:
 
 **Pass criteria (Gate E):**
 
+- `validate-vault --min-body-length ...` exits `0`.
 - `symseek` indexes the vault without error.
 - Known documents are returned by search across title, metadata, and content.
 
 ## 6. Cutover decision
 
-Only when Gates A–E are **all** green:
+Run the strict cutover gate from the same evidence files:
+
+```bash
+symingest cutover-check \
+  --dry-run-report dryrun-report.json \
+  --import-report import-report.json \
+  --verify-report verify-report.json \
+  --vault "$SYMINGEST_VAULT" \
+  --min-documents <expected-paperless-count> \
+  --min-body-length 40
+```
+
+Use `--json` in automation. The command exits non-zero when any required gate is missing, any report contains failures, the vault fails validation, or document counts disagree.
+
+Only when Gates A–E **and** `cutover-check` are **all** green:
 
 - Announce the cutover and switch users/search to the vault + `symseek`.
 - Keep Paperless running in read-only mode for a defined grace period.
@@ -184,5 +208,6 @@ Because Paperless was never modified by this process, rollback is simply
 | C | Full import | `failed: 0`, `imported + skipped == total` |
 | D | Verifier | Exit `0`; no missing/duplicate/missing-archive/mismatch |
 | E | Search | `symseek` indexes the vault; known documents are findable |
+| F | Cutover check | `symingest cutover-check` exits `0`; all evidence reports agree |
 
-Paperless stays the source of truth until Gate E passes.
+Paperless stays the source of truth until Gate F passes.

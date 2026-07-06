@@ -64,6 +64,8 @@ public final class ConfigStore {
                     self.dbPath = val
                 case "archive_path":
                     self.archivePath = val
+                case "inbox":
+                    self.inboxPath = val
                 default:
                     break
                 }
@@ -85,6 +87,7 @@ public final class ConfigStore {
         lines.append("ocr_lang = \"\(ocrLang)\"")
         lines.append("db_path = \"\(dbPath)\"")
         lines.append("archive_path = \"\(archivePath)\"")
+        lines.append("inbox = \"\(inboxPath)\"")
         
         let fileManager = FileManager.default
         let dir = configURL.deletingLastPathComponent()

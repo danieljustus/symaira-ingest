@@ -127,9 +127,39 @@ Flags:
   --json              With --status or --verify, output the result as JSON
 ```
 
-`--report <path>` writes a stable JSON migration report for a dry-run or a real import: overall counts plus a per-document array (`id`, `status`, optional `reason`, and generated `vault_path`/`archive_path`), collected warnings, and — for a dry-run — the unsupported file types and unresolved metadata IDs from the audit. Like every other output it contains no document content, so it is safe to hand to a review step or a later UI.
+`--report <path>` writes a stable JSON migration report for a dry-run or a real import: overall counts plus a per-document array (`id`, `status`, optional `reason`, and generated `vault_path`/`archive_path`), collected warnings, and — for a dry-run — the unsupported file types and unresolved metadata IDs from the audit. Like every other output it contains no document content, so it is safe to hand to a review step or a later UI. A real import exits non-zero if any document fails; re-run the same command or use `--retry-failed` until `failed: 0`.
 
 After an import, `--verify` re-reads the Paperless source and the generated vault notes and reports any document that is missing, duplicated, missing its archived original, or whose metadata (tags, correspondent, document type, storage path, created date) drifted from the source. It prints a human summary, or a stable JSON report with `--json`, and exits non-zero when any discrepancy is found — suitable as an automated migration gate before Paperless is retired. Only IDs, field names, and paths appear in the output; document content never does.
+
+**Gate Paperless cutover:**
+
+```bash
+symingest cutover-check \
+  --dry-run-report dryrun-report.json \
+  --import-report import-report.json \
+  --verify-report verify-report.json \
+  --vault ~/vault \
+  --min-documents 6000 \
+  --min-body-length 40
+```
+
+For maximum source fidelity, run verification in deep mode before the cutover check:
+
+```bash
+symingest import paperless --verify --deep --json > verify-report.json
+```
+
+`--deep` re-downloads each selected Paperless original and compares its SHA-256 with the archived original in the vault. It is slower by design and belongs in the final migration gate, not every quick local check.
+
+`cutover-check` is intentionally strict: Paperless stays the source of truth unless the full dry-run, real import, verifier output, and vault validation are all clean and the document counts agree. Use `--json` for CI or app integration.
+
+For OCR quality checks, add a body-length gate to vault validation:
+
+```bash
+symingest validate-vault --min-body-length 40 --json ~/vault
+```
+
+This fails notes with empty or near-empty Markdown bodies, catching scanned documents where OCR technically ran but produced no useful text.
 
 `--since` filters on the document's Paperless *created* date (the date shown on the document), not the date it was added to Paperless. Use `--limit` or `--ids` to run a small, inspectable pilot before a full migration; both bounds apply to `--dry-run` and real imports alike, and a bounded run echoes the selected document IDs. Imports are resumable: a document already recorded as imported is skipped on a re-run, and a document that previously failed is retried automatically. With `--preserve-storage-paths`, each note is placed under a vault subdirectory derived from the document's Paperless storage path instead of the vault root; unsafe path segments are sanitized and collisions are resolved deterministically. Also available as the `import_paperless` MCP tool, which accepts the same options (`base_url`, `token`, `since`, `dry_run`, `limit`, `ids`, `preserve_storage_paths`, `report_path`, plus optional `vault_path`/`archive_path`/`db_path` overrides).
 

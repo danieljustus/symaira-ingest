@@ -56,6 +56,34 @@ func TestRun_UnknownCommand(t *testing.T) {
 	}
 }
 
+func TestRun_ImportPaperlessDeepRequiresVerify(t *testing.T) {
+	err := run([]string{"import", "paperless", "-base-url", "https://paperless.example", "-token", "test-token", "-deep"})
+	if err == nil || exitcodes.ExitCodeFromError(err) != exitcodes.ExitData {
+		t.Fatalf("expected data error for --deep without --verify, err=%v code=%d", err, exitcodes.ExitCodeFromError(err))
+	}
+	if !strings.Contains(err.Error(), "--deep is only valid with --verify") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRun_CutoverCheckJSONBlocksMissingEvidence(t *testing.T) {
+	var sb strings.Builder
+	oldStdout := stdout
+	stdout = &sb
+	defer func() { stdout = oldStdout }()
+
+	err := run([]string{"cutover-check", "-json"})
+	if err == nil || exitcodes.ExitCodeFromError(err) != exitcodes.ExitConflict {
+		t.Fatalf("expected conflict for missing evidence, err=%v code=%d", err, exitcodes.ExitCodeFromError(err))
+	}
+	out := sb.String()
+	for _, want := range []string{`"ready": false`, `"dry-run report"`, `"import report"`, `"verify report"`, `"vault validation"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("cutover JSON missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestRun_JobsEmpty(t *testing.T) {
 	tempDB := filepath.Join(t.TempDir(), "test.db")
 	var sb strings.Builder

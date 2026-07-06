@@ -75,8 +75,8 @@ public final class EngineManager {
         // Set Environment
         var env = ProcessInfo.processInfo.environment
         env["SYMINGEST_VAULT"] = config.vault
-        env["SYMINGEST_ARCHIVE"] = config.archivePath
-        env["SYMINGEST_DB"] = config.dbPath
+        env["SYMINGEST_ARCHIVE_PATH"] = config.archivePath
+        env["SYMINGEST_DB_PATH"] = config.dbPath
         env["SYMINGEST_OCR_LANG"] = config.ocrLang
         
         if let path = env["PATH"] {
