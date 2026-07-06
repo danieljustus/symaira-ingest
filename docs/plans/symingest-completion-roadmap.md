@@ -45,29 +45,30 @@ Do not tag releases, push branches, install persistent LaunchAgents, overwrite p
 
 **Goal:** make distribution boring and reproducible.
 
-- [ ] Split release workflow into clearly named sections or jobs:
-  - CLI/GoReleaser,
-  - Homebrew tap,
+- [x] Split release workflow into clearly named jobs:
+  - CLI/GoReleaser/Homebrew formula,
   - macOS GUI build,
   - signing/notarization,
   - DMG upload.
-- [ ] Reproduce and fix the failed v0.6.0 GUI/DMG release job.
-- [ ] Ensure XcodeGen build is deterministic on GitHub macOS runner.
-- [ ] Fix Swift 6 concurrency/build errors if still present:
-  - `Sendable` types,
-  - `@MainActor` boundaries,
-  - DaemonSupervisor integration,
-  - no `nonisolated(unsafe)` warnings.
-- [ ] Add CI check for Swift client typecheck or full build.
-- [ ] Keep CLI release independent enough that GUI failure cannot silently corrupt Homebrew release state.
-- [ ] Add Homebrew install smoke test:
+- [x] Reproduce and fix the failed v0.6.0 GUI/DMG release job locally:
+  - release log showed Swift 6 `Sendable` errors for `IngestJob`, `SwiftRule`, and `DependencyReport`,
+  - local Xcode 27 build now succeeds.
+- [x] Ensure XcodeGen build is deterministic enough for GitHub macOS runner:
+  - CI now generates the project and runs full `xcodebuild`, not just Go tests.
+- [x] Fix Swift 6 concurrency/build errors visible in the failed workflow:
+  - `Sendable` types fixed,
+  - current `EngineManager` has no `nonisolated deinit`/`nonisolated(unsafe)` issue.
+- [x] Add CI check for full Swift client build.
+- [x] Keep CLI release independent enough that GUI failure does not hide/corrupt CLI/Homebrew release state.
+- [x] Synchronize app visible version with CLI version via `MARKETING_VERSION`/Info.plist expansion.
+- [ ] Add Homebrew install smoke test on a real release artifact:
   - `brew install danieljustus/tap/symingest`,
   - `symingest version --json`,
   - `symingest doctor` with temp config.
 - [ ] Decide whether to add a Homebrew Cask for `Symingest.app`.
-- [ ] Verify signing/notarization/stapling for GUI DMG.
+- [ ] Verify Apple Developer ID signing/notarization/stapling for GUI DMG in GitHub release environment.
 
-**Exit gate:** release workflow green on a test tag or dry-run equivalent; DMG artifact builds and app launches.
+**Exit gate:** local dry-run equivalent passes: Go tests/vet/build, YAML parse, XcodeGen, full Xcode build, codesign verification, embedded CLI smoke, and basic DMG creation. Real tag/release remains gated behind explicit approval.
 
 ## Phase 2 — Core Ingest Feature Completeness
 

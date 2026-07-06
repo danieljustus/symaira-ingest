@@ -2,7 +2,7 @@ import Foundation
 import SymairaCLIRunner
 import SymairaToolKit
 
-public struct IngestJob: Codable, Identifiable {
+public struct IngestJob: Codable, Identifiable, Sendable {
     public let id: Int64
     public let documentId: Int64
     public let kind: String
@@ -26,7 +26,7 @@ public struct IngestJob: Codable, Identifiable {
     }
 }
 
-public struct SwiftRule: Codable, Identifiable {
+public struct SwiftRule: Codable, Identifiable, Sendable {
     public let id: Int64
     public let pattern: String
     public let kind: String
@@ -42,7 +42,7 @@ public struct SwiftRule: Codable, Identifiable {
     }
 }
 
-public struct DependencyReport {
+public struct DependencyReport: Sendable {
     public let symingestPath: String?
     public let tesseractPath: String?
     public let pdftoppmPath: String?

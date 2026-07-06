@@ -10,7 +10,8 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  go:
+    name: Go CLI
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -33,3 +34,37 @@ jobs:
 
       - name: Verify CLI help
         run: ./symingest --help
+
+  macos-client:
+    name: macOS client build
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.4'
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Build embedded symingest binary
+        run: go build -o symingest ./cmd/symingest
+
+      - name: Generate Xcode project
+        run: xcodegen --spec client/project.yml
+
+      - name: Resolve Swift package dependencies
+        run: |
+          xcodebuild -project client/Symingest.xcodeproj \
+            -scheme Symingest \
+            -resolvePackageDependencies
+
+      - name: Build macOS app
+        run: |
+          xcodebuild -project client/Symingest.xcodeproj \
+            -scheme Symingest \
+            -configuration Release \
+            -derivedDataPath build_dd \
+            -destination 'platform=macOS' \
+            build
