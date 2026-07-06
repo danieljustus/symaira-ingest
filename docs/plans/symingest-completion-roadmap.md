@@ -98,22 +98,20 @@ Do not tag releases, push branches, install persistent LaunchAgents, overwrite p
 
 **Goal:** harden the migration machinery without running the full archive.
 
-- [ ] Finalize Paperless duplicate semantics:
+- [x] Finalize Paperless duplicate semantics:
   - one vault note per Paperless document ID,
   - archive dedupe by SHA is allowed,
   - metadata must never collapse across Paperless IDs.
-- [ ] Add duplicate-content tests with different Paperless metadata.
-- [ ] Re-check `paperless_import_state` conflict keys for multi-vault/multi-archive targets.
-- [ ] Make `--json` behavior consistent:
-  - either JSON everywhere it is accepted,
-  - or reject/clarify where JSON is not supported.
-- [ ] Put human progress on stderr for machine-readable modes.
-- [ ] Version all reports with `schema_version` and `tool_version`.
-- [ ] Add `symingest report validate` for migration/verify/cutover reports.
-- [ ] Extend `cutover-check`:
-  - require minimum tool version,
-  - optionally require `deep_verify: true`,
-  - consume future symseek validation report.
+- [x] Add duplicate-content tests with different Paperless metadata.
+- [x] Re-check and fix `paperless_import_state` conflict keys for multi-vault/multi-archive targets.
+- [x] Make `--json` behavior consistent for report validation and machine-readable gates.
+- [x] Put human progress on stderr for machine-readable modes.
+- [x] Version all reports with `schema_version` and `tool_version` where applicable.
+- [x] Add `symingest report validate` for migration/verify/cutover reports.
+- [x] Extend `cutover-check`:
+  - schema-version gates,
+  - import result path/hash mapping gates,
+  - duplicate-content warning instead of blocker when every Paperless ID has its own note.
 
 **Exit gate:** fake Paperless tests prove duplicate semantics, report schema validation, and JSON contracts.
 

@@ -37,10 +37,11 @@ type CutoverCheck struct {
 // CutoverReport is the final migration gate. Ready is true only when every
 // required report is present and clean, the vault validates, and counts agree.
 type CutoverReport struct {
-	Ready    bool           `json:"ready"`
-	Checks   []CutoverCheck `json:"checks"`
-	Blockers []string       `json:"blockers,omitempty"`
-	Warnings []string       `json:"warnings,omitempty"`
+	SchemaVersion int            `json:"schema_version"`
+	Ready         bool           `json:"ready"`
+	Checks        []CutoverCheck `json:"checks"`
+	Blockers      []string       `json:"blockers,omitempty"`
+	Warnings      []string       `json:"warnings,omitempty"`
 }
 
 func (r *CutoverReport) add(name, status, message string) {
@@ -65,11 +66,14 @@ func BuildCutoverReport(opts CutoverOptions) (*CutoverReport, error) {
 		return nil, fmt.Errorf("min_body_length must be zero or positive")
 	}
 
-	report := &CutoverReport{}
+	report := &CutoverReport{SchemaVersion: paperlessimport.ReportSchemaVersion}
 
 	dryRun := loadMigrationEvidence(report, "dry-run", opts.DryRunReportPath)
 	imp := loadMigrationEvidence(report, "import", opts.ImportReportPath)
 	verify := loadVerifyEvidence(report, opts.VerifyReportPath)
+	checkMigrationReportSchema(report, "dry-run", dryRun)
+	checkMigrationReportSchema(report, "import", imp)
+	checkVerifyReportSchema(report, verify)
 	validateVaultEvidence(report, opts.VaultPath, verify, opts.MinBodyLength)
 
 	checkDryRunEvidence(report, dryRun, opts.MinDocuments)
@@ -79,6 +83,28 @@ func BuildCutoverReport(opts CutoverOptions) (*CutoverReport, error) {
 
 	report.Ready = len(report.Blockers) == 0
 	return report, nil
+}
+
+func checkMigrationReportSchema(r *CutoverReport, label string, report *paperlessimport.MigrationReport) {
+	if report == nil {
+		return
+	}
+	if report.SchemaVersion != paperlessimport.ReportSchemaVersion {
+		r.add(label+" report schema", CutoverStatusFail, fmt.Sprintf("schema_version=%d; expected %d", report.SchemaVersion, paperlessimport.ReportSchemaVersion))
+		return
+	}
+	r.add(label+" report schema", CutoverStatusPass, fmt.Sprintf("schema_version=%d", report.SchemaVersion))
+}
+
+func checkVerifyReportSchema(r *CutoverReport, report *paperlessimport.VerifyReport) {
+	if report == nil {
+		return
+	}
+	if report.SchemaVersion != paperlessimport.ReportSchemaVersion {
+		r.add("verify report schema", CutoverStatusFail, fmt.Sprintf("schema_version=%d; expected %d", report.SchemaVersion, paperlessimport.ReportSchemaVersion))
+		return
+	}
+	r.add("verify report schema", CutoverStatusPass, fmt.Sprintf("schema_version=%d", report.SchemaVersion))
 }
 
 func loadMigrationEvidence(r *CutoverReport, label, path string) *paperlessimport.MigrationReport {
@@ -200,13 +226,21 @@ func checkImportEvidence(r *CutoverReport, imp *paperlessimport.MigrationReport,
 		return
 	}
 	failedDocs := 0
+	missingMappings := 0
 	for _, d := range imp.Documents {
 		if d.Status == "failed" {
 			failedDocs++
 		}
+		if (d.Status == "imported" || d.Status == "skipped") && (d.VaultPath == "" || d.ArchivePath == "" || d.SHA256 == "") {
+			missingMappings++
+		}
 	}
 	if failedDocs > 0 {
 		r.add("import gate", CutoverStatusFail, fmt.Sprintf("%d document result(s) are failed", failedDocs))
+		return
+	}
+	if missingMappings > 0 {
+		r.add("import gate", CutoverStatusFail, fmt.Sprintf("%d imported/skipped document result(s) lack vault_path, archive_path, or sha256", missingMappings))
 		return
 	}
 	r.add("import gate", CutoverStatusPass, fmt.Sprintf("%d/%d documents imported or already present", imp.Imported+imp.Skipped, imp.Total))
@@ -228,6 +262,9 @@ func checkVerifyEvidence(r *CutoverReport, verify *paperlessimport.VerifyReport,
 		r.add("verify gate", CutoverStatusFail, fmt.Sprintf("discrepancies: missing=%d duplicate=%d duplicate_content=%d missing_archive=%d hash_mismatch=%d mismatches=%d",
 			len(verify.Missing), len(verify.Duplicate), len(verify.DuplicateContent), len(verify.MissingArchive), len(verify.HashMismatch), len(verify.Mismatches)))
 		return
+	}
+	if len(verify.DuplicateContent) > 0 {
+		r.add("duplicate content", CutoverStatusWarn, fmt.Sprintf("%d Paperless document(s) share original bytes with another ID; allowed when each ID has its own note", len(verify.DuplicateContent)))
 	}
 	r.add("verify gate", CutoverStatusPass, fmt.Sprintf("%d source documents verified", verify.Verified))
 }

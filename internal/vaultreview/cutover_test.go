@@ -37,9 +37,9 @@ func validCutoverFixture(t *testing.T) (dir, dryRunPath, importPath, verifyPath,
 	testNote(t, vault, "one.md", archivePath, sum, 1, []string{"inbox"})
 
 	doc := paperlessimport.DocumentResult{ID: 1, Status: "imported", MIME: "text/plain", ExpectedExtension: ".txt", VaultPath: filepath.Join(vault, "one.md"), ArchivePath: archivePath, SHA256: sum}
-	dryRunPath = writeJSON(t, filepath.Join(dir, "dry-run.json"), &paperlessimport.MigrationReport{Mode: "dry-run", DryRun: true, Total: 1, Skipped: 1, Documents: []paperlessimport.DocumentResult{{ID: 1, Status: "would-import", MIME: "text/plain", ExpectedExtension: ".txt"}}})
-	importPath = writeJSON(t, filepath.Join(dir, "import.json"), &paperlessimport.MigrationReport{Mode: "import", Total: 1, Imported: 1, Documents: []paperlessimport.DocumentResult{doc}})
-	verifyPath = writeJSON(t, filepath.Join(dir, "verify.json"), &paperlessimport.VerifyReport{Mode: "verify", SourceDocuments: 1, VaultNotes: 1, Verified: 1})
+	dryRunPath = writeJSON(t, filepath.Join(dir, "dry-run.json"), &paperlessimport.MigrationReport{SchemaVersion: paperlessimport.ReportSchemaVersion, Mode: "dry-run", DryRun: true, Total: 1, Skipped: 1, Documents: []paperlessimport.DocumentResult{{ID: 1, Status: "would-import", MIME: "text/plain", ExpectedExtension: ".txt"}}})
+	importPath = writeJSON(t, filepath.Join(dir, "import.json"), &paperlessimport.MigrationReport{SchemaVersion: paperlessimport.ReportSchemaVersion, Mode: "import", Total: 1, Imported: 1, Documents: []paperlessimport.DocumentResult{doc}})
+	verifyPath = writeJSON(t, filepath.Join(dir, "verify.json"), &paperlessimport.VerifyReport{SchemaVersion: paperlessimport.ReportSchemaVersion, Mode: "verify", SourceDocuments: 1, VaultNotes: 1, Verified: 1})
 	return dir, dryRunPath, importPath, verifyPath, vault
 }
 
@@ -67,9 +67,9 @@ func TestBuildCutoverReportReady(t *testing.T) {
 
 func TestBuildCutoverReportBlocksUnsafeEvidence(t *testing.T) {
 	dir, dryRunPath, importPath, verifyPath, vault := validCutoverFixture(t)
-	writeJSON(t, dryRunPath, &paperlessimport.MigrationReport{Mode: "dry-run", DryRun: true, Total: 1, Failed: 0, UnsupportedFileTypes: map[string]int{"application/x-unknown": 1}, Documents: []paperlessimport.DocumentResult{{ID: 1, Status: "would-import"}}})
-	writeJSON(t, importPath, &paperlessimport.MigrationReport{Mode: "dry-run", DryRun: true, Total: 1, Skipped: 1})
-	writeJSON(t, verifyPath, &paperlessimport.VerifyReport{Mode: "verify", SourceDocuments: 1, VaultNotes: 1, Verified: 0, Missing: []int{1}})
+	writeJSON(t, dryRunPath, &paperlessimport.MigrationReport{SchemaVersion: paperlessimport.ReportSchemaVersion, Mode: "dry-run", DryRun: true, Total: 1, Failed: 0, UnsupportedFileTypes: map[string]int{"application/x-unknown": 1}, Documents: []paperlessimport.DocumentResult{{ID: 1, Status: "would-import"}}})
+	writeJSON(t, importPath, &paperlessimport.MigrationReport{SchemaVersion: paperlessimport.ReportSchemaVersion, Mode: "dry-run", DryRun: true, Total: 1, Skipped: 1})
+	writeJSON(t, verifyPath, &paperlessimport.VerifyReport{SchemaVersion: paperlessimport.ReportSchemaVersion, Mode: "verify", SourceDocuments: 1, VaultNotes: 1, Verified: 0, Missing: []int{1}})
 
 	report, err := BuildCutoverReport(CutoverOptions{DryRunReportPath: dryRunPath, ImportReportPath: importPath, VerifyReportPath: verifyPath, VaultPath: vault, MinDocuments: 1})
 	if err != nil {

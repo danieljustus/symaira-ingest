@@ -467,3 +467,59 @@ func TestPaperlessImportState_UpsertAndStatus(t *testing.T) {
 		t.Fatalf("expected only document 2 with failed status, got %+v", failedOnly)
 	}
 }
+
+func TestPaperlessImportState_TargetsAreIndependent(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+
+	const baseURL = "https://paperless.local"
+	vaultA := filepath.Join(dir, "vault-a")
+	vaultB := filepath.Join(dir, "vault-b")
+	archive := filepath.Join(dir, "archive")
+
+	if err := s.UpsertPaperlessImportStateForTarget(ctx, baseURL, vaultA, archive, 42, "imported", "", filepath.Join(vaultA, "doc.md"), filepath.Join(archive, "a.txt"), "sha-a"); err != nil {
+		t.Fatalf("upsert target A: %v", err)
+	}
+	if err := s.UpsertPaperlessImportStateForTarget(ctx, baseURL, vaultB, archive, 42, "failed", "ocr failed", "", "", ""); err != nil {
+		t.Fatalf("upsert target B: %v", err)
+	}
+
+	statusA, foundA, err := s.PaperlessImportStatusForTarget(ctx, baseURL, vaultA, archive, 42)
+	if err != nil {
+		t.Fatalf("status target A: %v", err)
+	}
+	if !foundA || statusA != "imported" {
+		t.Fatalf("target A status = %q found=%v, want imported/true", statusA, foundA)
+	}
+	statusB, foundB, err := s.PaperlessImportStatusForTarget(ctx, baseURL, vaultB, archive, 42)
+	if err != nil {
+		t.Fatalf("status target B: %v", err)
+	}
+	if !foundB || statusB != "failed" {
+		t.Fatalf("target B status = %q found=%v, want failed/true", statusB, foundB)
+	}
+	if status, found, err := s.PaperlessImportStatusForTarget(ctx, baseURL, filepath.Join(dir, "other"), archive, 42); err != nil || found || status != "" {
+		t.Fatalf("other target status = %q found=%v err=%v, want not found", status, found, err)
+	}
+
+	stateA, err := s.PaperlessImportStateForTarget(ctx, baseURL, vaultA, archive, 42)
+	if err != nil {
+		t.Fatalf("state target A: %v", err)
+	}
+	if stateA.VaultPath != filepath.Join(vaultA, "doc.md") || stateA.SHA256 != "sha-a" {
+		t.Fatalf("unexpected target A state: %+v", stateA)
+	}
+
+	all, err := s.ListPaperlessImportState(ctx, baseURL, "")
+	if err != nil {
+		t.Fatalf("ListPaperlessImportState: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("expected 2 target-specific rows, got %d: %+v", len(all), all)
+	}
+}

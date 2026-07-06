@@ -15,6 +15,7 @@ import (
 	"github.com/danieljustus/symaira-corekit/exitcodes"
 
 	"github.com/danieljustus/symaira-ingest/internal/config"
+	"github.com/danieljustus/symaira-ingest/internal/paperlessimport"
 	"github.com/danieljustus/symaira-ingest/internal/store"
 )
 
@@ -92,6 +93,39 @@ func TestRun_CutoverCheckJSONBlocksMissingEvidence(t *testing.T) {
 	for _, want := range []string{`"ready": false`, `"dry-run report"`, `"import report"`, `"verify report"`, `"vault validation"`} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("cutover JSON missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRun_ReportValidateJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "migration.json")
+	data, err := json.Marshal(&paperlessimport.MigrationReport{
+		SchemaVersion: paperlessimport.ReportSchemaVersion,
+		ToolVersion:   "test-version",
+		Mode:          "import",
+		Total:         1,
+		Imported:      1,
+		Documents:     []paperlessimport.DocumentResult{{ID: 1, Status: "imported"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var sb strings.Builder
+	oldStdout := stdout
+	stdout = &sb
+	defer func() { stdout = oldStdout }()
+
+	if err := run([]string{"report", "-json", "validate", path}); err != nil {
+		t.Fatalf("run(report validate): %v", err)
+	}
+	out := sb.String()
+	for _, want := range []string{`"kind": "migration"`, `"valid": true`, `"schema_version": 1`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("report validation JSON missing %q:\n%s", want, out)
 		}
 	}
 }

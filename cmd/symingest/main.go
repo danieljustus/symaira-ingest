@@ -94,6 +94,8 @@ func run(args []string) error {
 		return runApplyCorrections(args[1:])
 	case "review-report":
 		return runReviewReport(args[1:])
+	case "report":
+		return runReport(args[1:])
 	case "cutover-check":
 		return runCutoverCheck(args[1:])
 	case "mcp":
@@ -121,6 +123,7 @@ Commands:
   bulk-update         Safely update multiple notes selected by frontmatter
   apply-corrections   Apply YAML corrections keyed by paperless_id
   review-report       Generate a human-reviewable migration report
+  report              Validate machine-readable migration reports
   cutover-check       Gate whether Paperless can stop being source of truth
   jobs                List ingestion jobs in the queue
   retry <id>          Retry a failed job by ID
@@ -404,7 +407,7 @@ func runImport(args []string) error {
 	}
 
 	if *verify {
-		report, err := paperlessimport.Verify(ctx, paperlessimport.Options{BaseURL: *baseURL, Token: *token, Since: since, Limit: *limit, IDs: ids, DeepVerify: *deepVerify}, cfg.vault, st)
+		report, err := paperlessimport.Verify(ctx, paperlessimport.Options{BaseURL: *baseURL, Token: *token, Since: since, Limit: *limit, IDs: ids, DeepVerify: *deepVerify, TargetVault: cfg.vault, TargetArchive: cfg.archive}, cfg.vault, st)
 		if err != nil {
 			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
 				"verification failed")
@@ -1240,6 +1243,103 @@ func runReviewReport(args []string) error {
 		fmt.Fprintf(stdout, "document %d: %s mime=%s vault=%s archive=%s error=%s warnings=%d\n", d.ID, d.Status, d.MIME, d.VaultPath, d.ArchivePath, d.Error, len(d.Warnings))
 	}
 	return nil
+}
+
+type reportValidationResult struct {
+	Path          string   `json:"path"`
+	Kind          string   `json:"kind"`
+	SchemaVersion int      `json:"schema_version"`
+	ToolVersion   string   `json:"tool_version,omitempty"`
+	Valid         bool     `json:"valid"`
+	Errors        []string `json:"errors,omitempty"`
+}
+
+func runReport(args []string) error {
+	fs := flag.NewFlagSet("report", flag.ContinueOnError)
+	jsonFlag := fs.Bool("json", false, "Output validation result as JSON")
+	configureUsage(fs, "report [flags] validate <report.json>", "Validate a machine-readable migration, verify, or cutover JSON report.")
+	help, err := parseFlags(fs, args, "invalid report flags")
+	if help || err != nil {
+		return err
+	}
+	remaining := fs.Args()
+	if len(remaining) != 2 || remaining[0] != "validate" {
+		fs.Usage()
+		return nil
+	}
+	result := validateReportFile(remaining[1])
+	if *jsonFlag {
+		data, err := json.MarshalIndent(result, "", "  ")
+		if err != nil {
+			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal, "failed to marshal report validation")
+		}
+		fmt.Fprintln(stdout, string(data))
+	} else if result.Valid {
+		fmt.Fprintf(stdout, "report valid: %s (%s schema_version=%d)\n", result.Path, result.Kind, result.SchemaVersion)
+	} else {
+		fmt.Fprintf(stdout, "report invalid: %s\n", result.Path)
+		for _, e := range result.Errors {
+			fmt.Fprintf(stdout, "- %s\n", e)
+		}
+	}
+	if !result.Valid {
+		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation, "report validation failed")
+	}
+	return nil
+}
+
+func validateReportFile(path string) reportValidationResult {
+	result := reportValidationResult{Path: path, Valid: true}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		result.Valid = false
+		result.Errors = append(result.Errors, err.Error())
+		return result
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		result.Valid = false
+		result.Errors = append(result.Errors, "invalid JSON: "+err.Error())
+		return result
+	}
+	if v, ok := raw["schema_version"].(float64); ok {
+		result.SchemaVersion = int(v)
+	}
+	if v, ok := raw["tool_version"].(string); ok {
+		result.ToolVersion = v
+	}
+	switch {
+	case raw["ready"] != nil && raw["checks"] != nil:
+		result.Kind = "cutover"
+		var report vaultreview.CutoverReport
+		if err := json.Unmarshal(data, &report); err != nil {
+			result.Errors = append(result.Errors, "invalid cutover report: "+err.Error())
+		}
+	case raw["source_documents"] != nil && raw["verified"] != nil:
+		result.Kind = "verify"
+		var report paperlessimport.VerifyReport
+		if err := json.Unmarshal(data, &report); err != nil {
+			result.Errors = append(result.Errors, "invalid verify report: "+err.Error())
+		}
+	case raw["documents"] != nil && raw["total"] != nil:
+		result.Kind = "migration"
+		var report paperlessimport.MigrationReport
+		if err := json.Unmarshal(data, &report); err != nil {
+			result.Errors = append(result.Errors, "invalid migration report: "+err.Error())
+		}
+	default:
+		result.Errors = append(result.Errors, "unknown report kind")
+	}
+	if result.SchemaVersion != paperlessimport.ReportSchemaVersion {
+		result.Errors = append(result.Errors, fmt.Sprintf("schema_version=%d; expected %d", result.SchemaVersion, paperlessimport.ReportSchemaVersion))
+	}
+	if result.Kind != "cutover" && result.ToolVersion == "" {
+		result.Errors = append(result.Errors, "missing tool_version")
+	}
+	if len(result.Errors) > 0 {
+		result.Valid = false
+	}
+	return result
 }
 
 func runCutoverCheck(args []string) error {

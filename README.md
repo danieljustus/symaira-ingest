@@ -127,7 +127,7 @@ Flags:
   --json              With --status or --verify, output the result as JSON
 ```
 
-`--report <path>` writes a stable JSON migration report for a dry-run or a real import: overall counts plus a per-document array (`id`, `status`, optional `reason`, and generated `vault_path`/`archive_path`), collected warnings, and — for a dry-run — the unsupported file types and unresolved metadata IDs from the audit. Like every other output it contains no document content, so it is safe to hand to a review step or a later UI. A real import exits non-zero if any document fails; re-run the same command or use `--retry-failed` until `failed: 0`.
+`--report <path>` writes a stable JSON migration report for a dry-run or a real import: `schema_version`, `tool_version`, overall counts plus a per-document array (`id`, `status`, optional `reason`, and generated `vault_path`/`archive_path`/`sha256`), collected warnings, and — for a dry-run — the unsupported file types and unresolved metadata IDs from the audit. Like every other output it contains no document content, so it is safe to hand to a review step or a later UI. A real import exits non-zero if any document fails; re-run the same command or use `--retry-failed` until `failed: 0`.
 
 After an import, `--verify` re-reads the Paperless source and the generated vault notes and reports any document that is missing, duplicated, missing its archived original, or whose metadata (tags, correspondent, document type, storage path, created date) drifted from the source. It prints a human summary, or a stable JSON report with `--json`, and exits non-zero when any discrepancy is found — suitable as an automated migration gate before Paperless is retired. Only IDs, field names, and paths appear in the output; document content never does.
 
@@ -152,6 +152,13 @@ symingest import paperless --verify --deep --json > verify-report.json
 `--deep` re-downloads each selected Paperless original and compares its SHA-256 with the archived original in the vault. It is slower by design and belongs in the final migration gate, not every quick local check.
 
 `cutover-check` is intentionally strict: Paperless stays the source of truth unless the full dry-run, real import, verifier output, and vault validation are all clean and the document counts agree. Use `--json` for CI or app integration.
+
+Validate machine-readable report files before using them as cutover evidence:
+
+```bash
+symingest report validate dryrun-report.json
+symingest report --json validate verify-report.json
+```
 
 For OCR quality checks, add a body-length gate to vault validation:
 

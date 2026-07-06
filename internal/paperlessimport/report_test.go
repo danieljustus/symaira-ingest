@@ -56,6 +56,9 @@ func TestBuildMigrationReport_RealImport(t *testing.T) {
 	}
 
 	report := stats.BuildMigrationReport(false)
+	if report.SchemaVersion != ReportSchemaVersion {
+		t.Fatalf("schema_version = %d, want %d", report.SchemaVersion, ReportSchemaVersion)
+	}
 	if report.DryRun {
 		t.Error("report.DryRun = true, want false")
 	}
