@@ -3,7 +3,7 @@ module github.com/danieljustus/symaira-ingest
 go 1.26.4
 
 require (
-	github.com/danieljustus/symaira-corekit v0.2.1
+	github.com/danieljustus/symaira-corekit v0.3.0
 	github.com/fsnotify/fsnotify v1.10.1
 	golang.org/x/sync v0.21.0
 	gopkg.in/yaml.v3 v3.0.1
