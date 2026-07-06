@@ -1,4 +1,6 @@
 import Foundation
+import SymairaCLIRunner
+import SymairaToolKit
 
 public struct IngestJob: Codable, Identifiable {
     public let id: Int64
@@ -70,60 +72,22 @@ public struct CLIConfigSnapshot: Sendable {
 
 public final class CLIClient: Sendable {
     public static let shared = CLIClient()
+
+    // OCR runs over large PDFs can take a while; keep the timeout generous.
+    private let runner = CLIRunner(defaultTimeout: 600)
+
     private init() {}
 
     public func locateBinary(customPath: String) -> URL? {
-        if !customPath.isEmpty {
-            let url = URL(fileURLWithPath: customPath)
-            if FileManager.default.isExecutableFile(atPath: url.path) {
-                return url
-            }
-        }
-
-        // Bundle resource
-        if let url = Bundle.main.url(forResource: "symingest", withExtension: nil) {
-            return url
-        }
-
-        // Standard paths
-        let standardPaths = [
-            "/opt/homebrew/bin/symingest",
-            "/usr/local/bin/symingest",
-            "/usr/bin/symingest"
-        ]
-        for path in standardPaths {
-            if FileManager.default.isExecutableFile(atPath: path) {
-                return URL(fileURLWithPath: path)
-            }
-        }
-
-        // PATH search
-        if let path = searchPathFor("symingest") {
-            return URL(fileURLWithPath: path)
-        }
-
-        return nil
+        let override = customPath.isEmpty ? nil : URL(fileURLWithPath: customPath)
+        return BinaryLocator(userOverride: override).locate("symingest")?.url
     }
 
+    /// Shared discovery (bundle → exe dir → PATH → Homebrew prefixes) —
+    /// also used for the external helpers (tesseract, pdftoppm, sips).
+    /// Replaces the former `/usr/bin/which` subprocess.
     private func searchPathFor(_ executable: String) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        process.arguments = [executable]
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !path.isEmpty, !path.contains("not found") {
-                return path
-            }
-        } catch {}
-        return nil
+        BinaryLocator().locate(executable)?.url.path
     }
 
     public func checkDependencies(customPath: String) async -> DependencyReport {
@@ -147,38 +111,19 @@ public final class CLIClient: Sendable {
             throw NSError(domain: "symingest", code: 404, userInfo: [NSLocalizedDescriptionKey: "symingest binary not found"])
         }
 
-        let process = Process()
-        process.executableURL = binary
-        process.arguments = args
-
-        // Environment variables matching CLI/XDG
-        var env = ProcessInfo.processInfo.environment
+        // Config env vars (SYMINGEST_*) merged over the PATH-augmented
+        // environment by CLIRunner.
+        var env: [String: String] = [:]
         applyConfigEnvironment(snapshot, to: &env)
         environment.forEach { key, value in env[key] = value }
 
-        // Add homebrew paths to process PATH if missing
-        if let path = env["PATH"] {
-            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:\(path)"
-        } else {
-            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-        }
-        process.environment = env
-
-        let outPipe = Pipe()
-        let errPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = errPipe
-
-        try process.run()
-        process.waitUntilExit()
-
-        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-
-        let outStr = String(data: outData, encoding: .utf8) ?? ""
-        let errStr = String(data: errData, encoding: .utf8) ?? ""
-
-        return (outStr, errStr)
+        // Pre-existing contract: non-zero exits are NOT thrown here —
+        // callers inspect stdout/stderr themselves.
+        let result = try await runner.run(binary, arguments: args, environment: env)
+        return (
+            String(data: result.stdout, encoding: .utf8) ?? "",
+            String(data: result.stderr, encoding: .utf8) ?? ""
+        )
     }
 
     // MARK: - Business Operations

@@ -85,3 +85,19 @@ No Makefile. Build and test are plain `go` commands.
 - **NEVER** echo secrets in chat or logs
 - **NEVER** commit `replace ../symaira-corekit` in `go.mod`
 - **DO NOT** add Cloud Pro, billing, or tenant-management code — this is a public repo
+
+## macOS Client (`client/`)
+
+- SwiftUI app (XcodeGen: `cd client && xcodegen generate`, scheme
+  `Symingest`; local builds need `DEVELOPER_DIR` pointing at Xcode).
+- Depends on the shared **symaira-appkit** package, pinned exact (`0.1.1`)
+  in `client/project.yml`: SymairaTheme (via `ThemeBridge.swift`; the
+  ingest-specific AmbientBackground/24px-BlueprintGrid stay local),
+  SymairaCLIRunner (subprocess execution with SYMINGEST_* env injection)
+  and SymairaToolKit (binary discovery incl. tesseract/pdftoppm/sips —
+  replaces the former `/usr/bin/which` subprocess).
+- `EngineManager` (watch-mode daemon supervisor) stays app-local — third
+  requirements donor for a future SymairaDaemonKit (appkit v0.2).
+- Do not reintroduce app-local Theme/Process-runner code; extend
+  symaira-appkit instead. Migration context: see
+  `../docs/symaira-appkit-migration.md`.
