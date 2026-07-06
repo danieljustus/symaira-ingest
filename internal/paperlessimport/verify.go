@@ -35,23 +35,26 @@ type VerifyMismatch struct {
 // means the vault faithfully represents the Paperless archive. It never
 // contains document content, only IDs, field names, and paths.
 type VerifyReport struct {
-	RunID            string           `json:"run_id,omitempty"`
-	ToolVersion      string           `json:"tool_version,omitempty"`
-	Source           string           `json:"source,omitempty"`
-	SourceURL        string           `json:"source_url,omitempty"`
-	StartedAt        time.Time        `json:"started_at,omitempty"`
-	FinishedAt       time.Time        `json:"finished_at,omitempty"`
-	DurationSeconds  float64          `json:"duration_seconds,omitempty"`
-	Mode             string           `json:"mode,omitempty"`
-	SourceDocuments  int              `json:"source_documents"`
-	VaultNotes       int              `json:"vault_notes"`
-	Verified         int              `json:"verified"`
-	Missing          []int            `json:"missing,omitempty"`           // source doc IDs with no note
-	Duplicate        []int            `json:"duplicate,omitempty"`         // doc IDs with more than one note
-	DuplicateContent []int            `json:"duplicate_content,omitempty"` // doc IDs whose content is a duplicate of another Paperless ID
-	MissingArchive   []int            `json:"missing_archive,omitempty"`   // note exists but the archived original is gone
-	HashMismatch     []int            `json:"hash_mismatch,omitempty"`     // archive hash does not match stored hash
-	Mismatches       []VerifyMismatch `json:"mismatches,omitempty"`        // metadata differences
+	RunID              string           `json:"run_id,omitempty"`
+	ToolVersion        string           `json:"tool_version,omitempty"`
+	Source             string           `json:"source,omitempty"`
+	SourceURL          string           `json:"source_url,omitempty"`
+	StartedAt          time.Time        `json:"started_at,omitempty"`
+	FinishedAt         time.Time        `json:"finished_at,omitempty"`
+	DurationSeconds    float64          `json:"duration_seconds,omitempty"`
+	Mode               string           `json:"mode,omitempty"`
+	SourceDocuments    int              `json:"source_documents"`
+	VaultNotes         int              `json:"vault_notes"`
+	Verified           int              `json:"verified"`
+	DeepVerify         bool             `json:"deep_verify,omitempty"`
+	DeepVerified       int              `json:"deep_verified,omitempty"`
+	Missing            []int            `json:"missing,omitempty"`              // source doc IDs with no note
+	Duplicate          []int            `json:"duplicate,omitempty"`            // doc IDs with more than one note
+	DuplicateContent   []int            `json:"duplicate_content,omitempty"`    // doc IDs whose content is a duplicate of another Paperless ID
+	MissingArchive     []int            `json:"missing_archive,omitempty"`      // note exists but the archived original is gone
+	HashMismatch       []int            `json:"hash_mismatch,omitempty"`        // archive hash does not match stored hash
+	SourceHashMismatch []int            `json:"source_hash_mismatch,omitempty"` // archived original differs from Paperless download in deep verify
+	Mismatches         []VerifyMismatch `json:"mismatches,omitempty"`           // metadata differences
 }
 
 // Complete reports whether the vault faithfully represents the Paperless
@@ -59,15 +62,16 @@ type VerifyReport struct {
 // documents. Callers use it to decide the process exit code.
 func (r *VerifyReport) Complete() bool {
 	return len(r.Missing) == 0 && len(r.Duplicate) == 0 && len(r.DuplicateContent) == 0 &&
-		len(r.MissingArchive) == 0 && len(r.HashMismatch) == 0 && len(r.Mismatches) == 0
+		len(r.MissingArchive) == 0 && len(r.HashMismatch) == 0 && len(r.SourceHashMismatch) == 0 && len(r.Mismatches) == 0
 }
 
 // Verify compares every Paperless source document (bounded by opts.Since/
 // opts.Limit/opts.IDs when set) against the stored import state or the notes
-// under vault and the archived originals they reference. It never downloads
-// document content; the comparison uses metadata only. If st is non-nil, Verify
-// uses the durable Paperless import state table as the source of truth for
-// mappings and also checks the vault notes.
+// under vault and the archived originals they reference. By default it does
+// not download document content; with opts.DeepVerify it re-downloads each
+// selected Paperless original and compares SHA-256 against the archived file.
+// If st is non-nil, Verify uses the durable Paperless import state table as
+// the source of truth for mappings and also checks the vault notes.
 func Verify(ctx context.Context, opts Options, vault string, st *store.Store) (*VerifyReport, error) {
 	started := time.Now().UTC()
 	client := paperless.NewClient(opts.BaseURL, opts.Token)
@@ -93,6 +97,7 @@ func Verify(ctx context.Context, opts Options, vault string, st *store.Store) (*
 		SourceURL:       opts.BaseURL,
 		StartedAt:       started,
 		Mode:            "verify",
+		DeepVerify:      opts.DeepVerify,
 		SourceDocuments: len(docs),
 	}
 	defer func() {
@@ -159,6 +164,24 @@ func Verify(ctx context.Context, opts Options, vault string, st *store.Store) (*
 				docOK = false
 			}
 		}
+		if opts.DeepVerify && note.ArchivePath != "" && fileExists(note.ArchivePath) {
+			localHash, err := fileSHA256(note.ArchivePath)
+			if err != nil {
+				report.HashMismatch = append(report.HashMismatch, doc.ID)
+				docOK = false
+			} else {
+				remoteHash, err := paperlessDownloadSHA256(ctx, client, doc.ID)
+				if err != nil {
+					report.Mismatches = append(report.Mismatches, VerifyMismatch{doc.ID, "source_download", "readable", err.Error()})
+					docOK = false
+				} else if !strings.EqualFold(localHash, remoteHash) {
+					report.SourceHashMismatch = append(report.SourceHashMismatch, doc.ID)
+					docOK = false
+				} else {
+					report.DeepVerified++
+				}
+			}
+		}
 
 		if mm := compareMetadata(doc, note, lu); len(mm) > 0 {
 			report.Mismatches = append(report.Mismatches, mm...)
@@ -177,6 +200,7 @@ func Verify(ctx context.Context, opts Options, vault string, st *store.Store) (*
 	sort.Ints(report.DuplicateContent)
 	sort.Ints(report.MissingArchive)
 	sort.Ints(report.HashMismatch)
+	sort.Ints(report.SourceHashMismatch)
 	sort.Slice(report.Mismatches, func(i, j int) bool {
 		if report.Mismatches[i].DocumentID != report.Mismatches[j].DocumentID {
 			return report.Mismatches[i].DocumentID < report.Mismatches[j].DocumentID
@@ -184,6 +208,14 @@ func Verify(ctx context.Context, opts Options, vault string, st *store.Store) (*
 		return report.Mismatches[i].Field < report.Mismatches[j].Field
 	})
 	return report, nil
+}
+
+func paperlessDownloadSHA256(ctx context.Context, client *paperless.Client, id int) (string, error) {
+	h := sha256.New()
+	if err := client.DownloadDocument(ctx, id, h); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func paperlessImportState(ctx context.Context, st *store.Store, baseURL string, id int) (*store.PaperlessImportState, error) {

@@ -23,6 +23,7 @@ import (
 type verifyDoc struct {
 	id            int
 	title         string
+	download      string
 	correspondent map[string]any
 	tags          []map[string]any
 }
@@ -57,7 +58,18 @@ func newVerifyServer(t *testing.T, docs []verifyDoc) *httptest.Server {
 				"count": len(results), "results": results, "next": nil,
 			})
 		case strings.HasPrefix(r.URL.Path, "/api/documents/") && strings.HasSuffix(r.URL.Path, "/download/"):
-			w.Write([]byte("content of " + r.URL.Path))
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/documents/"), "/download/")
+			for _, doc := range docs {
+				if strconv.Itoa(doc.id) == id {
+					body := doc.download
+					if body == "" {
+						body = "content of " + r.URL.Path
+					}
+					w.Write([]byte(body))
+					return
+				}
+			}
+			w.WriteHeader(http.StatusNotFound)
 		case strings.HasPrefix(r.URL.Path, "/api/documents/"):
 			// GetDocument by ID (trailing /?format=json)
 			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/documents/"), "/")
@@ -122,6 +134,48 @@ func TestVerify_CompleteAfterImport(t *testing.T) {
 	}
 	if report.RunID == "" || report.ToolVersion == "" || report.Source != "paperless" || report.SourceURL != srv.URL || report.Mode != "verify" {
 		t.Errorf("verify report metadata incomplete: %+v", report)
+	}
+}
+
+func TestVerify_DeepVerifyMatchesPaperlessDownload(t *testing.T) {
+	docs := []verifyDoc{{id: 1, title: "Doc 1", download: "paperless original"}}
+	srv := newVerifyServer(t, docs)
+	defer srv.Close()
+
+	vault := importForVerify(t, srv.URL, Options{})
+
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token", DeepVerify: true}, vault, nil)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if !report.Complete() {
+		t.Fatalf("expected complete deep verification, got %+v", report)
+	}
+	if !report.DeepVerify || report.DeepVerified != 1 || len(report.SourceHashMismatch) != 0 {
+		t.Fatalf("bad deep verification counters: %+v", report)
+	}
+}
+
+func TestVerify_DeepVerifyDetectsPaperlessDownloadMismatch(t *testing.T) {
+	docs := []verifyDoc{{id: 1, title: "Doc 1", download: "original during import"}}
+	srv := newVerifyServer(t, docs)
+	defer srv.Close()
+
+	vault := importForVerify(t, srv.URL, Options{})
+	docs[0].download = "changed source after import"
+
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token", DeepVerify: true}, vault, nil)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if report.Complete() {
+		t.Fatal("expected incomplete verification when Paperless download no longer matches archive")
+	}
+	if len(report.SourceHashMismatch) != 1 || report.SourceHashMismatch[0] != 1 {
+		t.Fatalf("SourceHashMismatch = %v, want [1]", report.SourceHashMismatch)
+	}
+	if report.DeepVerified != 0 {
+		t.Fatalf("DeepVerified = %d, want 0", report.DeepVerified)
 	}
 }
 
@@ -909,5 +963,12 @@ func TestVerifyReport_Complete_WithMismatches(t *testing.T) {
 	r := &VerifyReport{Mismatches: []VerifyMismatch{{DocumentID: 1, Field: "tags"}}}
 	if r.Complete() {
 		t.Error("report with mismatches should not be complete")
+	}
+}
+
+func TestVerifyReport_Complete_WithSourceHashMismatch(t *testing.T) {
+	r := &VerifyReport{SourceHashMismatch: []int{1}}
+	if r.Complete() {
+		t.Error("report with source hash mismatch should not be complete")
 	}
 }

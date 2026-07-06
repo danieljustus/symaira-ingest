@@ -32,6 +32,13 @@ type ValidationReport struct {
 
 func (r ValidationReport) OK() bool { return len(r.Failures) == 0 }
 
+type ValidationOptions struct {
+	// MinBodyLength fails notes whose extracted Markdown body is shorter than
+	// this many non-whitespace bytes. Use it as an OCR/extraction quality gate
+	// during Paperless cutover; keep zero for structural validation only.
+	MinBodyLength int
+}
+
 func SplitFrontmatter(data []byte) (frontmatter []byte, body []byte, err error) {
 	if !bytes.HasPrefix(data, []byte("---\n")) {
 		return nil, nil, fmt.Errorf("missing YAML frontmatter delimiter")
@@ -71,6 +78,10 @@ func parseNote(path string) (map[string]any, []byte, error) {
 }
 
 func ValidateVault(vault string) (*ValidationReport, error) {
+	return ValidateVaultWithOptions(vault, ValidationOptions{})
+}
+
+func ValidateVaultWithOptions(vault string, opts ValidationOptions) (*ValidationReport, error) {
 	r := &ValidationReport{Vault: vault}
 	seenPaperless := map[int]string{}
 	err := filepath.WalkDir(vault, func(path string, d os.DirEntry, err error) error {
@@ -82,11 +93,12 @@ func ValidateVault(vault string) (*ValidationReport, error) {
 			return nil
 		}
 		r.Files++
-		meta, _, err := parseNote(path)
+		meta, body, err := parseNote(path)
 		if err != nil {
 			r.Failures = append(r.Failures, Failure{File: path, Check: "frontmatter", Message: err.Error()})
 			return nil
 		}
+		validateBody(r, path, body, opts)
 		validateRequired(r, path, meta)
 		validateArchive(r, path, meta)
 		validatePaperlessID(r, path, meta, seenPaperless)
@@ -97,6 +109,16 @@ func ValidateVault(vault string) (*ValidationReport, error) {
 		return nil, err
 	}
 	return r, nil
+}
+
+func validateBody(r *ValidationReport, path string, body []byte, opts ValidationOptions) {
+	if opts.MinBodyLength <= 0 {
+		return
+	}
+	length := len(bytes.TrimSpace(body))
+	if length < opts.MinBodyLength {
+		r.Failures = append(r.Failures, Failure{File: path, Check: "body.min_length", Message: fmt.Sprintf("body length %d below minimum %d", length, opts.MinBodyLength)})
+	}
 }
 
 func validateRequired(r *ValidationReport, path string, meta map[string]any) {

@@ -20,8 +20,16 @@ struct ImportView: View {
     // Mode options
     @State private var preserveStoragePaths = false
     @State private var dryRun = false
+    @State private var planOnly = false
+    @State private var resumeImport = false
+    @State private var retryFailedOnly = false
     @State private var verifyOnly = false
+    @State private var deepVerify = false
     @State private var statusOnly = false
+    @State private var reportPath = ""
+    @State private var useConcurrency = false
+    @State private var concurrencyValue = 2
+    @State private var checkpointEvery = 0
     
     // Run state
     @State private var isRunning = false
@@ -65,7 +73,7 @@ struct ImportView: View {
                                 Text("API Token")
                                     .font(.caption)
                                     .foregroundStyle(Theme.textSecondary)
-                                TextField("Enter your API token", text: $apiToken)
+                                SecureField("Enter your API token", text: $apiToken)
                                     .textFieldStyle(.roundedBorder)
                             }
                         }
@@ -124,9 +132,21 @@ struct ImportView: View {
                                 .foregroundStyle(Theme.goldPrimary)
                             
                             Toggle("Preserve Storage Paths", isOn: $preserveStoragePaths)
+                            Toggle("Plan Only (no downloads/writes)", isOn: $planOnly)
                             Toggle("Dry Run (Simulate)", isOn: $dryRun)
+                            Toggle("Resume Interrupted Import", isOn: $resumeImport)
+                            Toggle("Retry Failed Only", isOn: $retryFailedOnly)
                             Toggle("Verify Existing Import Only", isOn: $verifyOnly)
+                            Toggle("Deep Verify Downloads", isOn: $deepVerify)
+                                .disabled(!verifyOnly)
                             Toggle("Status Only (List local status)", isOn: $statusOnly)
+                            TextField("Report path (optional)", text: $reportPath)
+                                .textFieldStyle(.roundedBorder)
+                            Toggle("Use Concurrency", isOn: $useConcurrency)
+                            if useConcurrency {
+                                Stepper("Concurrency: \(concurrencyValue)", value: $concurrencyValue, in: 1...16)
+                            }
+                            Stepper("Checkpoint every: \(checkpointEvery)", value: $checkpointEvery, in: 0...1000)
                         }
                         
                         // Action Buttons
@@ -217,7 +237,7 @@ struct ImportView: View {
         .onAppear {
             // Load saved settings
             baseURL = UserDefaults.standard.string(forKey: "PAPERLESS_URL") ?? ""
-            apiToken = UserDefaults.standard.string(forKey: "PAPERLESS_TOKEN") ?? ""
+            UserDefaults.standard.removeObject(forKey: "PAPERLESS_TOKEN")
             preserveStoragePaths = UserDefaults.standard.bool(forKey: "PAPERLESS_PRESERVE_STORAGE_PATHS")
         }
     }
@@ -229,7 +249,6 @@ struct ImportView: View {
         
         // Save host configuration
         UserDefaults.standard.set(baseURL, forKey: "PAPERLESS_URL")
-        UserDefaults.standard.set(apiToken, forKey: "PAPERLESS_TOKEN")
         UserDefaults.standard.set(preserveStoragePaths, forKey: "PAPERLESS_PRESERVE_STORAGE_PATHS")
         
         appendLog("[app] Preparing import arguments...")
@@ -239,22 +258,41 @@ struct ImportView: View {
         args.append("--base-url")
         args.append(baseURL)
         
-        if !apiToken.isEmpty {
-            args.append("--token")
-            args.append(apiToken)
-        }
-        
         if statusOnly {
             args.append("--status")
         } else {
             if verifyOnly {
                 args.append("--verify")
+                if deepVerify {
+                    args.append("--deep")
+                }
+            }
+            if planOnly {
+                args.append("--plan")
             }
             if preserveStoragePaths {
                 args.append("--preserve-storage-paths")
             }
             if dryRun {
                 args.append("--dry-run")
+            }
+            if resumeImport {
+                args.append("--resume")
+            }
+            if retryFailedOnly {
+                args.append("--retry-failed")
+            }
+            if !reportPath.isEmpty {
+                args.append("--report")
+                args.append(reportPath)
+            }
+            if useConcurrency {
+                args.append("--concurrency")
+                args.append("\(concurrencyValue)")
+            }
+            if checkpointEvery > 0 {
+                args.append("--checkpoint-every")
+                args.append("\(checkpointEvery)")
             }
             
             // Apply filters
@@ -280,7 +318,11 @@ struct ImportView: View {
         appendLog("[app] Executing: symingest \(args.joined(separator: " "))")
         
         do {
-            let status = try await CLIClient.shared.runIngestCommandStreaming(args: args, config: configStore) { text in
+            var environment: [String: String] = [:]
+            if !apiToken.isEmpty {
+                environment["PAPERLESS_TOKEN"] = apiToken
+            }
+            let status = try await CLIClient.shared.runIngestCommandStreaming(args: args, config: configStore, environment: environment) { text in
                 Task { @MainActor in
                     self.appendLog(text)
                 }

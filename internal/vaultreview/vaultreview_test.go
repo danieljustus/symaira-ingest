@@ -85,6 +85,36 @@ func TestValidateVaultReportsArchiveBadYAMLAndDuplicatePaperlessID(t *testing.T)
 	}
 }
 
+func TestValidateVaultWithOptionsFlagsShortBodies(t *testing.T) {
+	dir := t.TempDir()
+	vault := filepath.Join(dir, "vault")
+	archive := filepath.Join(dir, "archive")
+	if err := os.MkdirAll(vault, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(archive, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	archivePath, sum := archiveFile(t, archive, "one.txt", "hello")
+	testNote(t, vault, "one.md", archivePath, sum, 1, []string{"inbox"})
+
+	report, err := ValidateVaultWithOptions(vault, ValidationOptions{MinBodyLength: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasFailure(report, "body.min_length") {
+		t.Fatalf("missing body.min_length failure: %+v", report.Failures)
+	}
+
+	report, err = ValidateVaultWithOptions(vault, ValidationOptions{MinBodyLength: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasFailure(report, "body.min_length") {
+		t.Fatalf("unexpected body.min_length failure: %+v", report.Failures)
+	}
+}
+
 func TestApplyCorrectionAndBulkUpdateProtectInbox(t *testing.T) {
 	dir := t.TempDir()
 	vault := filepath.Join(dir, "vault")

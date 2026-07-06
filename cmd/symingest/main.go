@@ -82,6 +82,8 @@ func run(args []string) error {
 		return runApplyCorrections(args[1:])
 	case "review-report":
 		return runReviewReport(args[1:])
+	case "cutover-check":
+		return runCutoverCheck(args[1:])
 	case "mcp":
 		return runMCP(args[1:])
 	default:
@@ -102,6 +104,12 @@ Commands:
   import paperless    Import documents from a Paperless-ngx instance
   doctor              Validate production readiness
   setup               Generate a production config file
+  validate-vault      Validate generated Markdown notes and archived originals
+  update              Safely update one note by Paperless ID
+  bulk-update         Safely update multiple notes selected by frontmatter
+  apply-corrections   Apply YAML corrections keyed by paperless_id
+  review-report       Generate a human-reviewable migration report
+  cutover-check       Gate whether Paperless can stop being source of truth
   jobs                List ingestion jobs in the queue
   retry <id>          Retry a failed job by ID
   rules               Manage classification rules (list, add, delete)
@@ -216,6 +224,7 @@ func runImport(args []string) error {
 	checkpointEvery := fs.Int("checkpoint-every", 0, "Print a progress checkpoint after every N processed documents; 0 disables checkpoints")
 	reportPath := fs.String("report", "", "Write a JSON migration report to this path (works with --plan, --dry-run and real imports)")
 	verify := fs.Bool("verify", false, "Verify a completed import against the Paperless source instead of importing")
+	deepVerify := fs.Bool("deep", false, "With --verify, re-download each Paperless original and compare SHA-256 against the archive")
 	statusOnly := fs.Bool("status", false, "List per-document import status from a previous run, then exit")
 	statusSummary := fs.Bool("summary", false, "With --status, print counts by import status")
 	statusFailed := fs.Bool("failed", false, "With --status, show only failed documents")
@@ -267,6 +276,10 @@ func runImport(args []string) error {
 	if *retryFailed && (*plan || *dryRun) {
 		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation,
 			"--retry-failed is only valid for real imports")
+	}
+	if *deepVerify && !*verify {
+		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation,
+			"--deep is only valid with --verify")
 	}
 	if *concurrency < 1 {
 		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation,
@@ -379,12 +392,7 @@ func runImport(args []string) error {
 	}
 
 	if *verify {
-		report, err := paperlessimport.Verify(ctx, paperlessimport.Options{BaseURL: *baseURL,
-			Token: *token,
-			Since: since,
-			Limit: *limit,
-			IDs:   ids,
-		}, cfg.vault, st)
+		report, err := paperlessimport.Verify(ctx, paperlessimport.Options{BaseURL: *baseURL, Token: *token, Since: since, Limit: *limit, IDs: ids, DeepVerify: *deepVerify}, cfg.vault, st)
 		if err != nil {
 			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
 				"verification failed")
@@ -401,8 +409,8 @@ func runImport(args []string) error {
 		}
 		if !report.Complete() {
 			return exitcodes.Wrapf(nil, exitcodes.ExitConflict, exitcodes.KindConflict,
-				"migration verification found discrepancies: %d missing, %d duplicate, %d missing-archive, %d mismatched",
-				len(report.Missing), len(report.Duplicate), len(report.MissingArchive), len(report.Mismatches))
+				"migration verification found discrepancies: %d missing, %d duplicate, %d missing-archive, %d hash-mismatch, %d source-hash-mismatch, %d mismatched",
+				len(report.Missing), len(report.Duplicate), len(report.MissingArchive), len(report.HashMismatch), len(report.SourceHashMismatch), len(report.Mismatches))
 		}
 		return nil
 	}
@@ -458,6 +466,8 @@ func runImport(args []string) error {
 	}
 	if stats.Failed > 0 {
 		fmt.Fprintf(stdout, "Re-run the same command to retry failed documents; use --status to inspect them.\n")
+		return exitcodes.Wrapf(nil, exitcodes.ExitConflict, exitcodes.KindConflict,
+			"import completed with %d failed document(s)", stats.Failed)
 	}
 	return nil
 }
@@ -492,6 +502,9 @@ func buildPaperlessStatusSummary(baseURL string, states []*store.PaperlessImport
 func printVerifyReport(w io.Writer, r *paperlessimport.VerifyReport) {
 	fmt.Fprintf(w, "Migration verification: %d source documents, %d vault notes, %d verified\n",
 		r.SourceDocuments, r.VaultNotes, r.Verified)
+	if r.DeepVerify {
+		fmt.Fprintf(w, "  deep verify: %d Paperless downloads matched archived originals\n", r.DeepVerified)
+	}
 	if len(r.Missing) > 0 {
 		fmt.Fprintf(w, "  missing from vault (%d): %s\n", len(r.Missing), joinInts(r.Missing))
 	}
@@ -500,6 +513,12 @@ func printVerifyReport(w io.Writer, r *paperlessimport.VerifyReport) {
 	}
 	if len(r.MissingArchive) > 0 {
 		fmt.Fprintf(w, "  missing archived original (%d): %s\n", len(r.MissingArchive), joinInts(r.MissingArchive))
+	}
+	if len(r.HashMismatch) > 0 {
+		fmt.Fprintf(w, "  local archive hash mismatches (%d): %s\n", len(r.HashMismatch), joinInts(r.HashMismatch))
+	}
+	if len(r.SourceHashMismatch) > 0 {
+		fmt.Fprintf(w, "  Paperless download hash mismatches (%d): %s\n", len(r.SourceHashMismatch), joinInts(r.SourceHashMismatch))
 	}
 	if len(r.Mismatches) > 0 {
 		fmt.Fprintf(w, "  metadata mismatches (%d):\n", len(r.Mismatches))
@@ -1035,7 +1054,8 @@ func (s *stringList) Set(v string) error {
 func runValidateVault(args []string) error {
 	fs := flag.NewFlagSet("validate-vault", flag.ContinueOnError)
 	jsonFlag := fs.Bool("json", false, "Output validation failures as JSON")
-	configureUsage(fs, "validate-vault [flags] <vault>", "Validate symingest Markdown frontmatter, archive links, hashes and Paperless IDs.")
+	minBodyLength := fs.Int("min-body-length", 0, "Fail notes whose extracted Markdown body is shorter than this many non-whitespace bytes")
+	configureUsage(fs, "validate-vault [flags] <vault>", "Validate symingest Markdown frontmatter, archive links, hashes, Paperless IDs and optional OCR/text body length gates.")
 	help, err := parseFlags(fs, args, "invalid validate-vault flags")
 	if help || err != nil {
 		return err
@@ -1043,7 +1063,10 @@ func runValidateVault(args []string) error {
 	if fs.NArg() != 1 {
 		return exitcodes.Wrapf(nil, exitcodes.ExitNoInput, exitcodes.KindValidation, "validate-vault requires a vault path")
 	}
-	report, err := vaultreview.ValidateVault(fs.Arg(0))
+	if *minBodyLength < 0 {
+		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation, "min-body-length must be zero or positive")
+	}
+	report, err := vaultreview.ValidateVaultWithOptions(fs.Arg(0), vaultreview.ValidationOptions{MinBodyLength: *minBodyLength})
 	if err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal, "vault validation failed")
 	}
@@ -1203,6 +1226,54 @@ func runReviewReport(args []string) error {
 	}
 	for _, d := range report.Documents {
 		fmt.Fprintf(stdout, "document %d: %s mime=%s vault=%s archive=%s error=%s warnings=%d\n", d.ID, d.Status, d.MIME, d.VaultPath, d.ArchivePath, d.Error, len(d.Warnings))
+	}
+	return nil
+}
+
+func runCutoverCheck(args []string) error {
+	fs := flag.NewFlagSet("cutover-check", flag.ContinueOnError)
+	dryRunReport := fs.String("dry-run-report", "", "Full dry-run JSON report produced by 'symingest import paperless --dry-run --report'")
+	importReport := fs.String("import-report", "", "Full real-import JSON report produced by 'symingest import paperless --report'")
+	verifyReport := fs.String("verify-report", "", "Verifier JSON report produced by 'symingest import paperless --verify --json'")
+	vault := fs.String("vault", "", "Vault path to validate")
+	minDocuments := fs.Int("min-documents", 0, "Minimum source document count expected before cutover")
+	minBodyLength := fs.Int("min-body-length", 0, "Fail cutover if any note body is shorter than this many non-whitespace bytes")
+	jsonFlag := fs.Bool("json", false, "Output the cutover report as JSON")
+	configureUsage(fs, "cutover-check [flags]", "Gate whether Paperless-ngx can stop being the source of truth. Requires the dry-run, real import, verify, and vault-validation evidence from the replacement runbook.")
+	help, err := parseFlags(fs, args, "invalid cutover-check flags")
+	if help || err != nil {
+		return err
+	}
+	report, err := vaultreview.BuildCutoverReport(vaultreview.CutoverOptions{
+		DryRunReportPath: *dryRunReport,
+		ImportReportPath: *importReport,
+		VerifyReportPath: *verifyReport,
+		VaultPath:        *vault,
+		MinDocuments:     *minDocuments,
+		MinBodyLength:    *minBodyLength,
+	})
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation, "cutover check failed")
+	}
+	if *jsonFlag {
+		data, err := json.MarshalIndent(report, "", "  ")
+		if err != nil {
+			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal, "failed to marshal cutover report")
+		}
+		fmt.Fprintln(stdout, string(data))
+	} else {
+		status := "BLOCKED"
+		if report.Ready {
+			status = "READY"
+		}
+		fmt.Fprintf(stdout, "Paperless replacement cutover: %s\n", status)
+		for _, c := range report.Checks {
+			fmt.Fprintf(stdout, "[%s] %s: %s\n", c.Status, c.Name, c.Message)
+		}
+	}
+	if !report.Ready {
+		return exitcodes.Wrapf(nil, exitcodes.ExitConflict, exitcodes.KindConflict,
+			"cutover blocked by %d issue(s)", len(report.Blockers))
 	}
 	return nil
 }

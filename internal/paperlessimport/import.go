@@ -87,6 +87,10 @@ type Options struct {
 	DryRun  bool
 	Plan    bool
 	Resume  bool
+	// DeepVerify makes verification re-download each Paperless original and
+	// compare its SHA-256 with the archived original. It is intentionally opt-in
+	// because it performs full network reads for every selected document.
+	DeepVerify bool
 
 	// RetryFailed restricts a real import to documents whose current-target
 	// Paperless import state is recorded as failed.
