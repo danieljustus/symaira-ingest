@@ -23,6 +23,7 @@ import (
 	"github.com/danieljustus/symaira-corekit/exitcodes"
 	"github.com/danieljustus/symaira-corekit/logkit"
 	"github.com/danieljustus/symaira-corekit/mcpserver"
+	"github.com/danieljustus/symaira-corekit/versionkit"
 
 	"github.com/danieljustus/symaira-ingest/internal/config"
 	"github.com/danieljustus/symaira-ingest/internal/ingest"
@@ -52,7 +53,18 @@ func run(args []string) error {
 
 	switch args[0] {
 	case "--version", "-v", "version":
-		fmt.Fprintln(stdout, version.Version)
+		jsonFlag := false
+		for _, arg := range args[1:] {
+			if arg == "--json" {
+				jsonFlag = true
+				break
+			}
+		}
+		info := versionkit.New("symingest", version.Version, 1)
+		if jsonFlag {
+			return info.Write(stdout)
+		}
+		fmt.Fprintln(stdout, info.String())
 		return nil
 	case "--help", "-h", "help":
 		return printUsage()

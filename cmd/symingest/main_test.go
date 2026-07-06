@@ -30,6 +30,18 @@ func TestRun_Version(t *testing.T) {
 	if got := strings.TrimSpace(sb.String()); got == "" {
 		t.Fatal("expected version output")
 	}
+	if got := strings.TrimSpace(sb.String()); !strings.Contains(got, "symingest") {
+		t.Errorf("expected version output to contain 'symingest', got %q", got)
+	}
+
+	sb.Reset()
+	if err := run([]string{"version", "--json"}); err != nil {
+		t.Fatalf("run(version --json): %v", err)
+	}
+	gotJSON := strings.TrimSpace(sb.String())
+	if !strings.Contains(gotJSON, `"tool":"symingest"`) {
+		t.Errorf("expected JSON version output to contain tool 'symingest', got %q", gotJSON)
+	}
 }
 
 func TestRun_Help(t *testing.T) {
