@@ -8,9 +8,9 @@ Document ingestion + OCR core for the Symaira ecosystem.
 
 - **Language:** Go 1.26.4 (CGO-free, `modernc.org/sqlite`)
 - **Built on:** `symaira-corekit`
-- **External tools (shelled out):** `tesseract`, `pdftoppm`
+- **External tools (shelled out):** `tesseract`, `pdftoppm`, macOS `sips`; optional converters such as `textutil`, `pandoc`, and `soffice` are discovery-only until format support is implemented
 - **License:** Apache-2.0
-- **Status:** Planning — see local design notes in `docs/`
+- **Status:** Active CLI + MCP + macOS-client project. Paperless migration gates exist, but full replacement readiness is still tracked in `docs/plans/symingest-completion-roadmap.md`.
 
 ## Design Rules
 
@@ -62,15 +62,16 @@ No Makefile. Build and test are plain `go` commands.
 
 ## Testing
 
-- 8 test files across `cmd/` and `internal/`
-- Standard `go test ./...` — no race detector, no coverage in CI
-- No fuzz tests, no smoke tests, no integration tests yet
+- Standard local gate: `env -u PAPERLESS_URL -u PAPERLESS_TOKEN -u SYMINGEST_VAULT -u SYMINGEST_ARCHIVE_PATH -u SYMINGEST_DB_PATH -u SYMINGEST_OCR_LANG go test ./...`
+- Vet gate: `env -u PAPERLESS_URL -u PAPERLESS_TOKEN -u SYMINGEST_VAULT -u SYMINGEST_ARCHIVE_PATH -u SYMINGEST_DB_PATH -u SYMINGEST_OCR_LANG go vet ./...`
+- Hermes terminals preserve environment variables across calls; clear Paperless/SYMINGEST env vars for unit tests unless a test explicitly needs live config.
+- Integration/smoke coverage exists for Paperless migration pilots, watcher behavior, vault review, and MCP handlers; still expand it before a software-complete release.
 
 ## CI
 
-- Single `ci.yml` workflow
-- Build + test on ubuntu-latest
-- **Note:** Currently pinned to Go 1.23 (stale — should be 1.26.4)
+- `ci.yml`: Go 1.26, `go vet ./...`, `go test ./...`, CGO-free build, CLI help smoke.
+- `codeql.yml`: static analysis.
+- `release.yml`: GoReleaser + Homebrew tap + macOS GUI/DMG packaging. The CLI/Homebrew path works as of v0.6.0; GUI/DMG packaging is a current completion-roadmap blocker.
 
 ## XDG Directory Convention
 
@@ -90,14 +91,8 @@ No Makefile. Build and test are plain `go` commands.
 
 - SwiftUI app (XcodeGen: `cd client && xcodegen generate`, scheme
   `Symingest`; local builds need `DEVELOPER_DIR` pointing at Xcode).
-- Depends on the shared **symaira-appkit** package, pinned exact (`0.1.1`)
-  in `client/project.yml`: SymairaTheme (via `ThemeBridge.swift`; the
-  ingest-specific AmbientBackground/24px-BlueprintGrid stay local),
-  SymairaCLIRunner (subprocess execution with SYMINGEST_* env injection)
-  and SymairaToolKit (binary discovery incl. tesseract/pdftoppm/sips —
-  replaces the former `/usr/bin/which` subprocess).
-- `EngineManager` (watch-mode daemon supervisor) stays app-local — third
-  requirements donor for a future SymairaDaemonKit (appkit v0.2).
+- Depends on the shared **symaira-appkit** package, pinned exact in `client/project.yml` (currently `0.2.0`): SymairaTheme (via `ThemeBridge.swift`; the ingest-specific AmbientBackground/24px-BlueprintGrid stay local), SymairaCLIRunner (subprocess execution with SYMINGEST_* env injection), SymairaToolKit (binary discovery incl. tesseract/pdftoppm/sips), and SymairaDaemonKit.
+- `EngineManager` uses SymairaDaemonKit's `DaemonSupervisor` for watch-mode supervision.
 - Do not reintroduce app-local Theme/Process-runner code; extend
   symaira-appkit instead. Migration context: see
   `../docs/symaira-appkit-migration.md`.
