@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SymairaDaemonKit
 
 @Observable
 @MainActor
@@ -18,16 +19,34 @@ public final class EngineManager {
         return state == .running
     }
 
-    nonisolated(unsafe) private var process: Process?
-    private var stdoutFH: FileHandle?
-    private var stderrFH: FileHandle?
-
+    private let supervisor = DaemonSupervisor()
     private let maxLogs = 500
 
-    public init() {}
+    public init() {
+        setupSupervisor()
+    }
 
-    nonisolated deinit {
-        process?.terminate()
+    private func setupSupervisor() {
+        supervisor.onLog = { [weak self] logLine in
+            Task { @MainActor [weak self] in
+                self?.appendLog(logLine.text)
+            }
+        }
+        supervisor.onStateChange = { [weak self] newState in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                switch newState {
+                case .stopped:
+                    self.state = .stopped
+                case .starting:
+                    self.state = .starting
+                case .running:
+                    self.state = .running
+                case .failed(let err):
+                    self.state = .failed(err)
+                }
+            }
+        }
     }
 
     public func start(config: ConfigStore) async {
@@ -60,115 +79,23 @@ public final class EngineManager {
             return
         }
 
-        let proc = Process()
-        proc.executableURL = binaryURL
-        proc.arguments = [
+        let arguments = [
             "watch",
             config.inboxPath
         ]
 
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        proc.standardOutput = stdoutPipe
-        proc.standardError = stderrPipe
-
         // Set Environment
-        var env = ProcessInfo.processInfo.environment
+        var env = [String: String]()
         env["SYMINGEST_VAULT"] = config.vault
         env["SYMINGEST_ARCHIVE_PATH"] = config.archivePath
         env["SYMINGEST_DB_PATH"] = config.dbPath
         env["SYMINGEST_OCR_LANG"] = config.ocrLang
         
-        if let path = env["PATH"] {
-            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:\(path)"
-        } else {
-            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-        }
-        proc.environment = env
-
-        let outFH = stdoutPipe.fileHandleForReading
-        let errFH = stderrPipe.fileHandleForReading
-        self.stdoutFH = outFH
-        self.stderrFH = errFH
-
-        outFH.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            Task { @MainActor [weak self] in
-                self?.processOutput(text, source: "stdout")
-            }
-        }
-
-        errFH.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            Task { @MainActor [weak self] in
-                self?.processOutput(text, source: "stderr")
-            }
-        }
-
-        proc.terminationHandler = { [weak self] proc in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                let exitCode = proc.terminationStatus
-                if exitCode != 0 {
-                    self.state = .failed("Process exited with code \(exitCode)")
-                    self.appendLog("[watcher] Process exited with code \(exitCode)")
-                } else {
-                    self.state = .stopped
-                    self.appendLog("[watcher] Process stopped cleanly")
-                }
-                self.cleanup()
-            }
-        }
-
-        do {
-            try proc.run()
-            self.process = proc
-            state = .running
-            appendLog("[watcher] Process started (PID \(proc.processIdentifier))")
-        } catch {
-            state = .failed(error.localizedDescription)
-            appendLog("[watcher] Failed to start: \(error.localizedDescription)")
-            cleanup()
-        }
+        _ = supervisor.start(executable: binaryURL, arguments: arguments, environment: env)
     }
 
     public func stop() {
-        guard let proc = process, proc.isRunning else {
-            state = .stopped
-            return
-        }
-
-        appendLog("[watcher] Stopping…")
-        proc.terminate()
-
-        Task {
-            try? await Task.sleep(for: .seconds(3))
-            if proc.isRunning {
-                appendLog("[watcher] Force killing process")
-                proc.interrupt()
-            }
-        }
-    }
-
-    private func cleanup() {
-        stdoutFH?.readabilityHandler = nil
-        stderrFH?.readabilityHandler = nil
-        stdoutFH = nil
-        stderrFH = nil
-        process = nil
-    }
-
-    private func processOutput(_ text: String, source: String) {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-
-        for line in trimmed.components(separatedBy: .newlines) {
-            let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmedLine.isEmpty else { continue }
-            appendLog(trimmedLine)
-        }
+        supervisor.stop()
     }
 
     private func appendLog(_ message: String) {
