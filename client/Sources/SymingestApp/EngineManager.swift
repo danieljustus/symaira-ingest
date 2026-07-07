@@ -81,6 +81,9 @@ public final class EngineManager {
 
         let arguments = [
             "watch",
+            "--processing-dir", config.inboxPath + "/.processing",
+            "--processed-dir", config.inboxPath + "/.processed",
+            "--failed-dir", config.inboxPath + "/.failed",
             config.inboxPath
         ]
 

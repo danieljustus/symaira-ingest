@@ -72,8 +72,28 @@ Generated vault notes are private by default: note files are written with `0600`
 **Watch a directory for new files:**
 
 ```bash
-symingest watch /path/to/inbox
+symingest watch \
+  --processing-dir /path/to/inbox/.processing \
+  --processed-dir /path/to/inbox/.processed \
+  --failed-dir /path/to/inbox/.failed \
+  /path/to/inbox
 ```
+
+The watcher waits for files to become stable, moves work through processing/processed/failed folders when configured, writes `.error.json` sidecars for failed files, resets stale running jobs on startup, and refuses a duplicate watcher for the same inbox/database lock.
+
+**macOS LaunchAgent service:**
+
+```bash
+symingest service --dry-run install     # print plist, write nothing
+symingest service install               # write ~/Library/LaunchAgents/dev.symaira.symingest.watch.plist
+symingest service start
+symingest service --json status
+symingest service --lines 200 logs
+symingest service stop
+symingest service uninstall
+```
+
+The generated LaunchAgent embeds paths only, never Paperless tokens or other secrets. Service logs are written to `~/Library/Logs/symingest/watch.log` and `watch.err.log`.
 
 **MCP server mode:**
 

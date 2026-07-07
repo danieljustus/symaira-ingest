@@ -72,6 +72,8 @@ func run(args []string) error {
 		return runIngest(args[1:])
 	case "watch":
 		return runWatch(args[1:])
+	case "service":
+		return runService(args[1:])
 	case "jobs":
 		return runJobs(args[1:])
 	case "retry":
@@ -115,6 +117,7 @@ Usage:
 Commands:
   ingest <file>       Ingest a file into the vault (one-shot)
   watch <dir>         Watch a directory for new/modified files and ingest in the background
+  service             Manage the macOS LaunchAgent for the watcher
   import paperless    Import documents from a Paperless-ngx instance
   doctor              Validate production readiness
   setup               Generate a production config file
@@ -127,7 +130,7 @@ Commands:
   cutover-check       Gate whether Paperless can stop being source of truth
   jobs                List ingestion jobs in the queue
   retry <id>          Retry a failed job by ID
-  rules               Manage classification rules (list, add, delete)
+  rules               Manage classification rules (list, add, update, test, delete)
   mcp                 Start the MCP server
   version             Print version
   help                Show this help`)
@@ -1478,6 +1481,13 @@ func runWatch(args []string) error {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	lock, err := acquireWatchLock(inboxDir, cfg.db)
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
+			"watcher lock refused duplicate start")
+	}
+	defer lock.Release()
 
 	// Reset any running jobs to pending on startup
 	if err := st.ResetRunningJobs(ctx); err != nil {

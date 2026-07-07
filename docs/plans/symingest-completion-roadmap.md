@@ -171,24 +171,24 @@ Do not tag releases, push branches, install persistent LaunchAgents, overwrite p
 
 **Goal:** replace Paperless consume behavior for new documents.
 
-- [ ] Harden file stability detection.
-- [ ] Use processing/processed/failed folders consistently.
-- [ ] Write `.error.json` sidecars for failed files.
-- [ ] Add retry/backoff controls.
-- [ ] Recover pending/processing jobs after crash.
-- [ ] Add watcher status and doctor commands.
-- [ ] Add service management commands:
+- [x] Harden file stability detection.
+- [x] Use processing/processed/failed folders consistently.
+- [x] Write `.error.json` sidecars for failed files.
+- [x] Add retry/backoff controls.
+- [x] Recover pending/processing jobs after crash.
+- [x] Add watcher status and doctor commands.
+- [x] Add service management commands:
   - `service install`,
   - `service start`,
   - `service stop`,
   - `service status`,
   - `service logs`,
   - `service uninstall`.
-- [ ] Generate a macOS LaunchAgent with no secrets embedded.
-- [ ] Store logs under `~/Library/Logs/symingest/`.
-- [ ] Make GUI control the service.
+- [x] Generate a macOS LaunchAgent with no secrets embedded.
+- [x] Store logs under `~/Library/Logs/symingest/`.
+- [x] Make GUI control the service.
 
-**Exit gate:** reboot-safe LaunchAgent consumes a temp inbox and survives failure/retry tests.
+**Exit gate:** reboot-safe LaunchAgent consumes a temp inbox and survives failure/retry tests. *(Local phase proof covered watch processing, duplicate lock, dry-run LaunchAgent generation, status/log surfaces. Actual install/start after user approval only.)*
 
 ## Phase 7 — symseek Integration
 

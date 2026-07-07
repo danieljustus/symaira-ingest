@@ -8,6 +8,8 @@ struct DashboardView: View {
     @State private var isTargeted = false
     @State private var isIngesting = false
     @State private var ingestResult: String?
+    @State private var serviceResult: String?
+    @State private var isServiceBusy = false
     @State private var isResultSuccess = true
     
     var body: some View {
@@ -87,6 +89,63 @@ struct DashboardView: View {
                     .foregroundStyle(Theme.bgDark)
                     .controlSize(.large)
                     .disabled(configStore.inboxPath.isEmpty)
+                }
+            }
+            .padding()
+            .background(Theme.bgCard)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Theme.borderGlass, lineWidth: 1)
+            )
+
+            // LaunchAgent service controls
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Label("LaunchAgent Service", systemImage: "gearshape.2.fill")
+                        .font(.headline)
+                        .foregroundStyle(Theme.textPrimary)
+                    Spacer()
+                    Button("Dry-run Install") { Task { await runService("install", dryRun: true) } }
+                        .buttonStyle(.bordered)
+                        .disabled(isServiceBusy || configStore.inboxPath.isEmpty)
+                    Button("Install") { Task { await runService("install") } }
+                        .buttonStyle(.bordered)
+                        .disabled(isServiceBusy || configStore.inboxPath.isEmpty)
+                    Button("Start") { Task { await runService("start") } }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Theme.goldPrimary)
+                        .disabled(isServiceBusy || configStore.inboxPath.isEmpty)
+                    Button("Stop") { Task { await runService("stop") } }
+                        .buttonStyle(.bordered)
+                        .disabled(isServiceBusy || configStore.inboxPath.isEmpty)
+                    Button("Status") { Task { await runService("status", json: false) } }
+                        .buttonStyle(.bordered)
+                        .disabled(isServiceBusy || configStore.inboxPath.isEmpty)
+                    Button("Logs") { Task { await loadServiceLogs() } }
+                        .buttonStyle(.bordered)
+                        .disabled(isServiceBusy || configStore.inboxPath.isEmpty)
+                    Button("Uninstall") { Task { await runService("uninstall") } }
+                        .buttonStyle(.bordered)
+                        .disabled(isServiceBusy || configStore.inboxPath.isEmpty)
+                }
+                Text("Install/start/stop are explicit CLI actions. The app does not silently install a persistent watcher.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textMuted)
+                if isServiceBusy {
+                    ProgressView("Running service command...")
+                        .controlSize(.small)
+                } else if let serviceResult {
+                    ScrollView {
+                        Text(serviceResult)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(Theme.textSecondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 110)
+                    .padding(8)
+                    .background(Color.black.opacity(0.35))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
                 }
             }
             .padding()
@@ -274,5 +333,21 @@ struct DashboardView: View {
     private func appendLogToConsole(_ text: String) {
         // Since we cannot write directly to engineManager logs array because it is private(set),
         // we can just print it. But we could also add helper in EngineManager if we want logs to display there.
+    }
+
+    private func runService(_ command: String, dryRun: Bool = false, json: Bool = false) async {
+        isServiceBusy = true
+        serviceResult = nil
+        let result = await CLIClient.shared.service(command: command, dryRun: dryRun, json: json, config: configStore)
+        isServiceBusy = false
+        serviceResult = result.message.isEmpty ? (result.success ? "OK" : "Failed") : result.message
+    }
+
+    private func loadServiceLogs() async {
+        isServiceBusy = true
+        serviceResult = nil
+        let result = await CLIClient.shared.serviceLogs(config: configStore)
+        isServiceBusy = false
+        serviceResult = result.message.isEmpty ? "No service logs yet." : result.message
     }
 }

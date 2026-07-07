@@ -117,6 +117,7 @@ public struct CLIConfigSnapshot: Sendable {
     public let ocrLang: String
     public let dbPath: String
     public let archivePath: String
+    public let inboxPath: String
     public let customBinaryPath: String
 
     @MainActor
@@ -125,6 +126,7 @@ public struct CLIConfigSnapshot: Sendable {
         self.ocrLang = config.ocrLang
         self.dbPath = config.dbPath
         self.archivePath = config.archivePath
+        self.inboxPath = config.inboxPath
         self.customBinaryPath = config.customBinaryPath
     }
 }
@@ -175,6 +177,7 @@ public final class CLIClient: Sendable {
         if !config.archivePath.isEmpty { env["SYMINGEST_ARCHIVE_PATH"] = config.archivePath }
         if !config.dbPath.isEmpty { env["SYMINGEST_DB_PATH"] = config.dbPath }
         if !config.ocrLang.isEmpty { env["SYMINGEST_OCR_LANG"] = config.ocrLang }
+        if !config.inboxPath.isEmpty { env["SYMINGEST_INBOX"] = config.inboxPath }
     }
 
     public func runIngestCommand(args: [String], config: ConfigStore, environment: [String: String] = [:]) async throws -> (stdout: String, stderr: String) {
@@ -313,6 +316,44 @@ public final class CLIClient: Sendable {
         args.append(correctionsPath)
         let (out, err) = try await runIngestCommand(args: args, config: config)
         return (err.isEmpty ? out : err).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    public func service(command: String, dryRun: Bool = false, json: Bool = false, config: ConfigStore) async -> (success: Bool, message: String) {
+        do {
+            let snapshot = await CLIConfigSnapshot(config: config)
+            var args = ["service"]
+            if dryRun { args.append("--dry-run") }
+            if json { args.append("--json") }
+            if !snapshot.vault.isEmpty { args += ["--vault", snapshot.vault] }
+            if !snapshot.archivePath.isEmpty { args += ["--archive", snapshot.archivePath] }
+            if !snapshot.dbPath.isEmpty { args += ["--db", snapshot.dbPath] }
+            if !snapshot.ocrLang.isEmpty { args += ["--ocr-lang", snapshot.ocrLang] }
+            if !snapshot.inboxPath.isEmpty { args += ["--inbox", snapshot.inboxPath] }
+            args.append(command)
+            let (out, err) = try await runIngestCommand(args: args, config: config)
+            let message = (err.isEmpty ? out : err).trimmingCharacters(in: .whitespacesAndNewlines)
+            return (err.isEmpty, message)
+        } catch {
+            return (false, error.localizedDescription)
+        }
+    }
+
+    public func serviceLogs(config: ConfigStore) async -> (success: Bool, message: String) {
+        do {
+            let snapshot = await CLIConfigSnapshot(config: config)
+            var args = ["service", "--lines", "120"]
+            if !snapshot.vault.isEmpty { args += ["--vault", snapshot.vault] }
+            if !snapshot.archivePath.isEmpty { args += ["--archive", snapshot.archivePath] }
+            if !snapshot.dbPath.isEmpty { args += ["--db", snapshot.dbPath] }
+            if !snapshot.ocrLang.isEmpty { args += ["--ocr-lang", snapshot.ocrLang] }
+            if !snapshot.inboxPath.isEmpty { args += ["--inbox", snapshot.inboxPath] }
+            args.append("logs")
+            let (out, err) = try await runIngestCommand(args: args, config: config)
+            let message = (err.isEmpty ? out : err).trimmingCharacters(in: .whitespacesAndNewlines)
+            return (err.isEmpty, message)
+        } catch {
+            return (false, error.localizedDescription)
+        }
     }
 
     public func runIngestCommandStreaming(
