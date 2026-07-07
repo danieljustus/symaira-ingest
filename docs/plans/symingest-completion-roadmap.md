@@ -119,7 +119,7 @@ Do not tag releases, push branches, install persistent LaunchAgents, overwrite p
 
 **Goal:** make migration review and metadata repair safe and inspectable.
 
-- [ ] Improve `review-report` filters:
+- [x] Improve `review-report` filters:
   - failed,
   - warnings,
   - missing metadata,
@@ -127,16 +127,16 @@ Do not tag releases, push branches, install persistent LaunchAgents, overwrite p
   - duplicate content,
   - unsupported formats,
   - unresolved references.
-- [ ] Improve HTML review output:
+- [x] Improve HTML review output:
   - filters,
   - grouping,
   - note/archive links,
   - no document body leakage by default.
-- [ ] Version `corrections.yaml` schema.
-- [ ] Support correction dry-run with exact affected IDs.
-- [ ] Add `--max` and `--require-count` safety flags for bulk updates.
-- [ ] Add backup/undo log before bulk frontmatter edits.
-- [ ] Add tests for idempotent corrections.
+- [x] Version `corrections.yaml` schema.
+- [x] Support correction dry-run with exact affected IDs.
+- [x] Add `--max` and `--require-count` safety flags for bulk updates.
+- [x] Add backup/undo log before bulk frontmatter edits.
+- [x] Add tests for idempotent corrections.
 
 **Exit gate:** review report can produce actionable corrections and apply them safely with dry-run and undo evidence.
 

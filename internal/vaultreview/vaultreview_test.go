@@ -144,24 +144,63 @@ func TestApplyCorrectionAndBulkUpdateProtectInbox(t *testing.T) {
 	if strings.Contains(string(data), "new") {
 		t.Fatal("dry run wrote changes")
 	}
-	res, err = ApplyCorrection(vault, Correction{PaperlessID: 1, AddTags: []string{"new"}, Correspondent: &corr}, false)
+	backupDir := filepath.Join(dir, "undo")
+	res, err = ApplyCorrectionWithOptions(vault, Correction{PaperlessID: 1, AddTags: []string{"new"}, Correspondent: &corr}, ApplyOptions{BackupDir: backupDir})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Written {
-		t.Fatalf("expected write: %+v", res)
+	if !res.Written || res.BackupPath == "" {
+		t.Fatalf("expected write with backup: %+v", res)
+	}
+	if _, err := os.Stat(res.BackupPath); err != nil {
+		t.Fatalf("backup missing: %v", err)
 	}
 	data, _ = os.ReadFile(note)
 	if !strings.Contains(string(data), "new") || !strings.Contains(string(data), "Acme") {
 		t.Fatalf("update missing changes:\n%s", data)
 	}
 
-	results, err := BulkUpdateByTag(vault, "old", Correction{AddTags: []string{"bulk"}}, true)
+	results, err := BulkUpdateByTagWithOptions(vault, "old", Correction{AddTags: []string{"bulk"}}, BulkUpdateOptions{DryRun: true, RequireCount: 2, Max: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(results) != 2 {
 		t.Fatalf("bulk matched %d, want 2", len(results))
+	}
+	if _, err := BulkUpdateByTagWithOptions(vault, "old", Correction{AddTags: []string{"bulk"}}, BulkUpdateOptions{DryRun: true, RequireCount: 1}); err == nil {
+		t.Fatal("expected require-count mismatch to fail")
+	}
+	if _, err := BulkUpdateByTagWithOptions(vault, "old", Correction{AddTags: []string{"bulk"}}, BulkUpdateOptions{DryRun: true, Max: 1}); err == nil {
+		t.Fatal("expected max safety gate to fail")
+	}
+}
+
+func TestApplyCorrectionsFileSchemaAndSafety(t *testing.T) {
+	dir := t.TempDir()
+	vault := filepath.Join(dir, "vault")
+	archive := filepath.Join(dir, "archive")
+	if err := os.MkdirAll(vault, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(archive, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	archivePath, sum := archiveFile(t, archive, "one.txt", "hello")
+	testNote(t, vault, "one.md", archivePath, sum, 1, []string{"old"})
+	path := filepath.Join(dir, "corrections.yaml")
+	data := []byte("schema_version: 1\ncorrections:\n  - paperless_id: 1\n    add_tags: [reviewed]\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	results, err := ApplyCorrectionsFileWithOptions(vault, path, ApplyOptions{DryRun: true, RequireCount: 1, Max: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || !results[0].DryRun || results[0].PaperlessID != 1 {
+		t.Fatalf("unexpected results: %+v", results)
+	}
+	if _, err := ApplyCorrectionsFileWithOptions(vault, path, ApplyOptions{DryRun: true, RequireCount: 2}); err == nil {
+		t.Fatal("expected require-count mismatch")
 	}
 }
 
@@ -169,22 +208,45 @@ func TestBuildReviewReportAndHTML(t *testing.T) {
 	dir := t.TempDir()
 	jsonPath := filepath.Join(dir, "migration.json")
 	htmlPath := filepath.Join(dir, "review.html")
-	data := `{"run_id":"r1","documents":[{"id":1,"status":"imported","mime":"text/plain","vault_path":"v","archive_path":"a"},{"id":2,"status":"failed","error":"boom","warnings":["w"]}]}`
+	data := `{"schema_version":1,"run_id":"r1","unsupported_file_types":{"nef":1},"unresolved_tag_ids":[99],"documents":[{"id":1,"status":"imported","mime":"text/plain","vault_path":"v","archive_path":"a"},{"id":2,"status":"failed","expected_extension":".nef","error":"unsupported extraction format","warnings":["body.min_length below threshold","unresolved tag ID 99"]}]}`
 	if err := os.WriteFile(jsonPath, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	report, err := BuildReviewReport(jsonPath, ReviewFilters{Failed: true})
+	report, err := BuildReviewReport(jsonPath, ReviewFilters{Unsupported: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.SourceKind != "migration" || report.Total != 1 || report.Documents[0].ID != 2 || len(report.Findings) != 1 {
+		t.Fatalf("unexpected unsupported report: %+v", report)
+	}
+	report, err = BuildReviewReport(jsonPath, ReviewFilters{LowBody: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if report.Total != 1 || report.Documents[0].ID != 2 {
-		t.Fatalf("unexpected report: %+v", report)
+		t.Fatalf("unexpected low-body report: %+v", report)
 	}
 	if err := WriteReviewHTML(htmlPath, report); err != nil {
 		t.Fatal(err)
 	}
 	html, _ := os.ReadFile(htmlPath)
-	if !strings.Contains(string(html), "boom") || !strings.Contains(string(html), "Document body text is intentionally not included") {
+	if !strings.Contains(string(html), "body.min_length") || !strings.Contains(string(html), "Document body text is intentionally not included") || strings.Contains(string(html), "SECRET-BODY") {
 		t.Fatalf("bad html: %s", html)
+	}
+}
+
+func TestBuildReviewReportFromVerifyDuplicateContent(t *testing.T) {
+	dir := t.TempDir()
+	jsonPath := filepath.Join(dir, "verify.json")
+	data := `{"schema_version":1,"run_id":"v1","source_documents":2,"vault_notes":2,"verified":2,"duplicate_content":[2],"mismatches":[{"document_id":1,"field":"tags","expected":"a","got":"b"}]}`
+	if err := os.WriteFile(jsonPath, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report, err := BuildReviewReport(jsonPath, ReviewFilters{DuplicateContent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.SourceKind != "verify" || report.Total != 1 || report.Documents[0].ID != 2 || report.Documents[0].Status != "duplicate_content" {
+		t.Fatalf("unexpected duplicate-content report: %+v", report)
 	}
 }

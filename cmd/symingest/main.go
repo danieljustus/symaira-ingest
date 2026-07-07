@@ -1127,7 +1127,11 @@ func printUpdateResults(results []vaultreview.UpdateResult) {
 		} else if !r.Written {
 			mode = "unchanged"
 		}
-		fmt.Fprintf(stdout, "%s: %s (%s)\n", mode, r.File, strings.Join(r.Changes, ", "))
+		backup := ""
+		if r.BackupPath != "" {
+			backup = " backup=" + r.BackupPath
+		}
+		fmt.Fprintf(stdout, "%s: paperless_id=%d %s (%s)%s\n", mode, r.PaperlessID, r.File, strings.Join(r.Changes, ", "), backup)
 	}
 }
 
@@ -1163,6 +1167,9 @@ func runBulkUpdate(args []string) error {
 	vault := fs.String("vault", "", "Vault path")
 	where := fs.String("where", "", "Selector, currently tag:<name>")
 	dryRun := fs.Bool("dry-run", false, "Show exact frontmatter changes without writing")
+	maxUpdates := fs.Int("max", 0, "Refuse when matched corrections exceed this count; 0 disables")
+	requireCount := fs.Int("require-count", 0, "Refuse unless exactly this many notes match; 0 disables")
+	backupDir := fs.String("backup-dir", "", "Directory for undo backups before writes; default .symingest-backups next to each note")
 	paperlessID := fs.Int("paperless-id", 0, "Ignored for bulk updates")
 	var addTags, removeTags stringList
 	fs.Var(&addTags, "add-tag", "Tag to add")
@@ -1178,7 +1185,7 @@ func runBulkUpdate(args []string) error {
 	if *vault == "" || !strings.HasPrefix(*where, "tag:") {
 		return exitcodes.Wrapf(nil, exitcodes.ExitNoInput, exitcodes.KindValidation, "--vault and --where tag:<name> are required")
 	}
-	results, err := vaultreview.BulkUpdateByTag(*vault, strings.TrimPrefix(*where, "tag:"), correctionFromFlags(fs, paperlessID, &addTags, &removeTags, correspondent, documentType, storagePath), *dryRun)
+	results, err := vaultreview.BulkUpdateByTagWithOptions(*vault, strings.TrimPrefix(*where, "tag:"), correctionFromFlags(fs, paperlessID, &addTags, &removeTags, correspondent, documentType, storagePath), vaultreview.BulkUpdateOptions{DryRun: *dryRun, Max: *maxUpdates, RequireCount: *requireCount, BackupDir: *backupDir})
 	if err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation, "bulk update failed")
 	}
@@ -1190,6 +1197,9 @@ func runApplyCorrections(args []string) error {
 	fs := flag.NewFlagSet("apply-corrections", flag.ContinueOnError)
 	vault := fs.String("vault", "", "Vault path")
 	dryRun := fs.Bool("dry-run", false, "Show exact frontmatter changes without writing")
+	maxUpdates := fs.Int("max", 0, "Refuse when corrections exceed this count; 0 disables")
+	requireCount := fs.Int("require-count", 0, "Refuse unless corrections.yaml contains exactly this many entries; 0 disables")
+	backupDir := fs.String("backup-dir", "", "Directory for undo backups before writes; default .symingest-backups next to each note")
 	configureUsage(fs, "apply-corrections [flags] <corrections.yaml>", "Apply YAML corrections keyed by paperless_id.")
 	help, err := parseFlags(fs, args, "invalid apply-corrections flags")
 	if help || err != nil {
@@ -1198,7 +1208,7 @@ func runApplyCorrections(args []string) error {
 	if *vault == "" || fs.NArg() != 1 {
 		return exitcodes.Wrapf(nil, exitcodes.ExitNoInput, exitcodes.KindValidation, "--vault and corrections.yaml are required")
 	}
-	results, err := vaultreview.ApplyCorrectionsFile(*vault, fs.Arg(0), *dryRun)
+	results, err := vaultreview.ApplyCorrectionsFileWithOptions(*vault, fs.Arg(0), vaultreview.ApplyOptions{DryRun: *dryRun, Max: *maxUpdates, RequireCount: *requireCount, BackupDir: *backupDir})
 	if err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation, "apply corrections failed")
 	}
@@ -1213,15 +1223,19 @@ func runReviewReport(args []string) error {
 	failed := fs.Bool("failed", false, "Show failed documents")
 	warningsOnly := fs.Bool("warnings", false, "Show documents with warnings or errors")
 	missingMetadata := fs.Bool("missing-metadata", false, "Show documents missing key metadata paths/MIME")
-	configureUsage(fs, "review-report [flags] <migration.json>", "Generate a human-reviewable migration report without document body text.")
+	lowBody := fs.Bool("low-body", false, "Show documents with low/short body warnings")
+	duplicateContent := fs.Bool("duplicate-content", false, "Show verify findings for duplicate original bytes across Paperless IDs")
+	unsupported := fs.Bool("unsupported", false, "Show unsupported format findings")
+	unresolved := fs.Bool("unresolved", false, "Show unresolved metadata reference findings")
+	configureUsage(fs, "review-report [flags] <migration-or-verify-report.json>", "Generate a human-reviewable migration/verify report without document body text.")
 	help, err := parseFlags(fs, args, "invalid review-report flags")
 	if help || err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return exitcodes.Wrapf(nil, exitcodes.ExitNoInput, exitcodes.KindValidation, "review-report requires migration.json")
+		return exitcodes.Wrapf(nil, exitcodes.ExitNoInput, exitcodes.KindValidation, "review-report requires migration-or-verify-report.json")
 	}
-	report, err := vaultreview.BuildReviewReport(fs.Arg(0), vaultreview.ReviewFilters{Failed: *failed, Warnings: *warningsOnly, MissingMetadata: *missingMetadata})
+	report, err := vaultreview.BuildReviewReport(fs.Arg(0), vaultreview.ReviewFilters{Failed: *failed, Warnings: *warningsOnly, MissingMetadata: *missingMetadata, LowBody: *lowBody, DuplicateContent: *duplicateContent, Unsupported: *unsupported, Unresolved: *unresolved})
 	if err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation, "review report failed")
 	}

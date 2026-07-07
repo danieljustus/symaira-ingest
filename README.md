@@ -160,6 +160,26 @@ symingest report validate dryrun-report.json
 symingest report --json validate verify-report.json
 ```
 
+Create a body-safe review surface and apply explicit corrections with count gates:
+
+```bash
+symingest review-report --failed --warnings --unsupported --unresolved --html review.html import-report.json
+symingest review-report --duplicate-content --json verify-report.json
+symingest apply-corrections --vault ~/vault --dry-run --require-count 3 corrections.yaml
+symingest apply-corrections --vault ~/vault --require-count 3 --max 3 --backup-dir undo corrections.yaml
+symingest bulk-update --vault ~/vault --where tag:needs-review --add-tag reviewed --dry-run --require-count 12 --max 12
+```
+
+`corrections.yaml` supports the versioned shape:
+
+```yaml
+schema_version: 1
+corrections:
+  - paperless_id: 123
+    add_tags: [reviewed]
+    correspondent: Example GmbH
+```
+
 For OCR quality checks, add a body-length gate to vault validation:
 
 ```bash
