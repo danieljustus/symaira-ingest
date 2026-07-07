@@ -14,21 +14,23 @@ import (
 )
 
 type Note struct {
-	SourcePath    string         `yaml:"source_path"`
-	ImportedFrom  string         `yaml:"imported_from,omitempty"`
-	ImportRunID   string         `yaml:"import_run_id,omitempty"`
-	SourceURI     string         `yaml:"source_uri,omitempty"`
-	DownloadURI   string         `yaml:"download_uri,omitempty"`
-	IngestedAt    time.Time      `yaml:"ingested_at"`
-	SHA256        string         `yaml:"sha256"`
-	MIME          string         `yaml:"mime"`
-	Tags          []string       `yaml:"tags"`
-	Category      string         `yaml:"category"`
-	Correspondent string         `yaml:"correspondent,omitempty"`
-	DocumentType  string         `yaml:"document_type,omitempty"`
-	OCREngine     string         `yaml:"ocr_engine,omitempty"`
-	ArchivePath   string         `yaml:"archive_path"`
-	Paperless     *PaperlessMeta `yaml:"paperless,omitempty"`
+	SourcePath       string         `yaml:"source_path"`
+	ImportedFrom     string         `yaml:"imported_from,omitempty"`
+	ImportRunID      string         `yaml:"import_run_id,omitempty"`
+	SourceURI        string         `yaml:"source_uri,omitempty"`
+	DownloadURI      string         `yaml:"download_uri,omitempty"`
+	IngestedAt       time.Time      `yaml:"ingested_at"`
+	SHA256           string         `yaml:"sha256"`
+	MIME             string         `yaml:"mime"`
+	Tags             []string       `yaml:"tags"`
+	Category         string         `yaml:"category"`
+	Correspondent    string         `yaml:"correspondent,omitempty"`
+	DocumentType     string         `yaml:"document_type,omitempty"`
+	OCREngine        string         `yaml:"ocr_engine,omitempty"`
+	ArchivePath      string         `yaml:"archive_path"`
+	SidecarPath      string         `yaml:"sidecar_path,omitempty"`
+	ExtractionCount  int            `yaml:"extraction_count,omitempty"`
+	Paperless        *PaperlessMeta `yaml:"paperless,omitempty"`
 }
 
 // PaperlessMeta carries traceability metadata from a migrated Paperless-ngx
@@ -185,4 +187,53 @@ func (w *NoteWriter) WriteNote(sourcePath, sha256, mime, ocrEngine, text, archiv
 		return "", fmt.Errorf("write note: %w", err)
 	}
 	return vaultPath, nil
+}
+
+// UpdateNoteSidecar rewrites a note's YAML frontmatter to include sidecar
+// path and extraction count without touching the Markdown body.
+func (w *NoteWriter) UpdateNoteSidecar(vaultPath, sidecarPath string, extractionCount int) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	data, err := os.ReadFile(vaultPath)
+	if err != nil {
+		return fmt.Errorf("read note: %w", err)
+	}
+
+	content := string(data)
+	if !strings.HasPrefix(content, "---\n") {
+		return fmt.Errorf("note missing YAML frontmatter")
+	}
+	endIdx := strings.Index(content[4:], "\n---\n")
+	if endIdx < 0 {
+		return fmt.Errorf("note missing closing frontmatter delimiter")
+	}
+	endIdx += 4
+
+	frontmatter := content[4:endIdx]
+	body := content[endIdx+5:]
+
+	var meta Note
+	if err := yaml.Unmarshal([]byte(frontmatter), &meta); err != nil {
+		return fmt.Errorf("parse frontmatter: %w", err)
+	}
+
+	meta.SidecarPath = sidecarPath
+	meta.ExtractionCount = extractionCount
+
+	yamlBytes, err := yaml.Marshal(meta)
+	if err != nil {
+		return fmt.Errorf("marshal frontmatter: %w", err)
+	}
+
+	var sb strings.Builder
+	sb.WriteString("---\n")
+	sb.Write(yamlBytes)
+	sb.WriteString("---\n\n")
+	sb.WriteString(body)
+
+	if err := fsutil.AtomicWriteFile(vaultPath, []byte(sb.String()), 0o600); err != nil {
+		return fmt.Errorf("rewrite note: %w", err)
+	}
+	return nil
 }

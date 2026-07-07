@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/danieljustus/symaira-ingest/internal/annotate"
 	"github.com/danieljustus/symaira-ingest/internal/extract"
 	"github.com/danieljustus/symaira-ingest/internal/store"
 	"github.com/danieljustus/symaira-ingest/internal/writer"
@@ -30,6 +31,12 @@ type Pipeline struct {
 	// successful write. Errors are logged, not fatal: search indexing must not
 	// corrupt or roll back a completed ingest.
 	PostIndex func(context.Context, string) error
+	// PostExtract optionally processes extraction results after sidecar write.
+	// Errors are logged, not fatal: annotation must not roll back a completed ingest.
+	PostExtract func(context.Context, *Result, []annotate.Extraction) error
+	// ExtractionProfile is the annotation profile name to use for extraction.
+	// Empty string disables extraction.
+	ExtractionProfile string
 }
 
 // ErrDuplicate is returned when a source has already been ingested.
@@ -270,7 +277,7 @@ func (p *Pipeline) processSource(ctx context.Context, source, hash string, kind 
 		}
 	}
 
-	return &Result{
+	res := &Result{
 		SourcePath:    noteSourcePath,
 		SHA256:        hash,
 		Kind:          kind,
@@ -281,7 +288,43 @@ func (p *Pipeline) processSource(ctx context.Context, source, hash string, kind 
 		Tags:          tags,
 		Correspondent: correspondent,
 		DocumentType:  documentType,
-	}, nil
+	}
+
+	if p.ExtractionProfile != "" && strings.TrimSpace(extractRes.Text) != "" {
+		profile, pErr := annotate.GetProfile(p.ExtractionProfile)
+		if pErr != nil {
+			log.Printf("annotate: invalid profile %q: %v", p.ExtractionProfile, pErr)
+		} else {
+			extractions := annotate.Extract(profile, extractRes.Text)
+			if len(extractions) > 0 {
+				sidecarPath := annotate.SidecarPath(filepath.Dir(vaultPath), hash)
+				if wErr := annotate.WriteSidecar(filepath.Dir(vaultPath), hash, extractions); wErr != nil {
+					log.Printf("annotate: write sidecar failed: %v", wErr)
+				} else {
+					if uErr := p.Writer.UpdateNoteSidecar(vaultPath, sidecarPath, len(extractions)); uErr != nil {
+						log.Printf("annotate: update note frontmatter failed: %v", uErr)
+					}
+					res.SidecarPath = sidecarPath
+					res.ExtractionCount = len(extractions)
+				}
+			}
+			if p.Store != nil && len(extractions) > 0 {
+				doc, dErr := p.Store.ByHash(ctx, hash)
+				if dErr == nil {
+					if sErr := p.Store.RecordExtractions(ctx, doc.ID, p.ExtractionProfile, extractions); sErr != nil {
+						log.Printf("annotate: record extractions to store failed: %v", sErr)
+					}
+				}
+			}
+			if p.PostExtract != nil {
+				if peErr := p.PostExtract(ctx, res, extractions); peErr != nil {
+					log.Printf("annotate: PostExtract hook failed: %v", peErr)
+				}
+			}
+		}
+	}
+
+	return res, nil
 }
 
 func hashFile(path string) (string, error) {
