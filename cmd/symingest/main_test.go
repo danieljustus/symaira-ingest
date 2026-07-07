@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -71,6 +72,9 @@ func TestRun_UnknownCommand(t *testing.T) {
 }
 
 func TestRun_ServiceInstallDryRunDoesNotEmbedSecrets(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("service management supports macOS LaunchAgents only")
+	}
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	t.Setenv("SYMINGEST_VAULT", filepath.Join(dir, "vault"))
