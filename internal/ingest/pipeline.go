@@ -297,8 +297,8 @@ func (p *Pipeline) processSource(ctx context.Context, source, hash string, kind 
 		} else {
 			extractions := annotate.Extract(profile, extractRes.Text)
 			if len(extractions) > 0 {
-				sidecarPath := annotate.SidecarPath(filepath.Dir(vaultPath), hash)
-				if wErr := annotate.WriteSidecar(filepath.Dir(vaultPath), hash, extractions); wErr != nil {
+				sidecarPath := annotate.SidecarPath(p.Writer.Vault, hash)
+				if wErr := annotate.WriteSidecar(p.Writer.Vault, hash, extractions); wErr != nil {
 					log.Printf("annotate: write sidecar failed: %v", wErr)
 				} else {
 					if uErr := p.Writer.UpdateNoteSidecar(vaultPath, sidecarPath, len(extractions)); uErr != nil {
