@@ -15,6 +15,8 @@ type Config struct {
 	ArchivePath      string `json:"archive_path"`
 	Inbox            string `json:"inbox"`
 	PaperlessBaseURL string `json:"paperless_base_url"`
+	SymseekEnabled   bool   `json:"symseek_enabled"`
+	SymseekBinary    string `json:"symseek_binary"`
 }
 
 // Defaults returns the default configuration.
@@ -26,6 +28,8 @@ func Defaults() *Config {
 		ArchivePath:      "",
 		Inbox:            "",
 		PaperlessBaseURL: "",
+		SymseekEnabled:   false,
+		SymseekBinary:    "",
 	}
 }
 

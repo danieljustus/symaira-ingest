@@ -26,6 +26,10 @@ type Pipeline struct {
 	ArchiveDir   string
 	ProcessedDir string
 	FailedDir    string
+	// PostIndex optionally indexes the generated Markdown note after a
+	// successful write. Errors are logged, not fatal: search indexing must not
+	// corrupt or roll back a completed ingest.
+	PostIndex func(context.Context, string) error
 }
 
 // ErrDuplicate is returned when a source has already been ingested.
@@ -259,6 +263,11 @@ func (p *Pipeline) processSource(ctx context.Context, source, hash string, kind 
 	)
 	if err != nil {
 		return nil, fmt.Errorf("write note: %w", err)
+	}
+	if p.PostIndex != nil {
+		if err := p.PostIndex(ctx, vaultPath); err != nil {
+			log.Printf("symseek post-ingest index failed for %s: %v", vaultPath, err)
+		}
 	}
 
 	return &Result{

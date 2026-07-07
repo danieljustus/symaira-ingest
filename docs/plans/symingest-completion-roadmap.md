@@ -194,12 +194,12 @@ Do not tag releases, push branches, install persistent LaunchAgents, overwrite p
 
 **Goal:** ingested documents become searchable as part of the normal workflow.
 
-- [ ] Add optional post-ingest indexing hook.
-- [ ] Add config section for symseek integration.
-- [ ] Add command to index current vault.
-- [ ] Add search validation report from query fixtures.
-- [ ] Allow `cutover-check` to consume search validation report.
-- [ ] Tests with temporary `HOME`/symseek DB.
+- [x] Add optional post-ingest indexing hook.
+- [x] Add config section for symseek integration.
+- [x] Add command to index current vault.
+- [x] Add search validation report from query fixtures.
+- [x] Allow `cutover-check` to consume search validation report.
+- [x] Tests with temporary `HOME`/symseek DB.
 
 **Exit gate:** a pilot ingest can be indexed and validated through a machine-readable report.
 

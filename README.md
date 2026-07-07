@@ -154,10 +154,34 @@ After an import, `--verify` re-reads the Paperless source and the generated vaul
 **Gate Paperless cutover:**
 
 ```bash
+symingest search index ~/vault
+
+cat > search-fixtures.json <<'JSON'
+[
+  {"query":"sample invoice token", "min_results":1, "must_contain":["invoice"]}
+]
+JSON
+
+symingest search validate \
+  --fixtures search-fixtures.json \
+  --report search-report.json
+```
+
+Search integration is optional and runtime-detected. To index each generated note after a successful ingest, enable it in config:
+
+```toml
+symseek_enabled = true
+symseek_binary = "/opt/homebrew/bin/symseek" # optional; PATH lookup is default
+```
+
+Post-ingest indexing failures are logged but do not roll back a completed ingest. Use `symingest search index` and `symingest search validate` as explicit migration evidence; search reports contain no document bodies.
+
+```bash
 symingest cutover-check \
   --dry-run-report dryrun-report.json \
   --import-report import-report.json \
   --verify-report verify-report.json \
+  --search-report search-report.json \
   --vault ~/vault \
   --min-documents 6000 \
   --min-body-length 40
@@ -171,13 +195,14 @@ symingest import paperless --verify --deep --json > verify-report.json
 
 `--deep` re-downloads each selected Paperless original and compares its SHA-256 with the archived original in the vault. It is slower by design and belongs in the final migration gate, not every quick local check.
 
-`cutover-check` is intentionally strict: Paperless stays the source of truth unless the full dry-run, real import, verifier output, and vault validation are all clean and the document counts agree. Use `--json` for CI or app integration.
+`cutover-check` is intentionally strict: Paperless stays the source of truth unless the full dry-run, real import, verifier output, search validation, and vault validation are all clean and the document counts agree. Use `--json` for CI or app integration.
 
 Validate machine-readable report files before using them as cutover evidence:
 
 ```bash
 symingest report validate dryrun-report.json
 symingest report --json validate verify-report.json
+symingest report --json validate search-report.json
 ```
 
 Create a body-safe review surface and apply explicit corrections with count gates:
@@ -200,7 +225,7 @@ corrections:
     correspondent: Example GmbH
 ```
 
-The macOS app exposes these same migration surfaces: Paperless import/verify/status, migration review, corrections dry-run/final apply, frontmatter/original preview, rules create/edit/delete/test, and jobs retry/error-sidecar reveal. Paperless tokens are entered through `SecureField` and stored in Keychain; the generated config file never contains the token.
+The macOS app exposes these same migration surfaces: Paperless import/verify/status, migration review, corrections dry-run/final apply, frontmatter/original preview, rules create/edit/delete/test, jobs retry/error-sidecar reveal, watcher service controls, and manual symseek vault indexing. Paperless tokens are entered through `SecureField` and stored in Keychain; the generated config file never contains the token.
 
 For OCR quality checks, add a body-length gate to vault validation:
 
@@ -242,7 +267,7 @@ go vet ./...
 - **[symseek](https://github.com/danieljustus/symaira-seek)** — Search and retrieval
 - **[symdesk](https://github.com/danieljustus/symaira-desktop)** — Desktop shell
 
-> Design rule: `symingest` writes Markdown + frontmatter into the vault and **stops there**. Indexing and embeddings are `symseek`'s job.
+> Design rule: `symingest` writes Markdown + frontmatter into the vault. Search remains `symseek`'s job; `symingest` only shells out to `symseek` for optional post-ingest indexing and machine-readable validation evidence.
 
 ## License
 

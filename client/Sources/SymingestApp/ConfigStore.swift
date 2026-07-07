@@ -10,6 +10,8 @@ public final class ConfigStore {
     public var archivePath: String = ""
     public var inboxPath: String = ""
     public var customBinaryPath: String = ""
+    public var symseekEnabled: Bool = false
+    public var symseekBinary: String = ""
     
     private let configURL: URL
     
@@ -66,6 +68,10 @@ public final class ConfigStore {
                     self.archivePath = val
                 case "inbox":
                     self.inboxPath = val
+                case "symseek_enabled":
+                    self.symseekEnabled = ["true", "1", "yes"].contains(val.lowercased())
+                case "symseek_binary":
+                    self.symseekBinary = val
                 default:
                     break
                 }
@@ -89,6 +95,8 @@ public final class ConfigStore {
         lines.append("db_path = \"\(tomlEscape(dbPath))\"")
         lines.append("archive_path = \"\(tomlEscape(archivePath))\"")
         lines.append("inbox = \"\(tomlEscape(inboxPath))\"")
+        lines.append("symseek_enabled = \(symseekEnabled ? "true" : "false")")
+        lines.append("symseek_binary = \"\(tomlEscape(symseekBinary))\"")
         
         let fileManager = FileManager.default
         let dir = configURL.deletingLastPathComponent()

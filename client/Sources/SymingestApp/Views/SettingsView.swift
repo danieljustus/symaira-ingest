@@ -109,6 +109,22 @@ struct SettingsView: View {
                                 }
                             }
                         }
+
+                        // Symseek
+                        VStack(alignment: .leading, spacing: 8) {
+                            Toggle("Index new ingests with symseek", isOn: Bindable(configStore).symseekEnabled)
+                                .toggleStyle(.checkbox)
+                            Text("Optional: after a successful ingest, symingest asks symseek to index the generated Markdown note. Ingest does not fail if search indexing fails.")
+                                .font(.caption)
+                                .foregroundStyle(Theme.textMuted)
+                            HStack {
+                                TextField("Custom symseek binary path (optional)", text: Bindable(configStore).symseekBinary)
+                                    .textFieldStyle(.roundedBorder)
+                                Button("Choose...") {
+                                    chooseFile(for: Bindable(configStore).symseekBinary)
+                                }
+                            }
+                        }
                         
                         // Save Button
                         HStack {

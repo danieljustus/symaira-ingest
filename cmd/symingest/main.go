@@ -31,6 +31,7 @@ import (
 	"github.com/danieljustus/symaira-ingest/internal/ocr"
 	"github.com/danieljustus/symaira-ingest/internal/paperlessimport"
 	"github.com/danieljustus/symaira-ingest/internal/store"
+	symseekint "github.com/danieljustus/symaira-ingest/internal/symseek"
 	"github.com/danieljustus/symaira-ingest/internal/vaultreview"
 	"github.com/danieljustus/symaira-ingest/internal/version"
 	"github.com/danieljustus/symaira-ingest/internal/writer"
@@ -74,6 +75,8 @@ func run(args []string) error {
 		return runWatch(args[1:])
 	case "service":
 		return runService(args[1:])
+	case "search":
+		return runSearch(args[1:])
 	case "jobs":
 		return runJobs(args[1:])
 	case "retry":
@@ -118,6 +121,7 @@ Commands:
   ingest <file>       Ingest a file into the vault (one-shot)
   watch <dir>         Watch a directory for new/modified files and ingest in the background
   service             Manage the macOS LaunchAgent for the watcher
+  search              Index the vault with symseek and validate search fixtures
   import paperless    Import documents from a Paperless-ngx instance
   doctor              Validate production readiness
   setup               Generate a production config file
@@ -198,6 +202,7 @@ func runIngest(args []string) error {
 		Writer:     &writer.NoteWriter{Vault: cfg.vault},
 		ArchiveDir: cfg.archive,
 	}
+	configurePostIndex(pipeline, cfg)
 
 	ctx := context.Background()
 	res, err := pipeline.Ingest(ctx, source, nil)
@@ -440,6 +445,7 @@ func runImport(args []string) error {
 		Writer:     &writer.NoteWriter{Vault: cfg.vault},
 		ArchiveDir: cfg.archive,
 	}
+	configurePostIndex(pipeline, cfg)
 
 	opts := paperlessimport.Options{
 		BaseURL:              *baseURL,
@@ -608,6 +614,8 @@ type resolvedConfig struct {
 	ocrLang          string
 	inbox            string
 	paperlessBaseURL string
+	symseekEnabled   bool
+	symseekBinary    string
 }
 
 // registerSharedFlags adds the shared CLI flags to fs and returns pointers to
@@ -681,6 +689,8 @@ func resolveConfig(fs *flag.FlagSet, ocrLang, vaultFlag, archiveFlag, dbFlag *st
 		ocrLang:          *ocrLang,
 		inbox:            cfg.Inbox,
 		paperlessBaseURL: cfg.PaperlessBaseURL,
+		symseekEnabled:   cfg.SymseekEnabled,
+		symseekBinary:    cfg.SymseekBinary,
 	}, nil
 }
 
@@ -1332,6 +1342,12 @@ func validateReportFile(path string) reportValidationResult {
 		if err := json.Unmarshal(data, &report); err != nil {
 			result.Errors = append(result.Errors, "invalid cutover report: "+err.Error())
 		}
+	case raw["ok"] != nil && raw["checks"] != nil && raw["passed"] != nil && raw["failed"] != nil:
+		result.Kind = "search"
+		var report symseekint.ValidationReport
+		if err := json.Unmarshal(data, &report); err != nil {
+			result.Errors = append(result.Errors, "invalid search validation report: "+err.Error())
+		}
 	case raw["source_documents"] != nil && raw["verified"] != nil:
 		result.Kind = "verify"
 		var report paperlessimport.VerifyReport
@@ -1364,6 +1380,7 @@ func runCutoverCheck(args []string) error {
 	dryRunReport := fs.String("dry-run-report", "", "Full dry-run JSON report produced by 'symingest import paperless --dry-run --report'")
 	importReport := fs.String("import-report", "", "Full real-import JSON report produced by 'symingest import paperless --report'")
 	verifyReport := fs.String("verify-report", "", "Verifier JSON report produced by 'symingest import paperless --verify --json'")
+	searchReport := fs.String("search-report", "", "Search validation JSON report produced by 'symingest search validate --report'")
 	vault := fs.String("vault", "", "Vault path to validate")
 	minDocuments := fs.Int("min-documents", 0, "Minimum source document count expected before cutover")
 	minBodyLength := fs.Int("min-body-length", 0, "Fail cutover if any note body is shorter than this many non-whitespace bytes")
@@ -1377,6 +1394,7 @@ func runCutoverCheck(args []string) error {
 		DryRunReportPath: *dryRunReport,
 		ImportReportPath: *importReport,
 		VerifyReportPath: *verifyReport,
+		SearchReportPath: *searchReport,
 		VaultPath:        *vault,
 		MinDocuments:     *minDocuments,
 		MinBodyLength:    *minBodyLength,
@@ -1516,6 +1534,7 @@ func runWatch(args []string) error {
 		ProcessedDir: *processedDir,
 		FailedDir:    *failedDir,
 	}
+	configurePostIndex(pipeline, cfg)
 
 	if err := watcher.Start(ctx); err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindInternal,

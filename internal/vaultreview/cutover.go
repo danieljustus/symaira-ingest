@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/danieljustus/symaira-ingest/internal/paperlessimport"
+	symseekint "github.com/danieljustus/symaira-ingest/internal/symseek"
 )
 
 const (
@@ -22,6 +23,7 @@ type CutoverOptions struct {
 	DryRunReportPath string
 	ImportReportPath string
 	VerifyReportPath string
+	SearchReportPath string
 	VaultPath        string
 	MinDocuments     int
 	MinBodyLength    int
@@ -71,14 +73,17 @@ func BuildCutoverReport(opts CutoverOptions) (*CutoverReport, error) {
 	dryRun := loadMigrationEvidence(report, "dry-run", opts.DryRunReportPath)
 	imp := loadMigrationEvidence(report, "import", opts.ImportReportPath)
 	verify := loadVerifyEvidence(report, opts.VerifyReportPath)
+	search := loadSearchEvidence(report, opts.SearchReportPath)
 	checkMigrationReportSchema(report, "dry-run", dryRun)
 	checkMigrationReportSchema(report, "import", imp)
 	checkVerifyReportSchema(report, verify)
+	checkSearchReportSchema(report, search)
 	validateVaultEvidence(report, opts.VaultPath, verify, opts.MinBodyLength)
 
 	checkDryRunEvidence(report, dryRun, opts.MinDocuments)
 	checkImportEvidence(report, imp, opts.MinDocuments)
 	checkVerifyEvidence(report, verify, opts.MinDocuments)
+	checkSearchEvidence(report, search)
 	checkCountConsistency(report, dryRun, imp, verify)
 
 	report.Ready = len(report.Blockers) == 0
@@ -105,6 +110,17 @@ func checkVerifyReportSchema(r *CutoverReport, report *paperlessimport.VerifyRep
 		return
 	}
 	r.add("verify report schema", CutoverStatusPass, fmt.Sprintf("schema_version=%d", report.SchemaVersion))
+}
+
+func checkSearchReportSchema(r *CutoverReport, report *symseekint.ValidationReport) {
+	if report == nil {
+		return
+	}
+	if report.SchemaVersion != symseekint.ReportSchemaVersion {
+		r.add("search report schema", CutoverStatusFail, fmt.Sprintf("schema_version=%d; expected %d", report.SchemaVersion, symseekint.ReportSchemaVersion))
+		return
+	}
+	r.add("search report schema", CutoverStatusPass, fmt.Sprintf("schema_version=%d", report.SchemaVersion))
 }
 
 func loadMigrationEvidence(r *CutoverReport, label, path string) *paperlessimport.MigrationReport {
@@ -138,6 +154,24 @@ func loadVerifyEvidence(r *CutoverReport, path string) *paperlessimport.VerifyRe
 	var report paperlessimport.VerifyReport
 	if err := json.Unmarshal(data, &report); err != nil {
 		r.add("verify report", CutoverStatusFail, "invalid JSON: "+err.Error())
+		return nil
+	}
+	return &report
+}
+
+func loadSearchEvidence(r *CutoverReport, path string) *symseekint.ValidationReport {
+	if strings.TrimSpace(path) == "" {
+		r.add("search validation report", CutoverStatusFail, "missing required report path")
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		r.add("search validation report", CutoverStatusFail, err.Error())
+		return nil
+	}
+	var report symseekint.ValidationReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		r.add("search validation report", CutoverStatusFail, "invalid JSON: "+err.Error())
 		return nil
 	}
 	return &report
@@ -267,6 +301,21 @@ func checkVerifyEvidence(r *CutoverReport, verify *paperlessimport.VerifyReport,
 		r.add("duplicate content", CutoverStatusWarn, fmt.Sprintf("%d Paperless document(s) share original bytes with another ID; allowed when each ID has its own note", len(verify.DuplicateContent)))
 	}
 	r.add("verify gate", CutoverStatusPass, fmt.Sprintf("%d source documents verified", verify.Verified))
+}
+
+func checkSearchEvidence(r *CutoverReport, search *symseekint.ValidationReport) {
+	if search == nil {
+		return
+	}
+	if search.Total == 0 {
+		r.add("search validation gate", CutoverStatusFail, "search validation report contains no query fixtures")
+		return
+	}
+	if !search.OK || search.Failed > 0 {
+		r.add("search validation gate", CutoverStatusFail, fmt.Sprintf("%d/%d search fixture(s) failed", search.Failed, search.Total))
+		return
+	}
+	r.add("search validation gate", CutoverStatusPass, fmt.Sprintf("%d search fixture(s) passed", search.Passed))
 }
 
 func checkCountConsistency(r *CutoverReport, dryRun, imp *paperlessimport.MigrationReport, verify *paperlessimport.VerifyReport) {

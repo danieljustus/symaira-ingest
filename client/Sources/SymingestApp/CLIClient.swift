@@ -119,6 +119,8 @@ public struct CLIConfigSnapshot: Sendable {
     public let archivePath: String
     public let inboxPath: String
     public let customBinaryPath: String
+    public let symseekEnabled: Bool
+    public let symseekBinary: String
 
     @MainActor
     public init(config: ConfigStore) {
@@ -128,6 +130,8 @@ public struct CLIConfigSnapshot: Sendable {
         self.archivePath = config.archivePath
         self.inboxPath = config.inboxPath
         self.customBinaryPath = config.customBinaryPath
+        self.symseekEnabled = config.symseekEnabled
+        self.symseekBinary = config.symseekBinary
     }
 }
 
@@ -178,6 +182,8 @@ public final class CLIClient: Sendable {
         if !config.dbPath.isEmpty { env["SYMINGEST_DB_PATH"] = config.dbPath }
         if !config.ocrLang.isEmpty { env["SYMINGEST_OCR_LANG"] = config.ocrLang }
         if !config.inboxPath.isEmpty { env["SYMINGEST_INBOX"] = config.inboxPath }
+        env["SYMINGEST_SYMSEEK_ENABLED"] = config.symseekEnabled ? "true" : "false"
+        if !config.symseekBinary.isEmpty { env["SYMINGEST_SYMSEEK_BINARY"] = config.symseekBinary }
     }
 
     public func runIngestCommand(args: [String], config: ConfigStore, environment: [String: String] = [:]) async throws -> (stdout: String, stderr: String) {
@@ -351,6 +357,21 @@ public final class CLIClient: Sendable {
             let (out, err) = try await runIngestCommand(args: args, config: config)
             let message = (err.isEmpty ? out : err).trimmingCharacters(in: .whitespacesAndNewlines)
             return (err.isEmpty, message)
+        } catch {
+            return (false, error.localizedDescription)
+        }
+    }
+
+    public func indexVault(config: ConfigStore) async -> (success: Bool, message: String) {
+        do {
+            let snapshot = await CLIConfigSnapshot(config: config)
+            var args = ["search", "--json"]
+            if !snapshot.vault.isEmpty { args += ["--vault", snapshot.vault] }
+            if !snapshot.symseekBinary.isEmpty { args += ["--symseek-binary", snapshot.symseekBinary] }
+            args.append("index")
+            let (out, err) = try await runIngestCommand(args: args, config: config)
+            let message = (err.isEmpty ? out : err).trimmingCharacters(in: .whitespacesAndNewlines)
+            return (err.isEmpty && out.contains("\"ok\": true"), message)
         } catch {
             return (false, error.localizedDescription)
         }

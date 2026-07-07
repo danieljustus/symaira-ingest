@@ -152,17 +152,31 @@ symingest validate-vault --min-body-length 40 "$SYMINGEST_VAULT"
 
 `--min-body-length` fails notes whose extracted Markdown body is empty or suspiciously short. Adjust the threshold if you intentionally imported very short text snippets.
 
-Point [`symseek`](https://github.com/danieljustus/symaira-seek) at the vault and confirm that migrated documents are findable. Consult the `symseek` README for its exact CLI; the steps are:
+Point [`symseek`](https://github.com/danieljustus/symaira-seek) at the vault and confirm that migrated documents are findable. Use `symingest` to produce machine-readable search evidence:
 
-1. Index the vault with `symseek`.
-2. Search for several documents you know exist (by title, correspondent, and a
-   distinctive phrase) and confirm the generated notes are returned.
+```bash
+symingest search index "$SYMINGEST_VAULT"
+
+cat > search-fixtures.json <<'JSON'
+[
+  {"query":"known title or unique phrase", "min_results":1, "must_contain":["expected-file-or-term"]}
+]
+JSON
+
+symingest search validate \
+  --fixtures search-fixtures.json \
+  --report search-report.json
+```
+
+Fixture rules are intentionally simple: each query must return at least `min_results`, and optional `must_contain` strings must appear in the raw JSON results. This keeps the report body-safe while still proving retrieval works.
+
 3. Spot-check that a result links back to its archived original.
 
 **Pass criteria (Gate E):**
 
 - `validate-vault --min-body-length ...` exits `0`.
 - `symseek` indexes the vault without error.
+- `symingest search validate --report search-report.json` exits `0`.
 - Known documents are returned by search across title, metadata, and content.
 
 ## 6. Cutover decision
@@ -174,12 +188,13 @@ symingest cutover-check \
   --dry-run-report dryrun-report.json \
   --import-report import-report.json \
   --verify-report verify-report.json \
+  --search-report search-report.json \
   --vault "$SYMINGEST_VAULT" \
   --min-documents <expected-paperless-count> \
   --min-body-length 40
 ```
 
-Use `--json` in automation. The command exits non-zero when any required gate is missing, any report contains failures, the vault fails validation, or document counts disagree.
+Use `--json` in automation. The command exits non-zero when any required gate is missing, any report contains failures, search validation fails, the vault fails validation, or document counts disagree.
 
 Only when Gates A–E **and** `cutover-check` are **all** green:
 
@@ -207,7 +222,7 @@ Because Paperless was never modified by this process, rollback is simply
 | B | Pilot | Subset imports with `failed: 0` and verifies clean |
 | C | Full import | `failed: 0`, `imported + skipped == total` |
 | D | Verifier | Exit `0`; no missing/duplicate/missing-archive/mismatch |
-| E | Search | `symseek` indexes the vault; known documents are findable |
+| E | Search | `symingest search validate` report is clean; known documents are findable |
 | F | Cutover check | `symingest cutover-check` exits `0`; all evidence reports agree |
 
 Paperless stays the source of truth until Gate F passes.

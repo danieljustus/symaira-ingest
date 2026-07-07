@@ -9,7 +9,9 @@ struct DashboardView: View {
     @State private var isIngesting = false
     @State private var ingestResult: String?
     @State private var serviceResult: String?
+    @State private var searchResult: String?
     @State private var isServiceBusy = false
+    @State private var isSearchBusy = false
     @State private var isResultSuccess = true
     
     var body: some View {
@@ -143,6 +145,45 @@ struct DashboardView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .frame(maxHeight: 110)
+                    .padding(8)
+                    .background(Color.black.opacity(0.35))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+            }
+            .padding()
+            .background(Theme.bgCard)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Theme.borderGlass, lineWidth: 1)
+            )
+
+            // Search indexing controls
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Label("Search Index", systemImage: "magnifyingglass.circle.fill")
+                        .font(.headline)
+                        .foregroundStyle(Theme.textPrimary)
+                    Spacer()
+                    Button("Index Vault") { Task { await indexVault() } }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Theme.goldPrimary)
+                        .disabled(isSearchBusy || configStore.vault.isEmpty)
+                }
+                Text(configStore.symseekEnabled ? "Post-ingest symseek indexing is enabled in Settings." : "Post-ingest indexing is disabled. Manual vault indexing remains available.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textMuted)
+                if isSearchBusy {
+                    ProgressView("Indexing vault with symseek...")
+                        .controlSize(.small)
+                } else if let searchResult {
+                    ScrollView {
+                        Text(searchResult)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(Theme.textSecondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 95)
                     .padding(8)
                     .background(Color.black.opacity(0.35))
                     .clipShape(RoundedRectangle(cornerRadius: 6))
@@ -349,5 +390,13 @@ struct DashboardView: View {
         let result = await CLIClient.shared.serviceLogs(config: configStore)
         isServiceBusy = false
         serviceResult = result.message.isEmpty ? "No service logs yet." : result.message
+    }
+
+    private func indexVault() async {
+        isSearchBusy = true
+        searchResult = nil
+        let result = await CLIClient.shared.indexVault(config: configStore)
+        isSearchBusy = false
+        searchResult = result.message.isEmpty ? (result.success ? "Vault indexed." : "Indexing failed.") : result.message
     }
 }
