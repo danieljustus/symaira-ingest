@@ -188,7 +188,7 @@ jobs:
         if: steps.signing.outputs.signed == 'true'
         run: |
           set -euo pipefail
-          codesign -s "$CODESIGN_IDENTITY" --timestamp --options runtime --deep build_dd/Build/Products/Release/Symingest.app
+          codesign -f -s "$CODESIGN_IDENTITY" --timestamp --options runtime --deep build_dd/Build/Products/Release/Symingest.app
           codesign --verify --deep --strict --verbose=2 build_dd/Build/Products/Release/Symingest.app
 
       - name: Package DMG
@@ -215,7 +215,7 @@ jobs:
           NOTARY_API_KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
         run: |
           set -euo pipefail
-          codesign -s "$CODESIGN_IDENTITY" --timestamp --options runtime dist/Symingest.dmg
+          codesign -f -s "$CODESIGN_IDENTITY" --timestamp --options runtime dist/Symingest.dmg
           codesign --verify --verbose=2 dist/Symingest.dmg
           if [ -z "${NOTARY_API_KEY:-}" ]; then
             echo "::warning::NOTARY_API_KEY secret is not set. Skipping DMG notarization."
