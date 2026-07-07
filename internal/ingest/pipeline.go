@@ -26,6 +26,10 @@ type Pipeline struct {
 	ArchiveDir   string
 	ProcessedDir string
 	FailedDir    string
+	// PostIndex optionally indexes the generated Markdown note after a
+	// successful write. Errors are logged, not fatal: search indexing must not
+	// corrupt or roll back a completed ingest.
+	PostIndex func(context.Context, string) error
 }
 
 // ErrDuplicate is returned when a source has already been ingested.
@@ -72,6 +76,9 @@ func (p *Pipeline) Ingest(ctx context.Context, source string, opts *IngestOption
 		return nil, fmt.Errorf("record document: %w", err)
 	}
 	if !created {
+		if opts != nil && opts.AllowDuplicateContent {
+			return p.processSource(ctx, source, hash, kind, opts)
+		}
 		if _, err := p.Store.EnqueueSkippedJob(ctx, doc.ID, string(kind), "duplicate"); err != nil {
 			return nil, fmt.Errorf("enqueue skipped job: %w", err)
 		}
@@ -131,18 +138,20 @@ func (p *Pipeline) processJob(ctx context.Context, job *store.Job, opts *IngestO
 	if err != nil {
 		return nil, fmt.Errorf("get document: %w", err)
 	}
+	return p.processSource(ctx, doc.SourcePath, doc.SHA256, extract.Kind(job.Kind), opts)
+}
 
-	kind := extract.Kind(job.Kind)
-
+func (p *Pipeline) processSource(ctx context.Context, source, hash string, kind extract.Kind, opts *IngestOptions) (*Result, error) {
 	var extractRes *extract.Result
+	var err error
 	switch kind {
 	case extract.KindText, extract.KindMarkdown, extract.KindCSV:
-		extractRes, err = extractText(ctx, doc.SourcePath, kind, nil)
+		extractRes, err = extractText(ctx, source, kind, nil)
 	default:
 		if p.Engine == nil {
 			return nil, fmt.Errorf("no extraction engine available for %q", kind)
 		}
-		extractRes, err = extractText(ctx, doc.SourcePath, kind, p.Engine)
+		extractRes, err = extractText(ctx, source, kind, p.Engine)
 	}
 	if err != nil {
 		return nil, err
@@ -150,9 +159,9 @@ func (p *Pipeline) processJob(ctx context.Context, job *store.Job, opts *IngestO
 
 	var archivePath string
 	if p.ArchiveDir != "" {
-		ext := filepath.Ext(doc.SourcePath)
-		archivePath = filepath.Join(p.ArchiveDir, doc.SHA256+ext)
-		if err := atomicCopy(doc.SourcePath, archivePath); err != nil {
+		ext := filepath.Ext(source)
+		archivePath = filepath.Join(p.ArchiveDir, hash+ext)
+		if err := atomicCopy(source, archivePath); err != nil {
 			return nil, fmt.Errorf("archive file: %w", err)
 		}
 	}
@@ -219,7 +228,7 @@ func (p *Pipeline) processJob(ctx context.Context, job *store.Job, opts *IngestO
 
 	var paperlessMeta *writer.PaperlessMeta
 	var layout *writer.NoteLayout
-	noteSourcePath := doc.SourcePath
+	noteSourcePath := source
 	var importedFrom, importRunID, sourceURI, downloadURI string
 	if opts != nil {
 		paperlessMeta = opts.Paperless
@@ -235,7 +244,7 @@ func (p *Pipeline) processJob(ctx context.Context, job *store.Job, opts *IngestO
 
 	vaultPath, err := p.Writer.WriteNote(
 		noteSourcePath,
-		doc.SHA256,
+		hash,
 		extractRes.MIME,
 		extractRes.Engine,
 		extractRes.Text,
@@ -255,10 +264,15 @@ func (p *Pipeline) processJob(ctx context.Context, job *store.Job, opts *IngestO
 	if err != nil {
 		return nil, fmt.Errorf("write note: %w", err)
 	}
+	if p.PostIndex != nil {
+		if err := p.PostIndex(ctx, vaultPath); err != nil {
+			log.Printf("symseek post-ingest index failed for %s: %v", vaultPath, err)
+		}
+	}
 
 	return &Result{
 		SourcePath:    noteSourcePath,
-		SHA256:        doc.SHA256,
+		SHA256:        hash,
 		Kind:          kind,
 		Extract:       extractRes,
 		VaultPath:     vaultPath,

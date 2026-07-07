@@ -109,6 +109,22 @@ struct SettingsView: View {
                                 }
                             }
                         }
+
+                        // Symseek
+                        VStack(alignment: .leading, spacing: 8) {
+                            Toggle("Index new ingests with symseek", isOn: Bindable(configStore).symseekEnabled)
+                                .toggleStyle(.checkbox)
+                            Text("Optional: after a successful ingest, symingest asks symseek to index the generated Markdown note. Ingest does not fail if search indexing fails.")
+                                .font(.caption)
+                                .foregroundStyle(Theme.textMuted)
+                            HStack {
+                                TextField("Custom symseek binary path (optional)", text: Bindable(configStore).symseekBinary)
+                                    .textFieldStyle(.roundedBorder)
+                                Button("Choose...") {
+                                    chooseFile(for: Bindable(configStore).symseekBinary)
+                                }
+                            }
+                        }
                         
                         // Save Button
                         HStack {
@@ -199,6 +215,27 @@ struct SettingsView: View {
                                     name: "sips utility",
                                     path: report.sipsPath,
                                     help: "Optional. Pre-installed tool on macOS for processing HEIC/HEIF scans.",
+                                    isOptional: true
+                                )
+
+                                dependencyRow(
+                                    name: "textutil",
+                                    path: report.textutilPath,
+                                    help: "Optional fallback converter for rich text / office-like documents on macOS.",
+                                    isOptional: true
+                                )
+
+                                dependencyRow(
+                                    name: "pandoc",
+                                    path: report.pandocPath,
+                                    help: "Optional fallback converter for document formats. Install via Homebrew: 'brew install pandoc'.",
+                                    isOptional: true
+                                )
+
+                                dependencyRow(
+                                    name: "LibreOffice",
+                                    path: report.libreOfficePath ?? report.sofficePath,
+                                    help: "Optional fallback converter for office documents. Install via Homebrew Cask: 'brew install --cask libreoffice'.",
                                     isOptional: true
                                 )
                             }

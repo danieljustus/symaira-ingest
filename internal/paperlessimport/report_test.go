@@ -56,6 +56,9 @@ func TestBuildMigrationReport_RealImport(t *testing.T) {
 	}
 
 	report := stats.BuildMigrationReport(false)
+	if report.SchemaVersion != ReportSchemaVersion {
+		t.Fatalf("schema_version = %d, want %d", report.SchemaVersion, ReportSchemaVersion)
+	}
 	if report.DryRun {
 		t.Error("report.DryRun = true, want false")
 	}
@@ -128,8 +131,8 @@ func TestBuildMigrationReport_DryRunCarriesAudit(t *testing.T) {
 	if len(report.Documents) != 1 || report.Documents[0].Status != "would-import" {
 		t.Errorf("documents = %+v, want one would-import entry", report.Documents)
 	}
-	if report.UnsupportedFileTypes["xlsx"] != 1 {
-		t.Errorf("UnsupportedFileTypes[xlsx] = %d, want 1", report.UnsupportedFileTypes["xlsx"])
+	if report.UnsupportedFileTypes["xlsx"] != 0 {
+		t.Errorf("UnsupportedFileTypes[xlsx] = %d, want 0 after native XLSX support", report.UnsupportedFileTypes["xlsx"])
 	}
 	if len(report.UnresolvedTagIDs) != 1 || report.UnresolvedTagIDs[0] != 99 {
 		t.Errorf("UnresolvedTagIDs = %v, want [99]", report.UnresolvedTagIDs)

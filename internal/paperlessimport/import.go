@@ -3,6 +3,7 @@ package paperlessimport
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -503,7 +504,16 @@ func Run(ctx context.Context, opts Options, pipeline *ingest.Pipeline) (*Stats, 
 		fmt.Fprintf(progressOut, "[%d/%d] %s\n", i+1, stats.Total, doc.Title)
 		progressMu.Unlock()
 
-		status, found, serr := pipeline.Store.PaperlessImportStatusForTarget(ctx, opts.BaseURL, targetVault, targetArchive, doc.ID)
+		state, serr := pipeline.Store.PaperlessImportStateForTarget(ctx, opts.BaseURL, targetVault, targetArchive, doc.ID)
+		found := serr == nil
+		if errors.Is(serr, sql.ErrNoRows) {
+			serr = nil
+			found = false
+		}
+		status := ""
+		if state != nil {
+			status = state.Status
+		}
 		if serr != nil {
 			mu.Lock()
 			stats.Warnings = append(stats.Warnings, fmt.Sprintf("document %d: read import state: %v", doc.ID, serr))
@@ -515,6 +525,12 @@ func Run(ctx context.Context, opts Options, pipeline *ingest.Pipeline) (*Stats, 
 			progressMu.Unlock()
 			result := plannedDocumentResult(doc, stats.RunID, "skipped")
 			result.Reason = "already imported in a previous run"
+			if state != nil {
+				result.VaultPath = state.VaultPath
+				result.ArchivePath = state.ArchivePath
+				result.SHA256 = state.SHA256
+				result.ActualArchiveExtension = filepath.Ext(state.ArchivePath)
+			}
 			record(i, result, nil, "skipped")
 			return ctx.Err()
 		}
@@ -726,16 +742,17 @@ func importOne(ctx context.Context, client *paperless.Client, doc paperless.Docu
 	}
 
 	preset := &ingest.IngestOptions{
-		PresetCategory:      documentType,
-		PresetTags:          tags,
-		PresetCorrespondent: correspondent,
-		PresetDocumentType:  documentType,
-		Layout:              layout,
-		SourcePathOverride:  result.DownloadURI,
-		ImportedFrom:        "paperless",
-		ImportRunID:         runID,
-		SourceURI:           result.SourceURI,
-		DownloadURI:         result.DownloadURI,
+		PresetCategory:        documentType,
+		PresetTags:            tags,
+		PresetCorrespondent:   correspondent,
+		PresetDocumentType:    documentType,
+		Layout:                layout,
+		SourcePathOverride:    result.DownloadURI,
+		ImportedFrom:          "paperless",
+		ImportRunID:           runID,
+		SourceURI:             result.SourceURI,
+		DownloadURI:           result.DownloadURI,
+		AllowDuplicateContent: true,
 		Paperless: &writer.PaperlessMeta{
 			DocumentID:       doc.ID,
 			Title:            doc.Title,

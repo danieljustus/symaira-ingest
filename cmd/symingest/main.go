@@ -31,6 +31,7 @@ import (
 	"github.com/danieljustus/symaira-ingest/internal/ocr"
 	"github.com/danieljustus/symaira-ingest/internal/paperlessimport"
 	"github.com/danieljustus/symaira-ingest/internal/store"
+	symseekint "github.com/danieljustus/symaira-ingest/internal/symseek"
 	"github.com/danieljustus/symaira-ingest/internal/vaultreview"
 	"github.com/danieljustus/symaira-ingest/internal/version"
 	"github.com/danieljustus/symaira-ingest/internal/writer"
@@ -72,6 +73,10 @@ func run(args []string) error {
 		return runIngest(args[1:])
 	case "watch":
 		return runWatch(args[1:])
+	case "service":
+		return runService(args[1:])
+	case "search":
+		return runSearch(args[1:])
 	case "jobs":
 		return runJobs(args[1:])
 	case "retry":
@@ -94,6 +99,8 @@ func run(args []string) error {
 		return runApplyCorrections(args[1:])
 	case "review-report":
 		return runReviewReport(args[1:])
+	case "report":
+		return runReport(args[1:])
 	case "cutover-check":
 		return runCutoverCheck(args[1:])
 	case "mcp":
@@ -113,6 +120,8 @@ Usage:
 Commands:
   ingest <file>       Ingest a file into the vault (one-shot)
   watch <dir>         Watch a directory for new/modified files and ingest in the background
+  service             Manage the macOS LaunchAgent for the watcher
+  search              Index the vault with symseek and validate search fixtures
   import paperless    Import documents from a Paperless-ngx instance
   doctor              Validate production readiness
   setup               Generate a production config file
@@ -121,10 +130,11 @@ Commands:
   bulk-update         Safely update multiple notes selected by frontmatter
   apply-corrections   Apply YAML corrections keyed by paperless_id
   review-report       Generate a human-reviewable migration report
+  report              Validate machine-readable migration reports
   cutover-check       Gate whether Paperless can stop being source of truth
   jobs                List ingestion jobs in the queue
   retry <id>          Retry a failed job by ID
-  rules               Manage classification rules (list, add, delete)
+  rules               Manage classification rules (list, add, update, test, delete)
   mcp                 Start the MCP server
   version             Print version
   help                Show this help`)
@@ -192,6 +202,7 @@ func runIngest(args []string) error {
 		Writer:     &writer.NoteWriter{Vault: cfg.vault},
 		ArchiveDir: cfg.archive,
 	}
+	configurePostIndex(pipeline, cfg)
 
 	ctx := context.Background()
 	res, err := pipeline.Ingest(ctx, source, nil)
@@ -404,7 +415,7 @@ func runImport(args []string) error {
 	}
 
 	if *verify {
-		report, err := paperlessimport.Verify(ctx, paperlessimport.Options{BaseURL: *baseURL, Token: *token, Since: since, Limit: *limit, IDs: ids, DeepVerify: *deepVerify}, cfg.vault, st)
+		report, err := paperlessimport.Verify(ctx, paperlessimport.Options{BaseURL: *baseURL, Token: *token, Since: since, Limit: *limit, IDs: ids, DeepVerify: *deepVerify, TargetVault: cfg.vault, TargetArchive: cfg.archive}, cfg.vault, st)
 		if err != nil {
 			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
 				"verification failed")
@@ -434,6 +445,7 @@ func runImport(args []string) error {
 		Writer:     &writer.NoteWriter{Vault: cfg.vault},
 		ArchiveDir: cfg.archive,
 	}
+	configurePostIndex(pipeline, cfg)
 
 	opts := paperlessimport.Options{
 		BaseURL:              *baseURL,
@@ -602,6 +614,8 @@ type resolvedConfig struct {
 	ocrLang          string
 	inbox            string
 	paperlessBaseURL string
+	symseekEnabled   bool
+	symseekBinary    string
 }
 
 // registerSharedFlags adds the shared CLI flags to fs and returns pointers to
@@ -675,6 +689,8 @@ func resolveConfig(fs *flag.FlagSet, ocrLang, vaultFlag, archiveFlag, dbFlag *st
 		ocrLang:          *ocrLang,
 		inbox:            cfg.Inbox,
 		paperlessBaseURL: cfg.PaperlessBaseURL,
+		symseekEnabled:   cfg.SymseekEnabled,
+		symseekBinary:    cfg.SymseekBinary,
 	}, nil
 }
 
@@ -1124,7 +1140,11 @@ func printUpdateResults(results []vaultreview.UpdateResult) {
 		} else if !r.Written {
 			mode = "unchanged"
 		}
-		fmt.Fprintf(stdout, "%s: %s (%s)\n", mode, r.File, strings.Join(r.Changes, ", "))
+		backup := ""
+		if r.BackupPath != "" {
+			backup = " backup=" + r.BackupPath
+		}
+		fmt.Fprintf(stdout, "%s: paperless_id=%d %s (%s)%s\n", mode, r.PaperlessID, r.File, strings.Join(r.Changes, ", "), backup)
 	}
 }
 
@@ -1160,6 +1180,9 @@ func runBulkUpdate(args []string) error {
 	vault := fs.String("vault", "", "Vault path")
 	where := fs.String("where", "", "Selector, currently tag:<name>")
 	dryRun := fs.Bool("dry-run", false, "Show exact frontmatter changes without writing")
+	maxUpdates := fs.Int("max", 0, "Refuse when matched corrections exceed this count; 0 disables")
+	requireCount := fs.Int("require-count", 0, "Refuse unless exactly this many notes match; 0 disables")
+	backupDir := fs.String("backup-dir", "", "Directory for undo backups before writes; default .symingest-backups next to each note")
 	paperlessID := fs.Int("paperless-id", 0, "Ignored for bulk updates")
 	var addTags, removeTags stringList
 	fs.Var(&addTags, "add-tag", "Tag to add")
@@ -1175,7 +1198,7 @@ func runBulkUpdate(args []string) error {
 	if *vault == "" || !strings.HasPrefix(*where, "tag:") {
 		return exitcodes.Wrapf(nil, exitcodes.ExitNoInput, exitcodes.KindValidation, "--vault and --where tag:<name> are required")
 	}
-	results, err := vaultreview.BulkUpdateByTag(*vault, strings.TrimPrefix(*where, "tag:"), correctionFromFlags(fs, paperlessID, &addTags, &removeTags, correspondent, documentType, storagePath), *dryRun)
+	results, err := vaultreview.BulkUpdateByTagWithOptions(*vault, strings.TrimPrefix(*where, "tag:"), correctionFromFlags(fs, paperlessID, &addTags, &removeTags, correspondent, documentType, storagePath), vaultreview.BulkUpdateOptions{DryRun: *dryRun, Max: *maxUpdates, RequireCount: *requireCount, BackupDir: *backupDir})
 	if err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation, "bulk update failed")
 	}
@@ -1187,6 +1210,9 @@ func runApplyCorrections(args []string) error {
 	fs := flag.NewFlagSet("apply-corrections", flag.ContinueOnError)
 	vault := fs.String("vault", "", "Vault path")
 	dryRun := fs.Bool("dry-run", false, "Show exact frontmatter changes without writing")
+	maxUpdates := fs.Int("max", 0, "Refuse when corrections exceed this count; 0 disables")
+	requireCount := fs.Int("require-count", 0, "Refuse unless corrections.yaml contains exactly this many entries; 0 disables")
+	backupDir := fs.String("backup-dir", "", "Directory for undo backups before writes; default .symingest-backups next to each note")
 	configureUsage(fs, "apply-corrections [flags] <corrections.yaml>", "Apply YAML corrections keyed by paperless_id.")
 	help, err := parseFlags(fs, args, "invalid apply-corrections flags")
 	if help || err != nil {
@@ -1195,7 +1221,7 @@ func runApplyCorrections(args []string) error {
 	if *vault == "" || fs.NArg() != 1 {
 		return exitcodes.Wrapf(nil, exitcodes.ExitNoInput, exitcodes.KindValidation, "--vault and corrections.yaml are required")
 	}
-	results, err := vaultreview.ApplyCorrectionsFile(*vault, fs.Arg(0), *dryRun)
+	results, err := vaultreview.ApplyCorrectionsFileWithOptions(*vault, fs.Arg(0), vaultreview.ApplyOptions{DryRun: *dryRun, Max: *maxUpdates, RequireCount: *requireCount, BackupDir: *backupDir})
 	if err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation, "apply corrections failed")
 	}
@@ -1210,15 +1236,19 @@ func runReviewReport(args []string) error {
 	failed := fs.Bool("failed", false, "Show failed documents")
 	warningsOnly := fs.Bool("warnings", false, "Show documents with warnings or errors")
 	missingMetadata := fs.Bool("missing-metadata", false, "Show documents missing key metadata paths/MIME")
-	configureUsage(fs, "review-report [flags] <migration.json>", "Generate a human-reviewable migration report without document body text.")
+	lowBody := fs.Bool("low-body", false, "Show documents with low/short body warnings")
+	duplicateContent := fs.Bool("duplicate-content", false, "Show verify findings for duplicate original bytes across Paperless IDs")
+	unsupported := fs.Bool("unsupported", false, "Show unsupported format findings")
+	unresolved := fs.Bool("unresolved", false, "Show unresolved metadata reference findings")
+	configureUsage(fs, "review-report [flags] <migration-or-verify-report.json>", "Generate a human-reviewable migration/verify report without document body text.")
 	help, err := parseFlags(fs, args, "invalid review-report flags")
 	if help || err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return exitcodes.Wrapf(nil, exitcodes.ExitNoInput, exitcodes.KindValidation, "review-report requires migration.json")
+		return exitcodes.Wrapf(nil, exitcodes.ExitNoInput, exitcodes.KindValidation, "review-report requires migration-or-verify-report.json")
 	}
-	report, err := vaultreview.BuildReviewReport(fs.Arg(0), vaultreview.ReviewFilters{Failed: *failed, Warnings: *warningsOnly, MissingMetadata: *missingMetadata})
+	report, err := vaultreview.BuildReviewReport(fs.Arg(0), vaultreview.ReviewFilters{Failed: *failed, Warnings: *warningsOnly, MissingMetadata: *missingMetadata, LowBody: *lowBody, DuplicateContent: *duplicateContent, Unsupported: *unsupported, Unresolved: *unresolved})
 	if err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitData, exitcodes.KindValidation, "review report failed")
 	}
@@ -1242,11 +1272,115 @@ func runReviewReport(args []string) error {
 	return nil
 }
 
+type reportValidationResult struct {
+	Path          string   `json:"path"`
+	Kind          string   `json:"kind"`
+	SchemaVersion int      `json:"schema_version"`
+	ToolVersion   string   `json:"tool_version,omitempty"`
+	Valid         bool     `json:"valid"`
+	Errors        []string `json:"errors,omitempty"`
+}
+
+func runReport(args []string) error {
+	fs := flag.NewFlagSet("report", flag.ContinueOnError)
+	jsonFlag := fs.Bool("json", false, "Output validation result as JSON")
+	configureUsage(fs, "report [flags] validate <report.json>", "Validate a machine-readable migration, verify, or cutover JSON report.")
+	help, err := parseFlags(fs, args, "invalid report flags")
+	if help || err != nil {
+		return err
+	}
+	remaining := fs.Args()
+	if len(remaining) != 2 || remaining[0] != "validate" {
+		fs.Usage()
+		return nil
+	}
+	result := validateReportFile(remaining[1])
+	if *jsonFlag {
+		data, err := json.MarshalIndent(result, "", "  ")
+		if err != nil {
+			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal, "failed to marshal report validation")
+		}
+		fmt.Fprintln(stdout, string(data))
+	} else if result.Valid {
+		fmt.Fprintf(stdout, "report valid: %s (%s schema_version=%d)\n", result.Path, result.Kind, result.SchemaVersion)
+	} else {
+		fmt.Fprintf(stdout, "report invalid: %s\n", result.Path)
+		for _, e := range result.Errors {
+			fmt.Fprintf(stdout, "- %s\n", e)
+		}
+	}
+	if !result.Valid {
+		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation, "report validation failed")
+	}
+	return nil
+}
+
+func validateReportFile(path string) reportValidationResult {
+	result := reportValidationResult{Path: path, Valid: true}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		result.Valid = false
+		result.Errors = append(result.Errors, err.Error())
+		return result
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		result.Valid = false
+		result.Errors = append(result.Errors, "invalid JSON: "+err.Error())
+		return result
+	}
+	if v, ok := raw["schema_version"].(float64); ok {
+		result.SchemaVersion = int(v)
+	}
+	if v, ok := raw["tool_version"].(string); ok {
+		result.ToolVersion = v
+	}
+	switch {
+	case raw["ready"] != nil && raw["checks"] != nil:
+		result.Kind = "cutover"
+		var report vaultreview.CutoverReport
+		if err := json.Unmarshal(data, &report); err != nil {
+			result.Errors = append(result.Errors, "invalid cutover report: "+err.Error())
+		}
+	case raw["ok"] != nil && raw["checks"] != nil && raw["passed"] != nil && raw["failed"] != nil:
+		result.Kind = "search"
+		var report symseekint.ValidationReport
+		if err := json.Unmarshal(data, &report); err != nil {
+			result.Errors = append(result.Errors, "invalid search validation report: "+err.Error())
+		}
+	case raw["source_documents"] != nil && raw["verified"] != nil:
+		result.Kind = "verify"
+		var report paperlessimport.VerifyReport
+		if err := json.Unmarshal(data, &report); err != nil {
+			result.Errors = append(result.Errors, "invalid verify report: "+err.Error())
+		}
+	case raw["documents"] != nil && raw["total"] != nil:
+		result.Kind = "migration"
+		var report paperlessimport.MigrationReport
+		if err := json.Unmarshal(data, &report); err != nil {
+			result.Errors = append(result.Errors, "invalid migration report: "+err.Error())
+		}
+	default:
+		result.Errors = append(result.Errors, "unknown report kind")
+	}
+	if result.SchemaVersion != paperlessimport.ReportSchemaVersion {
+		result.Errors = append(result.Errors, fmt.Sprintf("schema_version=%d; expected %d", result.SchemaVersion, paperlessimport.ReportSchemaVersion))
+	}
+	if result.Kind != "cutover" && result.ToolVersion == "" {
+		result.Errors = append(result.Errors, "missing tool_version")
+	}
+	if len(result.Errors) > 0 {
+		result.Valid = false
+	}
+	return result
+}
+
 func runCutoverCheck(args []string) error {
 	fs := flag.NewFlagSet("cutover-check", flag.ContinueOnError)
 	dryRunReport := fs.String("dry-run-report", "", "Full dry-run JSON report produced by 'symingest import paperless --dry-run --report'")
 	importReport := fs.String("import-report", "", "Full real-import JSON report produced by 'symingest import paperless --report'")
 	verifyReport := fs.String("verify-report", "", "Verifier JSON report produced by 'symingest import paperless --verify --json'")
+	searchReport := fs.String("search-report", "", "Search validation JSON report produced by 'symingest search validate --report'")
 	vault := fs.String("vault", "", "Vault path to validate")
 	minDocuments := fs.Int("min-documents", 0, "Minimum source document count expected before cutover")
 	minBodyLength := fs.Int("min-body-length", 0, "Fail cutover if any note body is shorter than this many non-whitespace bytes")
@@ -1260,6 +1394,7 @@ func runCutoverCheck(args []string) error {
 		DryRunReportPath: *dryRunReport,
 		ImportReportPath: *importReport,
 		VerifyReportPath: *verifyReport,
+		SearchReportPath: *searchReport,
 		VaultPath:        *vault,
 		MinDocuments:     *minDocuments,
 		MinBodyLength:    *minBodyLength,
@@ -1365,6 +1500,13 @@ func runWatch(args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	lock, err := acquireWatchLock(inboxDir, cfg.db)
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
+			"watcher lock refused duplicate start")
+	}
+	defer lock.Release()
+
 	// Reset any running jobs to pending on startup
 	if err := st.ResetRunningJobs(ctx); err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindInternal,
@@ -1392,6 +1534,7 @@ func runWatch(args []string) error {
 		ProcessedDir: *processedDir,
 		FailedDir:    *failedDir,
 	}
+	configurePostIndex(pipeline, cfg)
 
 	if err := watcher.Start(ctx); err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindInternal,
@@ -1516,7 +1659,7 @@ func runRules(args []string) error {
 	fs := flag.NewFlagSet("rules", flag.ContinueOnError)
 	jsonFlag := fs.Bool("json", false, "Output rules in JSON format")
 	ocrLang, vault, archive, db := registerSharedFlags(fs)
-	configureUsage(fs, "rules [flags] [command]", "Manage classification rules. Patterns are case-insensitive substrings matched against extracted document text, not filename globs.\n\nCommands:\n  list                         List all classification rules\n  add <pattern> <kind> <value> Add a classification rule\n  delete <id>                  Delete a classification rule by ID\n\nKinds for add command: category, tag, correspondent, document_type")
+	configureUsage(fs, "rules [flags] [command]", "Manage classification rules. Patterns are case-insensitive substrings matched against extracted document text, not filename globs.\n\nCommands:\n  list                                  List all classification rules\n  add <pattern> <kind> <value>          Add a classification rule\n  update <id> <pattern> <kind> <value>  Update a classification rule\n  test <text>                           Test rules against text\n  delete <id>                           Delete a classification rule by ID\n\nKinds for add/update command: category, tag, correspondent, document_type")
 	help, err := parseFlags(fs, args, "invalid rules flags")
 	if help || err != nil {
 		return err
@@ -1546,6 +1689,10 @@ func runRules(args []string) error {
 		return listRules(ctx, st, *jsonFlag)
 	case "add":
 		return addRule(ctx, st, remaining[1:])
+	case "update":
+		return updateRule(ctx, st, remaining[1:])
+	case "test":
+		return testRules(ctx, st, remaining[1:], *jsonFlag)
 	case "delete":
 		return deleteRule(ctx, st, remaining[1:])
 	default:
@@ -1621,6 +1768,71 @@ func addRule(ctx context.Context, st *store.Store, args []string) error {
 
 	fmt.Fprintf(stdout, "Added classification rule %d: pattern=%q, kind=%q, value=%q\n",
 		rule.ID, rule.Pattern, rule.Kind, rule.Value)
+	return nil
+}
+
+func updateRule(ctx context.Context, st *store.Store, args []string) error {
+	if len(args) < 4 {
+		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation,
+			"missing arguments; usage: symingest rules update <id> <pattern> <kind> <value>")
+	}
+	id, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		return exitcodes.Wrapf(err, exitcodes.ExitData, exitcodes.KindValidation,
+			"invalid rule ID %q; must be an integer", args[0])
+	}
+	rule, err := st.UpdateRule(ctx, id, args[1], args[2], args[3])
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
+			"failed to update rule")
+	}
+	fmt.Fprintf(stdout, "Updated classification rule %d: pattern=%q, kind=%q, value=%q\n",
+		rule.ID, rule.Pattern, rule.Kind, rule.Value)
+	return nil
+}
+
+type ruleTestMatch struct {
+	ID      int64  `json:"id"`
+	Pattern string `json:"pattern"`
+	Kind    string `json:"kind"`
+	Value   string `json:"value"`
+}
+
+func testRules(ctx context.Context, st *store.Store, args []string, outputJSON bool) error {
+	if len(args) < 1 {
+		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation,
+			"missing text; usage: symingest rules test <text>")
+	}
+	text := strings.ToLower(strings.Join(args, " "))
+	rules, err := st.ListRules(ctx)
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
+			"failed to list rules")
+	}
+	var matches []ruleTestMatch
+	for _, r := range rules {
+		if strings.Contains(text, strings.ToLower(r.Pattern)) {
+			matches = append(matches, ruleTestMatch{ID: r.ID, Pattern: r.Pattern, Kind: r.Kind, Value: r.Value})
+		}
+	}
+	if outputJSON {
+		if matches == nil {
+			matches = []ruleTestMatch{}
+		}
+		data, err := json.MarshalIndent(matches, "", "  ")
+		if err != nil {
+			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal, "failed to marshal rule test result")
+		}
+		fmt.Fprintln(stdout, string(data))
+		return nil
+	}
+	if len(matches) == 0 {
+		fmt.Fprintln(stdout, "No matching classification rules.")
+		return nil
+	}
+	for _, m := range matches {
+		fmt.Fprintf(stdout, "match rule %d: pattern=%q kind=%q value=%q\n", m.ID, m.Pattern, m.Kind, m.Value)
+	}
 	return nil
 }
 

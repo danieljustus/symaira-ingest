@@ -55,7 +55,7 @@ func TestExtractText_Engine(t *testing.T) {
 	}
 }
 
-func TestExtractText_UnsupportedOptionalFormat(t *testing.T) {
+func TestExtractText_StructuredEMLDoesNotUseOCREngine(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mail.eml")
 	if err := os.WriteFile(path, []byte("Subject: hi\n\nbody"), 0o644); err != nil {
@@ -65,7 +65,14 @@ func TestExtractText_UnsupportedOptionalFormat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := extractText(context.Background(), path, kind, &fakeEngine{result: &extract.Result{Text: "should not be used"}}); err == nil {
-		t.Fatal("expected deterministic unsupported-format error")
+	res, err := extractText(context.Background(), path, kind, &fakeEngine{result: &extract.Result{Text: "should not be used"}})
+	if err != nil {
+		t.Fatalf("extractText: %v", err)
+	}
+	if res.Text != "Subject: hi\n\nbody" {
+		t.Fatalf("text = %q, want mail subject and body", res.Text)
+	}
+	if res.Engine != "eml-native" {
+		t.Fatalf("engine = %q, want eml-native", res.Engine)
 	}
 }

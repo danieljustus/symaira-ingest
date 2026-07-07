@@ -3,7 +3,9 @@ package paperlessimport
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -35,6 +37,7 @@ type VerifyMismatch struct {
 // means the vault faithfully represents the Paperless archive. It never
 // contains document content, only IDs, field names, and paths.
 type VerifyReport struct {
+	SchemaVersion      int              `json:"schema_version"`
 	RunID              string           `json:"run_id,omitempty"`
 	ToolVersion        string           `json:"tool_version,omitempty"`
 	Source             string           `json:"source,omitempty"`
@@ -50,7 +53,7 @@ type VerifyReport struct {
 	DeepVerified       int              `json:"deep_verified,omitempty"`
 	Missing            []int            `json:"missing,omitempty"`              // source doc IDs with no note
 	Duplicate          []int            `json:"duplicate,omitempty"`            // doc IDs with more than one note
-	DuplicateContent   []int            `json:"duplicate_content,omitempty"`    // doc IDs whose content is a duplicate of another Paperless ID
+	DuplicateContent   []int            `json:"duplicate_content,omitempty"`    // informational: doc IDs whose original bytes duplicate another Paperless ID
 	MissingArchive     []int            `json:"missing_archive,omitempty"`      // note exists but the archived original is gone
 	HashMismatch       []int            `json:"hash_mismatch,omitempty"`        // archive hash does not match stored hash
 	SourceHashMismatch []int            `json:"source_hash_mismatch,omitempty"` // archived original differs from Paperless download in deep verify
@@ -58,10 +61,13 @@ type VerifyReport struct {
 }
 
 // Complete reports whether the vault faithfully represents the Paperless
-// archive: no missing, duplicate, archive-less, hash-mismatched, or metadata-mismatched
-// documents. Callers use it to decide the process exit code.
+// archive: no missing, duplicate-note, archive-less, hash-mismatched, or
+// metadata-mismatched documents. DuplicateContent is informational because
+// Paperless can legitimately contain multiple document IDs with identical
+// original bytes; symingest writes one note per ID and may deduplicate archive
+// blobs by SHA-256.
 func (r *VerifyReport) Complete() bool {
-	return len(r.Missing) == 0 && len(r.Duplicate) == 0 && len(r.DuplicateContent) == 0 &&
+	return len(r.Missing) == 0 && len(r.Duplicate) == 0 &&
 		len(r.MissingArchive) == 0 && len(r.HashMismatch) == 0 && len(r.SourceHashMismatch) == 0 && len(r.Mismatches) == 0
 }
 
@@ -91,6 +97,7 @@ func Verify(ctx context.Context, opts Options, vault string, st *store.Store) (*
 	}
 
 	report := &VerifyReport{
+		SchemaVersion:   ReportSchemaVersion,
 		RunID:           newRunID(started),
 		ToolVersion:     version.Version,
 		Source:          "paperless",
@@ -108,9 +115,12 @@ func Verify(ctx context.Context, opts Options, vault string, st *store.Store) (*
 		report.VaultNotes += len(list)
 	}
 
+	targetVault := opts.TargetVault
+	targetArchive := opts.TargetArchive
+
 	for _, doc := range docs {
 		matches := notes[doc.ID]
-		state, stateErr := paperlessImportState(ctx, st, opts.BaseURL, doc.ID)
+		state, stateErr := paperlessImportState(ctx, st, opts.BaseURL, targetVault, targetArchive, doc.ID)
 		docOK := true
 
 		if stateErr != nil {
@@ -193,7 +203,7 @@ func Verify(ctx context.Context, opts Options, vault string, st *store.Store) (*
 		}
 	}
 
-	report.DuplicateContent = findDuplicateContentIDs(docs, notes, st, opts.BaseURL)
+	report.DuplicateContent = findDuplicateContentIDs(docs, notes, st, opts.BaseURL, targetVault, targetArchive)
 
 	sort.Ints(report.Missing)
 	sort.Ints(report.Duplicate)
@@ -218,22 +228,31 @@ func paperlessDownloadSHA256(ctx context.Context, client *paperless.Client, id i
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func paperlessImportState(ctx context.Context, st *store.Store, baseURL string, id int) (*store.PaperlessImportState, error) {
+func paperlessImportState(ctx context.Context, st *store.Store, baseURL, targetVault, targetArchive string, id int) (*store.PaperlessImportState, error) {
 	if st == nil {
 		return nil, nil
 	}
-	state, err := st.PaperlessImportStateByID(ctx, baseURL, id)
-	if err != nil && !os.IsNotExist(err) {
+	var state *store.PaperlessImportState
+	var err error
+	if targetVault != "" || targetArchive != "" {
+		state, err = st.PaperlessImportStateForTarget(ctx, baseURL, targetVault, targetArchive, id)
+	} else {
+		state, err = st.PaperlessImportStateByID(ctx, baseURL, id)
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) && !os.IsNotExist(err) {
 		return nil, err
+	}
+	if errors.Is(err, sql.ErrNoRows) || os.IsNotExist(err) {
+		return nil, nil
 	}
 	return state, nil
 }
 
-func findDuplicateContentIDs(docs []paperless.Document, notes map[int][]*writer.Note, st *store.Store, baseURL string) []int {
+func findDuplicateContentIDs(docs []paperless.Document, notes map[int][]*writer.Note, st *store.Store, baseURL, targetVault, targetArchive string) []int {
 	seen := map[string][]int{}
 	for _, doc := range docs {
 		var sha string
-		if state, _ := paperlessImportState(context.Background(), st, baseURL, doc.ID); state != nil {
+		if state, _ := paperlessImportState(context.Background(), st, baseURL, targetVault, targetArchive, doc.ID); state != nil {
 			sha = state.SHA256
 		}
 		if sha == "" && len(notes[doc.ID]) > 0 {

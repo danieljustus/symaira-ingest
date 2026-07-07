@@ -1,5 +1,11 @@
 import SwiftUI
 
+private struct ImportLogEntry: Identifiable {
+    let id = UUID()
+    let kind: StreamKind?
+    let text: String
+}
+
 struct ImportView: View {
     @Environment(ConfigStore.self) private var configStore
     
@@ -33,7 +39,7 @@ struct ImportView: View {
     
     // Run state
     @State private var isRunning = false
-    @State private var logs: [String] = []
+    @State private var logs: [ImportLogEntry] = []
     @State private var runStatusText: String?
     
     var body: some View {
@@ -208,9 +214,9 @@ struct ImportView: View {
                                         .font(.caption.monospaced())
                                 } else {
                                     ForEach(logs.indices, id: \.self) { idx in
-                                        Text(logs[idx])
+                                        Text(logs[idx].text)
                                             .font(.system(.caption, design: .monospaced))
-                                            .foregroundStyle(Theme.textSecondary)
+                                            .foregroundStyle(color(for: logs[idx].kind))
                                             .id(idx)
                                     }
                                 }
@@ -237,6 +243,7 @@ struct ImportView: View {
         .onAppear {
             // Load saved settings
             baseURL = UserDefaults.standard.string(forKey: "PAPERLESS_URL") ?? ""
+            apiToken = KeychainStore.read("paperless-token")
             UserDefaults.standard.removeObject(forKey: "PAPERLESS_TOKEN")
             preserveStoragePaths = UserDefaults.standard.bool(forKey: "PAPERLESS_PRESERVE_STORAGE_PATHS")
         }
@@ -250,6 +257,11 @@ struct ImportView: View {
         // Save host configuration
         UserDefaults.standard.set(baseURL, forKey: "PAPERLESS_URL")
         UserDefaults.standard.set(preserveStoragePaths, forKey: "PAPERLESS_PRESERVE_STORAGE_PATHS")
+        do {
+            try KeychainStore.write(apiToken, account: "paperless-token")
+        } catch {
+            appendLog("[app] WARNING: Failed to store token in Keychain: \(error.localizedDescription)")
+        }
         
         appendLog("[app] Preparing import arguments...")
         
@@ -315,16 +327,16 @@ struct ImportView: View {
             }
         }
         
-        appendLog("[app] Executing: symingest \(args.joined(separator: " "))")
+        appendLog("[app] Executing: symingest \(redacted(args).joined(separator: " "))")
         
         do {
             var environment: [String: String] = [:]
             if !apiToken.isEmpty {
                 environment["PAPERLESS_TOKEN"] = apiToken
             }
-            let status = try await CLIClient.shared.runIngestCommandStreaming(args: args, config: configStore, environment: environment) { text in
+            let status = try await CLIClient.shared.runIngestCommandStreaming(args: args, config: configStore, environment: environment) { text, kind in
                 Task { @MainActor in
-                    self.appendLog(text)
+                    self.appendLog(text, kind: kind)
                 }
             }
             
@@ -343,14 +355,34 @@ struct ImportView: View {
         isRunning = false
     }
     
-    private func appendLog(_ text: String) {
+    private func appendLog(_ text: String, kind: StreamKind? = nil) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         for line in trimmed.components(separatedBy: .newlines) {
-            let l = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            let l = redactSecrets(line.trimmingCharacters(in: .whitespacesAndNewlines))
             if !l.isEmpty {
-                logs.append(l)
+                logs.append(ImportLogEntry(kind: kind, text: l))
             }
+        }
+    }
+
+    private func redacted(_ args: [String]) -> [String] {
+        args.map { arg in
+            if !apiToken.isEmpty && arg.contains(apiToken) { return arg.replacingOccurrences(of: apiToken, with: "[REDACTED]") }
+            return arg
+        }
+    }
+
+    private func redactSecrets(_ text: String) -> String {
+        guard !apiToken.isEmpty else { return text }
+        return text.replacingOccurrences(of: apiToken, with: "[REDACTED]")
+    }
+
+    private func color(for kind: StreamKind?) -> Color {
+        switch kind {
+        case .stderr: return .orange
+        case .stdout: return Theme.textSecondary
+        case nil: return Theme.goldSecondary
         }
     }
 }

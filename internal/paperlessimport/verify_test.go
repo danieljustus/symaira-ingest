@@ -135,6 +135,33 @@ func TestVerify_CompleteAfterImport(t *testing.T) {
 	if report.RunID == "" || report.ToolVersion == "" || report.Source != "paperless" || report.SourceURL != srv.URL || report.Mode != "verify" {
 		t.Errorf("verify report metadata incomplete: %+v", report)
 	}
+	if report.SchemaVersion != ReportSchemaVersion {
+		t.Fatalf("schema_version = %d, want %d", report.SchemaVersion, ReportSchemaVersion)
+	}
+}
+
+func TestVerify_AllowsDuplicateContentWhenEachPaperlessIDHasNote(t *testing.T) {
+	docs := []verifyDoc{
+		{id: 1, title: "Doc 1", download: "same original bytes", correspondent: map[string]any{"id": 1, "name": "Alpha GmbH"}, tags: []map[string]any{{"id": 1, "name": "alpha"}}},
+		{id: 2, title: "Doc 2", download: "same original bytes", correspondent: map[string]any{"id": 2, "name": "Beta GmbH"}, tags: []map[string]any{{"id": 2, "name": "beta"}}},
+	}
+	srv := newVerifyServer(t, docs)
+	defer srv.Close()
+
+	vault := importForVerify(t, srv.URL, Options{})
+	report, err := Verify(context.Background(), Options{BaseURL: srv.URL, Token: "test-token"}, vault, nil)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if !report.Complete() {
+		t.Fatalf("duplicate content with one note per Paperless ID should verify, got %+v", report)
+	}
+	if report.Verified != 2 {
+		t.Fatalf("Verified = %d, want 2", report.Verified)
+	}
+	if len(report.DuplicateContent) != 1 || report.DuplicateContent[0] != 2 {
+		t.Fatalf("DuplicateContent = %v, want [2] as informational", report.DuplicateContent)
+	}
 }
 
 func TestVerify_DeepVerifyMatchesPaperlessDownload(t *testing.T) {

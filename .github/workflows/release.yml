@@ -1,13 +1,16 @@
 name: Release
+
 on:
   push:
     tags:
       - 'v*'
+
 permissions:
   contents: write
 
 jobs:
-  release:
+  cli-release:
+    name: CLI release and Homebrew formula
     runs-on: macos-15
     environment: release
     steps:
@@ -23,6 +26,7 @@ jobs:
           CERTIFICATE_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
+          set -euo pipefail
           if [ -z "${CERTIFICATE_P12:-}" ]; then
             echo "::warning::CERTIFICATE_P12 secret is not set. Building unsigned."
             echo "signed=false" >> "$GITHUB_OUTPUT"
@@ -39,6 +43,10 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security list-keychain -d user -s "$KEYCHAIN_PATH"
           IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::No Developer ID Application identity found in imported certificate."
+            exit 1
+          fi
           echo "CODESIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
           echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
 
@@ -57,22 +65,23 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
 
-      - name: Notarize macOS binaries
+      - name: Notarize macOS CLI binaries
         if: steps.signing.outputs.signed == 'true'
         env:
           NOTARY_API_KEY: ${{ secrets.NOTARY_API_KEY }}
           NOTARY_API_ISSUER: ${{ secrets.NOTARY_API_ISSUER }}
           NOTARY_API_KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
         run: |
+          set -euo pipefail
           if [ -z "${NOTARY_API_KEY:-}" ]; then
-            echo "::warning::NOTARY_API_KEY secret is not set. Skipping notarization."
+            echo "::warning::NOTARY_API_KEY secret is not set. Skipping CLI notarization."
             exit 0
           fi
           for ARCH in amd64 arm64; do
             for f in dist/*_darwin_${ARCH}/*; do
               if [ -f "$f" ] && file "$f" | grep -q "Mach-O"; then
                 echo "Notarizing $f..."
-                ZIP_PATH="$RUNNER_TEMP/notarize_${ARCH}.zip"
+                ZIP_PATH="$RUNNER_TEMP/notarize_cli_${ARCH}.zip"
                 ditto -c -k --keepParent "$f" "$ZIP_PATH"
                 xcrun notarytool submit "$ZIP_PATH" \
                   --apple-id "${NOTARY_API_KEY_ID}" \
@@ -84,35 +93,109 @@ jobs:
             done
           done
 
-      - name: Build macOS GUI App and Package as DMG
+      - name: Clean up signing material
+        if: always()
         run: |
-          # 1. Build universal Go CLI binary for embedding
+          set -euo pipefail
+          if [ -n "${KEYCHAIN_PATH:-}" ] && [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+          fi
+
+  macos-gui-dmg:
+    name: macOS GUI DMG
+    runs-on: macos-15
+    environment: release
+    needs: cli-release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Import signing certificate
+        id: signing
+        env:
+          CERTIFICATE_P12: ${{ secrets.CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CERTIFICATE_P12:-}" ]; then
+            echo "::warning::CERTIFICATE_P12 secret is not set. Building unsigned."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+          KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          CERTIFICATE_PATH="$RUNNER_TEMP/certificate.p12"
+          echo -n "$CERTIFICATE_P12" | base64 --decode -o "$CERTIFICATE_PATH"
+          security import "$CERTIFICATE_PATH" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::No Developer ID Application identity found in imported certificate."
+            exit 1
+          fi
+          echo "CODESIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.4'
+
+      - name: Install packaging tools
+        run: |
+          set -euo pipefail
+          brew install xcodegen create-dmg
+
+      - name: Build universal symingest CLI for app bundle
+        run: |
+          set -euo pipefail
           GOOS=darwin GOARCH=amd64 go build -o symingest-amd64 ./cmd/symingest
           GOOS=darwin GOARCH=arm64 go build -o symingest-arm64 ./cmd/symingest
           lipo -create -output symingest symingest-amd64 symingest-arm64
           rm symingest-amd64 symingest-arm64
-          
-          # 2. Install XcodeGen and create-dmg
-          brew install xcodegen create-dmg
-          
-          # 3. Generate Xcode project
+          file symingest
+
+      - name: Generate Xcode project
+        run: |
+          set -euo pipefail
           xcodegen --spec client/project.yml
-          
-          # 4. Build the macOS SwiftUI App
-          xcodebuild -project client/Symingest.xcodeproj -scheme Symingest -configuration Release -derivedDataPath build_dd -destination 'platform=macOS' build
-          
-          # 5. Sign the App Bundle if certificate available
-          if [ -n "${CODESIGN_IDENTITY:-}" ]; then
-            codesign -s "$CODESIGN_IDENTITY" --timestamp --options runtime --deep build_dd/Build/Products/Release/Symingest.app
-            echo "Signed Symingest.app"
-          else
-            echo "App building unsigned"
-          fi
-          
-          # 6. Create staging and package DMG
+
+      - name: Resolve Swift package dependencies
+        run: |
+          set -euo pipefail
+          xcodebuild -project client/Symingest.xcodeproj \
+            -scheme Symingest \
+            -resolvePackageDependencies
+
+      - name: Build macOS SwiftUI app
+        run: |
+          set -euo pipefail
+          xcodebuild -project client/Symingest.xcodeproj \
+            -scheme Symingest \
+            -configuration Release \
+            -derivedDataPath build_dd \
+            -destination 'platform=macOS' \
+            build
+
+      - name: Sign app bundle
+        if: steps.signing.outputs.signed == 'true'
+        run: |
+          set -euo pipefail
+          codesign -s "$CODESIGN_IDENTITY" --timestamp --options runtime --deep build_dd/Build/Products/Release/Symingest.app
+          codesign --verify --deep --strict --verbose=2 build_dd/Build/Products/Release/Symingest.app
+
+      - name: Package DMG
+        run: |
+          set -euo pipefail
           mkdir -p dist/dmg_staging
           cp -R build_dd/Build/Products/Release/Symingest.app dist/dmg_staging/
-          
           create-dmg \
             --volname "Symingest" \
             --window-pos 200 120 \
@@ -124,16 +207,46 @@ jobs:
             dist/Symingest.dmg \
             dist/dmg_staging/
 
-      - name: Upload DMG to Release
+      - name: Sign and notarize DMG
+        if: steps.signing.outputs.signed == 'true'
+        env:
+          NOTARY_API_KEY: ${{ secrets.NOTARY_API_KEY }}
+          NOTARY_API_ISSUER: ${{ secrets.NOTARY_API_ISSUER }}
+          NOTARY_API_KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
+        run: |
+          set -euo pipefail
+          codesign -s "$CODESIGN_IDENTITY" --timestamp --options runtime dist/Symingest.dmg
+          codesign --verify --verbose=2 dist/Symingest.dmg
+          if [ -z "${NOTARY_API_KEY:-}" ]; then
+            echo "::warning::NOTARY_API_KEY secret is not set. Skipping DMG notarization."
+            exit 0
+          fi
+          xcrun notarytool submit dist/Symingest.dmg \
+            --apple-id "${NOTARY_API_KEY_ID}" \
+            --team-id "${NOTARY_API_ISSUER}" \
+            --password "${NOTARY_API_KEY}" \
+            --wait
+          xcrun stapler staple dist/Symingest.dmg
+          xcrun stapler validate dist/Symingest.dmg
+
+      - name: Upload DMG to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/Symingest.dmg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Upload DMG workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Symingest.dmg
+          path: dist/Symingest.dmg
+          if-no-files-found: error
+
       - name: Clean up signing material
         if: always()
         run: |
+          set -euo pipefail
           if [ -n "${KEYCHAIN_PATH:-}" ] && [ -f "$KEYCHAIN_PATH" ]; then
             security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
           fi

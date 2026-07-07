@@ -3,18 +3,21 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/danieljustus/symaira-corekit/exitcodes"
 
 	"github.com/danieljustus/symaira-ingest/internal/config"
+	"github.com/danieljustus/symaira-ingest/internal/paperlessimport"
 	"github.com/danieljustus/symaira-ingest/internal/store"
 )
 
@@ -54,7 +57,7 @@ func TestRun_Help(t *testing.T) {
 		t.Fatalf("run(help): %v", err)
 	}
 	out := sb.String()
-	for _, want := range []string{"ingest", "mcp", "version", "watch", "jobs", "retry"} {
+	for _, want := range []string{"ingest", "mcp", "version", "watch", "service", "jobs", "retry"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("help output missing %q", want)
 		}
@@ -65,6 +68,49 @@ func TestRun_UnknownCommand(t *testing.T) {
 	err := run([]string{"nope"})
 	if err == nil {
 		t.Fatal("expected error for unknown command")
+	}
+}
+
+func TestRun_ServiceInstallDryRunDoesNotEmbedSecrets(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("service management supports macOS LaunchAgents only")
+	}
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("SYMINGEST_VAULT", filepath.Join(dir, "vault"))
+	t.Setenv("SYMINGEST_ARCHIVE_PATH", filepath.Join(dir, "archive"))
+	t.Setenv("SYMINGEST_DB_PATH", filepath.Join(dir, "symingest.db"))
+	t.Setenv("SYMINGEST_INBOX", filepath.Join(dir, "inbox"))
+	t.Setenv("PAPERLESS_TOKEN", "secret-token-must-not-leak")
+	if err := os.MkdirAll(filepath.Join(dir, "inbox"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	var sb strings.Builder
+	oldStdout := stdout
+	stdout = &sb
+	defer func() { stdout = oldStdout }()
+
+	if err := run([]string{"service", "--dry-run", "--json", "--vault", filepath.Join(dir, "vault"), "--archive", filepath.Join(dir, "archive"), "--db", filepath.Join(dir, "symingest.db"), "--inbox", filepath.Join(dir, "inbox"), "install"}); err != nil {
+		t.Fatalf("run(service install dry-run): %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(sb.String()), &got); err != nil {
+		t.Fatalf("decode dry-run JSON: %v\n%s", err, sb.String())
+	}
+	plist, _ := got["plist"].(string)
+	for _, forbidden := range []string{"secret-token-must-not-leak", "PAPERLESS_TOKEN", "token"} {
+		if strings.Contains(strings.ToLower(plist), strings.ToLower(forbidden)) {
+			t.Fatalf("plist leaked forbidden string %q:\n%s", forbidden, plist)
+		}
+	}
+	for _, want := range []string{"dev.symaira.symingest.watch", "--processing-dir", "--processed-dir", "--failed-dir", "StandardOutPath", "Library/Logs/symingest"} {
+		if !strings.Contains(plist, want) {
+			t.Fatalf("plist missing %q:\n%s", want, plist)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "Library", "LaunchAgents", serviceLabel+".plist")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("dry-run wrote plist unexpectedly: %v", err)
 	}
 }
 
@@ -92,6 +138,39 @@ func TestRun_CutoverCheckJSONBlocksMissingEvidence(t *testing.T) {
 	for _, want := range []string{`"ready": false`, `"dry-run report"`, `"import report"`, `"verify report"`, `"vault validation"`} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("cutover JSON missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRun_ReportValidateJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "migration.json")
+	data, err := json.Marshal(&paperlessimport.MigrationReport{
+		SchemaVersion: paperlessimport.ReportSchemaVersion,
+		ToolVersion:   "test-version",
+		Mode:          "import",
+		Total:         1,
+		Imported:      1,
+		Documents:     []paperlessimport.DocumentResult{{ID: 1, Status: "imported"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var sb strings.Builder
+	oldStdout := stdout
+	stdout = &sb
+	defer func() { stdout = oldStdout }()
+
+	if err := run([]string{"report", "-json", "validate", path}); err != nil {
+		t.Fatalf("run(report validate): %v", err)
+	}
+	out := sb.String()
+	for _, want := range []string{`"kind": "migration"`, `"valid": true`, `"schema_version": 1`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("report validation JSON missing %q:\n%s", want, out)
 		}
 	}
 }
@@ -399,6 +478,20 @@ exit 0
 	if report.Status != doctorOK || report.Failures != 0 || report.Warnings != 0 {
 		t.Fatalf("doctor report = %+v", report)
 	}
+	for _, name := range []string{"tool.optional.textutil", "tool.optional.pandoc", "tool.optional.libreoffice", "tool.optional.soffice"} {
+		if !doctorReportHasCheck(report, name) {
+			t.Fatalf("doctor report missing optional converter check %q: %+v", name, report.Checks)
+		}
+	}
+}
+
+func doctorReportHasCheck(report doctorReport, name string) bool {
+	for _, check := range report.Checks {
+		if check.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRun_SetupDryRunShowsDiffAndDoesNotWrite(t *testing.T) {

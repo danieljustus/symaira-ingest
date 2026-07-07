@@ -11,7 +11,7 @@ Drop a scanned PDF, image, or text-like export into a folder → get a searchabl
 
 - **Standalone CLI + MCP server** — no external services required, runs entirely on your machine
 - **OCR for scanned documents** — extracts text from PDFs and images using Tesseract (`pdf`, `png`, `jpeg`, `tiff`, `webp`, plus `heic/heif` on macOS via `sips`)
-- **Text-like imports** — preserves plain text, Markdown, and CSV files without forcing them through OCR
+- **Text and structured imports** — preserves plain text, Markdown, CSV, HTML, RTF, DOCX, XLSX, ODT and EML without forcing them through OCR
 - **Markdown output** — produces clean, searchable Markdown with YAML frontmatter instead of proprietary formats
 - **MCP integration** — works as an MCP tool for AI-powered document processing workflows
 - **Classification rules** — automatically categorize documents based on content patterns
@@ -72,8 +72,28 @@ Generated vault notes are private by default: note files are written with `0600`
 **Watch a directory for new files:**
 
 ```bash
-symingest watch /path/to/inbox
+symingest watch \
+  --processing-dir /path/to/inbox/.processing \
+  --processed-dir /path/to/inbox/.processed \
+  --failed-dir /path/to/inbox/.failed \
+  /path/to/inbox
 ```
+
+The watcher waits for files to become stable, moves work through processing/processed/failed folders when configured, writes `.error.json` sidecars for failed files, resets stale running jobs on startup, and refuses a duplicate watcher for the same inbox/database lock.
+
+**macOS LaunchAgent service:**
+
+```bash
+symingest service --dry-run install     # print plist, write nothing
+symingest service install               # write ~/Library/LaunchAgents/dev.symaira.symingest.watch.plist
+symingest service start
+symingest service --json status
+symingest service --lines 200 logs
+symingest service stop
+symingest service uninstall
+```
+
+The generated LaunchAgent embeds paths only, never Paperless tokens or other secrets. Service logs are written to `~/Library/Logs/symingest/watch.log` and `watch.err.log`.
 
 **MCP server mode:**
 
@@ -127,17 +147,41 @@ Flags:
   --json              With --status or --verify, output the result as JSON
 ```
 
-`--report <path>` writes a stable JSON migration report for a dry-run or a real import: overall counts plus a per-document array (`id`, `status`, optional `reason`, and generated `vault_path`/`archive_path`), collected warnings, and — for a dry-run — the unsupported file types and unresolved metadata IDs from the audit. Like every other output it contains no document content, so it is safe to hand to a review step or a later UI. A real import exits non-zero if any document fails; re-run the same command or use `--retry-failed` until `failed: 0`.
+`--report <path>` writes a stable JSON migration report for a dry-run or a real import: `schema_version`, `tool_version`, overall counts plus a per-document array (`id`, `status`, optional `reason`, and generated `vault_path`/`archive_path`/`sha256`), collected warnings, and — for a dry-run — the unsupported file types and unresolved metadata IDs from the audit. Like every other output it contains no document content, so it is safe to hand to a review step or a later UI. A real import exits non-zero if any document fails; re-run the same command or use `--retry-failed` until `failed: 0`.
 
 After an import, `--verify` re-reads the Paperless source and the generated vault notes and reports any document that is missing, duplicated, missing its archived original, or whose metadata (tags, correspondent, document type, storage path, created date) drifted from the source. It prints a human summary, or a stable JSON report with `--json`, and exits non-zero when any discrepancy is found — suitable as an automated migration gate before Paperless is retired. Only IDs, field names, and paths appear in the output; document content never does.
 
 **Gate Paperless cutover:**
 
 ```bash
+symingest search index ~/vault
+
+cat > search-fixtures.json <<'JSON'
+[
+  {"query":"sample invoice token", "min_results":1, "must_contain":["invoice"]}
+]
+JSON
+
+symingest search validate \
+  --fixtures search-fixtures.json \
+  --report search-report.json
+```
+
+Search integration is optional and runtime-detected. To index each generated note after a successful ingest, enable it in config:
+
+```toml
+symseek_enabled = true
+symseek_binary = "/opt/homebrew/bin/symseek" # optional; PATH lookup is default
+```
+
+Post-ingest indexing failures are logged but do not roll back a completed ingest. Use `symingest search index` and `symingest search validate` as explicit migration evidence; search reports contain no document bodies.
+
+```bash
 symingest cutover-check \
   --dry-run-report dryrun-report.json \
   --import-report import-report.json \
   --verify-report verify-report.json \
+  --search-report search-report.json \
   --vault ~/vault \
   --min-documents 6000 \
   --min-body-length 40
@@ -151,7 +195,37 @@ symingest import paperless --verify --deep --json > verify-report.json
 
 `--deep` re-downloads each selected Paperless original and compares its SHA-256 with the archived original in the vault. It is slower by design and belongs in the final migration gate, not every quick local check.
 
-`cutover-check` is intentionally strict: Paperless stays the source of truth unless the full dry-run, real import, verifier output, and vault validation are all clean and the document counts agree. Use `--json` for CI or app integration.
+`cutover-check` is intentionally strict: Paperless stays the source of truth unless the full dry-run, real import, verifier output, search validation, and vault validation are all clean and the document counts agree. Use `--json` for CI or app integration.
+
+Validate machine-readable report files before using them as cutover evidence:
+
+```bash
+symingest report validate dryrun-report.json
+symingest report --json validate verify-report.json
+symingest report --json validate search-report.json
+```
+
+Create a body-safe review surface and apply explicit corrections with count gates:
+
+```bash
+symingest review-report --failed --warnings --unsupported --unresolved --html review.html import-report.json
+symingest review-report --duplicate-content --json verify-report.json
+symingest apply-corrections --vault ~/vault --dry-run --require-count 3 corrections.yaml
+symingest apply-corrections --vault ~/vault --require-count 3 --max 3 --backup-dir undo corrections.yaml
+symingest bulk-update --vault ~/vault --where tag:needs-review --add-tag reviewed --dry-run --require-count 12 --max 12
+```
+
+`corrections.yaml` supports the versioned shape:
+
+```yaml
+schema_version: 1
+corrections:
+  - paperless_id: 123
+    add_tags: [reviewed]
+    correspondent: Example GmbH
+```
+
+The macOS app exposes these same migration surfaces: Paperless import/verify/status, migration review, corrections dry-run/final apply, frontmatter/original preview, rules create/edit/delete/test, jobs retry/error-sidecar reveal, watcher service controls, and manual symseek vault indexing. Paperless tokens are entered through `SecureField` and stored in Keychain; the generated config file never contains the token.
 
 For OCR quality checks, add a body-length gate to vault validation:
 
@@ -193,7 +267,7 @@ go vet ./...
 - **[symseek](https://github.com/danieljustus/symaira-seek)** — Search and retrieval
 - **[symdesk](https://github.com/danieljustus/symaira-desktop)** — Desktop shell
 
-> Design rule: `symingest` writes Markdown + frontmatter into the vault and **stops there**. Indexing and embeddings are `symseek`'s job.
+> Design rule: `symingest` writes Markdown + frontmatter into the vault. Search remains `symseek`'s job; `symingest` only shells out to `symseek` for optional post-ingest indexing and machine-readable validation evidence.
 
 ## License
 

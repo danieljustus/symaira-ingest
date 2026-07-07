@@ -589,7 +589,7 @@ func (s *Store) UpsertPaperlessImportStateForTarget(ctx context.Context, baseURL
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO paperless_import_state (base_url, target_vault, target_archive, paperless_document_id, status, last_error, vault_path, archive_path, sha256)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(base_url, paperless_document_id) DO UPDATE SET
+		ON CONFLICT(base_url, target_vault, target_archive, paperless_document_id) DO UPDATE SET
 			target_vault = excluded.target_vault,
 			target_archive = excluded.target_archive,
 			status = excluded.status,
@@ -617,7 +617,7 @@ func (s *Store) UpsertPaperlessImportState(ctx context.Context, baseURL string, 
 // false if no attempt has been recorded yet.
 func (s *Store) PaperlessImportStatus(ctx context.Context, baseURL string, paperlessDocumentID int) (status string, found bool, err error) {
 	err = s.db.QueryRowContext(ctx,
-		`SELECT status FROM paperless_import_state WHERE base_url = ? AND paperless_document_id = ?`,
+		`SELECT status FROM paperless_import_state WHERE base_url = ? AND paperless_document_id = ? ORDER BY updated_at DESC, id DESC LIMIT 1`,
 		baseURL, paperlessDocumentID).Scan(&status)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
@@ -633,31 +633,22 @@ func (s *Store) PaperlessImportStatus(ctx context.Context, baseURL string, paper
 // intentionally treated as not found so a changed migration destination is not
 // skipped unsafely.
 func (s *Store) PaperlessImportStatusForTarget(ctx context.Context, baseURL, targetVault, targetArchive string, paperlessDocumentID int) (status string, found bool, err error) {
-	var storedVault, storedArchive string
 	err = s.db.QueryRowContext(ctx,
-		`SELECT status, target_vault, target_archive FROM paperless_import_state WHERE base_url = ? AND paperless_document_id = ?`,
-		baseURL, paperlessDocumentID).Scan(&status, &storedVault, &storedArchive)
+		`SELECT status FROM paperless_import_state WHERE base_url = ? AND target_vault = ? AND target_archive = ? AND paperless_document_id = ?`,
+		baseURL, targetVault, targetArchive, paperlessDocumentID).Scan(&status)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
 	if err != nil {
 		return "", false, fmt.Errorf("get paperless import state: %w", err)
 	}
-	if storedVault != targetVault || storedArchive != targetArchive {
-		return "", false, nil
-	}
 	return status, true, nil
 }
 
-// PaperlessImportStateByID returns the full import-state row for a single
-// Paperless document, including vault/archive paths and stored SHA256.
-func (s *Store) PaperlessImportStateByID(ctx context.Context, baseURL string, paperlessDocumentID int) (*PaperlessImportState, error) {
+func scanPaperlessImportState(row interface{ Scan(...any) error }) (*PaperlessImportState, error) {
 	var st PaperlessImportState
 	var lastErr, vaultPath, archivePath, sha256 sql.NullString
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id, base_url, target_vault, target_archive, paperless_document_id, status, last_error, vault_path, archive_path, sha256, created_at, updated_at
-		 FROM paperless_import_state WHERE base_url = ? AND paperless_document_id = ?`,
-		baseURL, paperlessDocumentID).Scan(
+	err := row.Scan(
 		&st.ID, &st.BaseURL, &st.TargetVault, &st.TargetArchive, &st.PaperlessDocumentID, &st.Status, &lastErr, &vaultPath, &archivePath, &sha256, &st.CreatedAt, &st.UpdatedAt)
 	if err != nil {
 		return nil, err
@@ -677,6 +668,25 @@ func (s *Store) PaperlessImportStateByID(ctx context.Context, baseURL string, pa
 	return &st, nil
 }
 
+// PaperlessImportStateByID returns the most recent import-state row for a
+// single Paperless document, including vault/archive paths and stored SHA256.
+// Prefer PaperlessImportStateForTarget when the caller knows the destination.
+func (s *Store) PaperlessImportStateByID(ctx context.Context, baseURL string, paperlessDocumentID int) (*PaperlessImportState, error) {
+	return scanPaperlessImportState(s.db.QueryRowContext(ctx,
+		`SELECT id, base_url, target_vault, target_archive, paperless_document_id, status, last_error, vault_path, archive_path, sha256, created_at, updated_at
+		 FROM paperless_import_state WHERE base_url = ? AND paperless_document_id = ? ORDER BY updated_at DESC, id DESC LIMIT 1`,
+		baseURL, paperlessDocumentID))
+}
+
+// PaperlessImportStateForTarget returns the full import-state row for the exact
+// Paperless source document and migration destination.
+func (s *Store) PaperlessImportStateForTarget(ctx context.Context, baseURL, targetVault, targetArchive string, paperlessDocumentID int) (*PaperlessImportState, error) {
+	return scanPaperlessImportState(s.db.QueryRowContext(ctx,
+		`SELECT id, base_url, target_vault, target_archive, paperless_document_id, status, last_error, vault_path, archive_path, sha256, created_at, updated_at
+		 FROM paperless_import_state WHERE base_url = ? AND target_vault = ? AND target_archive = ? AND paperless_document_id = ?`,
+		baseURL, targetVault, targetArchive, paperlessDocumentID))
+}
+
 // ListPaperlessImportState lists the recorded import state for all documents
 // from baseURL, ordered by Paperless document ID. When statusFilter is
 // non-empty only matching rows are returned.
@@ -690,7 +700,7 @@ func (s *Store) ListPaperlessImportState(ctx context.Context, baseURL, statusFil
 		query += ` AND status = ?`
 		args = append(args, statusFilter)
 	}
-	query += ` ORDER BY paperless_document_id ASC`
+	query += ` ORDER BY paperless_document_id ASC, target_vault ASC, target_archive ASC, id ASC`
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -723,6 +733,35 @@ func (s *Store) ListPaperlessImportState(ctx context.Context, baseURL, statusFil
 		return nil, err
 	}
 	return states, nil
+}
+
+// UpdateRule updates an existing classification rule.
+func (s *Store) UpdateRule(ctx context.Context, id int64, pattern, kind, value string) (*ClassificationRule, error) {
+	if pattern == "" {
+		return nil, errors.New("pattern cannot be empty")
+	}
+	switch kind {
+	case "category", "tag", "correspondent", "document_type":
+	default:
+		return nil, fmt.Errorf("invalid rule kind: %q", kind)
+	}
+	if value == "" {
+		return nil, errors.New("value cannot be empty")
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE classification_rules SET pattern = ?, kind = ?, value = ? WHERE id = ?`, pattern, kind, value, id)
+	if err != nil {
+		return nil, fmt.Errorf("update rule: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return nil, fmt.Errorf("rule not found with ID %d", id)
+	}
+	var r ClassificationRule
+	err = s.db.QueryRowContext(ctx, `SELECT id, pattern, kind, value, created_at FROM classification_rules WHERE id = ?`, id).Scan(&r.ID, &r.Pattern, &r.Kind, &r.Value, &r.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("get updated rule: %w", err)
+	}
+	return &r, nil
 }
 
 // DeleteRule deletes a classification rule by ID.

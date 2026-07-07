@@ -30,6 +30,11 @@ type IngestOptions struct {
 	// Layout optionally overrides the note's placement within the vault
 	// (subdirectory and file name). Nil keeps the flat sidecar layout.
 	Layout *writer.NoteLayout
+	// AllowDuplicateContent writes a separate note even when the file hash is
+	// already present in the local document table. Paperless imports use this so
+	// every Paperless document ID gets its own traceable Markdown note while the
+	// archive can still deduplicate identical originals by SHA-256.
+	AllowDuplicateContent bool
 }
 
 // Result is the outcome of a one-shot ingest.
@@ -54,7 +59,7 @@ func extractText(ctx context.Context, source string, kind extract.Kind, engine e
 	case extract.KindText, extract.KindMarkdown, extract.KindCSV:
 		res, err = extract.ReadTextKind(ctx, source, kind)
 	case extract.KindHTML, extract.KindRTF, extract.KindDOCX, extract.KindXLSX, extract.KindODT, extract.KindEML:
-		return nil, extract.UnsupportedFormatError(kind)
+		res, err = extract.ReadStructuredKind(ctx, source, kind)
 	default:
 		if engine == nil {
 			return nil, fmt.Errorf("no extraction engine available for %q", kind)

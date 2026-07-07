@@ -9,11 +9,14 @@ import (
 	"github.com/danieljustus/symaira-ingest/internal/version"
 )
 
+const ReportSchemaVersion = 1
+
 // MigrationReport is the machine-readable artifact of an import or dry-run,
 // suitable as a review surface for an operator or a later UI/bulk-review tool.
 // It never contains document content or secrets — only counts, document IDs,
 // generated paths, and warnings.
 type MigrationReport struct {
+	SchemaVersion   int              `json:"schema_version"`
 	RunID           string           `json:"run_id,omitempty"`
 	ToolVersion     string           `json:"tool_version,omitempty"`
 	Source          string           `json:"source,omitempty"`
@@ -45,6 +48,7 @@ type MigrationReport struct {
 // were actually written.
 func (s *Stats) BuildMigrationReport(dryRun bool) *MigrationReport {
 	r := &MigrationReport{
+		SchemaVersion:   ReportSchemaVersion,
 		RunID:           s.RunID,
 		ToolVersion:     version.Version,
 		Source:          s.Source,
