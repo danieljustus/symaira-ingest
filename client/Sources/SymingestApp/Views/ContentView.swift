@@ -21,6 +21,12 @@ struct ContentView: View {
                 NavigationLink(value: "import") {
                     Label("Paperless Import", systemImage: "arrow.down.doc.fill")
                 }
+                NavigationLink(value: "review") {
+                    Label("Migration Review", systemImage: "doc.text.magnifyingglass")
+                }
+                NavigationLink(value: "preview") {
+                    Label("Preview", systemImage: "doc.richtext")
+                }
                 NavigationLink(value: "settings") {
                     Label("Settings & Doctor", systemImage: "gearshape.fill")
                 }
@@ -41,6 +47,10 @@ struct ContentView: View {
                         RulesView()
                     case "import":
                         ImportView()
+                    case "review":
+                        ReviewView()
+                    case "preview":
+                        PreviewView()
                     case "settings":
                         SettingsView()
                     default:

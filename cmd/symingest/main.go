@@ -1630,7 +1630,7 @@ func runRules(args []string) error {
 	fs := flag.NewFlagSet("rules", flag.ContinueOnError)
 	jsonFlag := fs.Bool("json", false, "Output rules in JSON format")
 	ocrLang, vault, archive, db := registerSharedFlags(fs)
-	configureUsage(fs, "rules [flags] [command]", "Manage classification rules. Patterns are case-insensitive substrings matched against extracted document text, not filename globs.\n\nCommands:\n  list                         List all classification rules\n  add <pattern> <kind> <value> Add a classification rule\n  delete <id>                  Delete a classification rule by ID\n\nKinds for add command: category, tag, correspondent, document_type")
+	configureUsage(fs, "rules [flags] [command]", "Manage classification rules. Patterns are case-insensitive substrings matched against extracted document text, not filename globs.\n\nCommands:\n  list                                  List all classification rules\n  add <pattern> <kind> <value>          Add a classification rule\n  update <id> <pattern> <kind> <value>  Update a classification rule\n  test <text>                           Test rules against text\n  delete <id>                           Delete a classification rule by ID\n\nKinds for add/update command: category, tag, correspondent, document_type")
 	help, err := parseFlags(fs, args, "invalid rules flags")
 	if help || err != nil {
 		return err
@@ -1660,6 +1660,10 @@ func runRules(args []string) error {
 		return listRules(ctx, st, *jsonFlag)
 	case "add":
 		return addRule(ctx, st, remaining[1:])
+	case "update":
+		return updateRule(ctx, st, remaining[1:])
+	case "test":
+		return testRules(ctx, st, remaining[1:], *jsonFlag)
 	case "delete":
 		return deleteRule(ctx, st, remaining[1:])
 	default:
@@ -1735,6 +1739,71 @@ func addRule(ctx context.Context, st *store.Store, args []string) error {
 
 	fmt.Fprintf(stdout, "Added classification rule %d: pattern=%q, kind=%q, value=%q\n",
 		rule.ID, rule.Pattern, rule.Kind, rule.Value)
+	return nil
+}
+
+func updateRule(ctx context.Context, st *store.Store, args []string) error {
+	if len(args) < 4 {
+		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation,
+			"missing arguments; usage: symingest rules update <id> <pattern> <kind> <value>")
+	}
+	id, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		return exitcodes.Wrapf(err, exitcodes.ExitData, exitcodes.KindValidation,
+			"invalid rule ID %q; must be an integer", args[0])
+	}
+	rule, err := st.UpdateRule(ctx, id, args[1], args[2], args[3])
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
+			"failed to update rule")
+	}
+	fmt.Fprintf(stdout, "Updated classification rule %d: pattern=%q, kind=%q, value=%q\n",
+		rule.ID, rule.Pattern, rule.Kind, rule.Value)
+	return nil
+}
+
+type ruleTestMatch struct {
+	ID      int64  `json:"id"`
+	Pattern string `json:"pattern"`
+	Kind    string `json:"kind"`
+	Value   string `json:"value"`
+}
+
+func testRules(ctx context.Context, st *store.Store, args []string, outputJSON bool) error {
+	if len(args) < 1 {
+		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation,
+			"missing text; usage: symingest rules test <text>")
+	}
+	text := strings.ToLower(strings.Join(args, " "))
+	rules, err := st.ListRules(ctx)
+	if err != nil {
+		return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
+			"failed to list rules")
+	}
+	var matches []ruleTestMatch
+	for _, r := range rules {
+		if strings.Contains(text, strings.ToLower(r.Pattern)) {
+			matches = append(matches, ruleTestMatch{ID: r.ID, Pattern: r.Pattern, Kind: r.Kind, Value: r.Value})
+		}
+	}
+	if outputJSON {
+		if matches == nil {
+			matches = []ruleTestMatch{}
+		}
+		data, err := json.MarshalIndent(matches, "", "  ")
+		if err != nil {
+			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal, "failed to marshal rule test result")
+		}
+		fmt.Fprintln(stdout, string(data))
+		return nil
+	}
+	if len(matches) == 0 {
+		fmt.Fprintln(stdout, "No matching classification rules.")
+		return nil
+	}
+	for _, m := range matches {
+		fmt.Fprintf(stdout, "match rule %d: pattern=%q kind=%q value=%q\n", m.ID, m.Pattern, m.Kind, m.Value)
+	}
 	return nil
 }
 

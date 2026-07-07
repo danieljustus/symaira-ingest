@@ -735,6 +735,35 @@ func (s *Store) ListPaperlessImportState(ctx context.Context, baseURL, statusFil
 	return states, nil
 }
 
+// UpdateRule updates an existing classification rule.
+func (s *Store) UpdateRule(ctx context.Context, id int64, pattern, kind, value string) (*ClassificationRule, error) {
+	if pattern == "" {
+		return nil, errors.New("pattern cannot be empty")
+	}
+	switch kind {
+	case "category", "tag", "correspondent", "document_type":
+	default:
+		return nil, fmt.Errorf("invalid rule kind: %q", kind)
+	}
+	if value == "" {
+		return nil, errors.New("value cannot be empty")
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE classification_rules SET pattern = ?, kind = ?, value = ? WHERE id = ?`, pattern, kind, value, id)
+	if err != nil {
+		return nil, fmt.Errorf("update rule: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return nil, fmt.Errorf("rule not found with ID %d", id)
+	}
+	var r ClassificationRule
+	err = s.db.QueryRowContext(ctx, `SELECT id, pattern, kind, value, created_at FROM classification_rules WHERE id = ?`, id).Scan(&r.ID, &r.Pattern, &r.Kind, &r.Value, &r.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("get updated rule: %w", err)
+	}
+	return &r, nil
+}
+
 // DeleteRule deletes a classification rule by ID.
 func (s *Store) DeleteRule(ctx context.Context, id int64) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM classification_rules WHERE id = ?`, id)

@@ -12,6 +12,12 @@ struct RulesView: View {
     @State private var newKind = "category"
     @State private var newValue = ""
     @State private var isAdding = false
+    @State private var editingRule: SwiftRule?
+    @State private var editPattern = ""
+    @State private var editKind = "category"
+    @State private var editValue = ""
+    @State private var testText = ""
+    @State private var testResult: String?
     
     let ruleKinds = [
         ("Category", "category"),
@@ -111,6 +117,57 @@ struct RulesView: View {
                 RoundedRectangle(cornerRadius: 10)
                     .stroke(Theme.borderGlass, lineWidth: 1)
             )
+
+            // Test rules and edit selected rule
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Test / Edit Rules")
+                    .font(.headline)
+                    .foregroundStyle(Theme.goldPrimary)
+                HStack {
+                    TextField("Paste sample extracted text to test matching rules", text: $testText)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Test") {
+                        Task { await testRules() }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(testText.isEmpty)
+                }
+                if let testResult {
+                    Text(testResult)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(Theme.textSecondary)
+                        .lineLimit(4)
+                }
+                if let editingRule {
+                    Divider().background(Theme.borderGlass)
+                    Text("Editing rule #\(editingRule.id)")
+                        .font(.caption.bold())
+                        .foregroundStyle(Theme.textSecondary)
+                    HStack {
+                        TextField("Pattern", text: $editPattern).textFieldStyle(.roundedBorder)
+                        Picker("", selection: $editKind) {
+                            ForEach(ruleKinds, id: \.1) { item in Text(item.0).tag(item.1) }
+                        }
+                        .pickerStyle(.menu)
+                        .frame(width: 150)
+                        TextField("Value", text: $editValue).textFieldStyle(.roundedBorder)
+                        Button("Save") {
+                            Task { await updateRule(id: editingRule.id) }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Theme.goldPrimary)
+                        Button("Cancel") { self.editingRule = nil }
+                            .buttonStyle(.bordered)
+                    }
+                }
+            }
+            .padding()
+            .background(Theme.bgCard)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Theme.borderGlass, lineWidth: 1)
+            )
             
             // Error Message
             if let error = errorMessage {
@@ -149,7 +206,7 @@ struct RulesView: View {
                         Text("Pattern Substring").frame(maxWidth: .infinity, alignment: .leading)
                         Text("Type").frame(width: 150, alignment: .leading)
                         Text("Assigned Value").frame(width: 180, alignment: .leading)
-                        Text("Action").frame(width: 80, alignment: .trailing)
+                        Text("Action").frame(width: 120, alignment: .trailing)
                     }
                     .font(.subheadline.bold())
                     .foregroundStyle(Theme.textSecondary)
@@ -185,16 +242,23 @@ struct RulesView: View {
                                 .foregroundStyle(Theme.goldSecondary)
                                 .frame(width: 180, alignment: .leading)
                             
-                            Button(role: .destructive) {
-                                Task {
-                                    await deleteRule(id: rule.id)
+                            HStack(spacing: 10) {
+                                Button("Edit") {
+                                    startEditing(rule)
                                 }
-                            } label: {
-                                Image(systemName: "trash")
-                                    .foregroundStyle(.red)
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                Button(role: .destructive) {
+                                    Task {
+                                        await deleteRule(id: rule.id)
+                                    }
+                                } label: {
+                                    Image(systemName: "trash")
+                                        .foregroundStyle(.red)
+                                }
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
-                            .frame(width: 80, alignment: .trailing)
+                            .frame(width: 120, alignment: .trailing)
                         }
                         .padding(.vertical, 8)
                         .listRowBackground(Theme.bgCard)
@@ -238,6 +302,34 @@ struct RulesView: View {
             await loadRules()
         } else {
             errorMessage = "Failed to add rule: \(message)"
+        }
+    }
+
+    private func startEditing(_ rule: SwiftRule) {
+        editingRule = rule
+        editPattern = rule.pattern
+        editKind = rule.kind
+        editValue = rule.value
+    }
+
+    private func updateRule(id: Int64) async {
+        errorMessage = nil
+        let (success, message) = await CLIClient.shared.updateRule(id: id, pattern: editPattern, kind: editKind, value: editValue, config: configStore)
+        if success {
+            editingRule = nil
+            await loadRules()
+        } else {
+            errorMessage = "Failed to update rule: \(message)"
+        }
+    }
+
+    private func testRules() async {
+        errorMessage = nil
+        let (success, message) = await CLIClient.shared.testRules(text: testText, config: configStore)
+        if success {
+            testResult = message.isEmpty ? "No output" : message
+        } else {
+            errorMessage = "Rule test failed: \(message)"
         }
     }
     

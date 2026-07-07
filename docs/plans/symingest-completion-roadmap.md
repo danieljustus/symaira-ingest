@@ -144,13 +144,13 @@ Do not tag releases, push branches, install persistent LaunchAgents, overwrite p
 
 **Goal:** make the app a real operator console, not just a pretty CLI wrapper.
 
-- [ ] Full local Xcode build.
-- [ ] Full GitHub Actions Xcode build.
-- [ ] App version synchronized with CLI version.
-- [ ] Doctor view shows real config/tool state.
-- [ ] Setup assistant writes safe config without secrets.
-- [ ] Paperless token uses SecureField and Keychain/SymVault path, never CLI args/UserDefaults/logs.
-- [ ] Import UI supports:
+- [x] Full local Xcode build.
+- [ ] Full GitHub Actions Xcode build. *(requires push/CI run; not executed locally)*
+- [x] App version synchronized with CLI version.
+- [x] Doctor view shows real config/tool state.
+- [x] Setup assistant writes safe config without secrets.
+- [x] Paperless token uses SecureField and Keychain/SymVault path, never CLI args/UserDefaults/logs.
+- [x] Import UI supports:
   - plan,
   - dry-run,
   - bounded pilots,
@@ -159,11 +159,11 @@ Do not tag releases, push branches, install persistent LaunchAgents, overwrite p
   - verify,
   - deep verify,
   - cutover check.
-- [ ] Jobs UI supports retry and error sidecar opening.
-- [ ] Rules UI supports create/edit/delete/test.
-- [ ] Review UI loads reports and applies corrections via dry-run/final flow.
-- [ ] Preview UI shows Markdown/frontmatter and original preview where possible.
-- [ ] Logs separate stdout/stderr and redact secrets.
+- [x] Jobs UI supports retry and error sidecar opening.
+- [x] Rules UI supports create/edit/delete/test.
+- [x] Review UI loads reports and applies corrections via dry-run/final flow.
+- [x] Preview UI shows Markdown/frontmatter and original preview where possible.
+- [x] Logs separate stdout/stderr and redact secrets.
 
 **Exit gate:** app can configure, ingest, watch, review, and verify a small pilot without terminal usage.
 

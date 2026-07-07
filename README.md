@@ -180,6 +180,8 @@ corrections:
     correspondent: Example GmbH
 ```
 
+The macOS app exposes these same migration surfaces: Paperless import/verify/status, migration review, corrections dry-run/final apply, frontmatter/original preview, rules create/edit/delete/test, and jobs retry/error-sidecar reveal. Paperless tokens are entered through `SecureField` and stored in Keychain; the generated config file never contains the token.
+
 For OCR quality checks, add a body-length gate to vault validation:
 
 ```bash

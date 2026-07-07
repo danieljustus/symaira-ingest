@@ -42,6 +42,61 @@ public struct SwiftRule: Codable, Identifiable, Sendable {
     }
 }
 
+public struct ReviewFindingDTO: Codable, Identifiable, Sendable {
+    public var id: String { "\(kind)-\(documentID ?? 0)-\(message)" }
+    public let kind: String
+    public let documentID: Int?
+    public let message: String
+
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case documentID = "id"
+        case message
+    }
+}
+
+public struct ReviewDocumentDTO: Codable, Identifiable, Sendable {
+    public let id: Int
+    public let status: String
+    public let reason: String?
+    public let mime: String?
+    public let expectedExtension: String?
+    public let vaultPath: String?
+    public let archivePath: String?
+    public let error: String?
+    public let warnings: [String]?
+    public let findings: [String]?
+
+    enum CodingKeys: String, CodingKey {
+        case id, status, reason, mime, error, warnings, findings
+        case expectedExtension = "expected_extension"
+        case vaultPath = "vault_path"
+        case archivePath = "archive_path"
+    }
+}
+
+public struct ReviewReportDTO: Codable, Sendable {
+    public let schemaVersion: Int
+    public let sourceKind: String
+    public let runID: String?
+    public let total: Int
+    public let documents: [ReviewDocumentDTO]
+    public let findings: [ReviewFindingDTO]?
+    public let warnings: [String]?
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case sourceKind = "source_kind"
+        case runID = "run_id"
+        case total, documents, findings, warnings
+    }
+}
+
+public enum StreamKind: Sendable {
+    case stdout
+    case stderr
+}
+
 public struct DependencyReport: Sendable {
     public let symingestPath: String?
     public let tesseractPath: String?
@@ -196,6 +251,29 @@ public final class CLIClient: Sendable {
         }
     }
 
+    public func updateRule(id: Int64, pattern: String, kind: String, value: String, config: ConfigStore) async -> (success: Bool, message: String) {
+        do {
+            let (out, err) = try await runIngestCommand(args: ["rules", "update", "\(id)", pattern, kind, value], config: config)
+            if out.contains("Updated") {
+                return (true, out.trimmingCharacters(in: .whitespacesAndNewlines))
+            } else {
+                return (false, err.isEmpty ? out : err)
+            }
+        } catch {
+            return (false, error.localizedDescription)
+        }
+    }
+
+    public func testRules(text: String, config: ConfigStore) async -> (success: Bool, message: String) {
+        do {
+            let (out, err) = try await runIngestCommand(args: ["rules", "test", text], config: config)
+            let message = (err.isEmpty ? out : err).trimmingCharacters(in: .whitespacesAndNewlines)
+            return (err.isEmpty, message)
+        } catch {
+            return (false, error.localizedDescription)
+        }
+    }
+
     public func ingestFile(filePath: String, config: ConfigStore) async -> (success: Bool, message: String) {
         do {
             let (out, err) = try await runIngestCommand(args: ["ingest", filePath], config: config)
@@ -209,11 +287,50 @@ public final class CLIClient: Sendable {
         }
     }
 
+    public func buildReviewReport(reportPath: String, filters: [String], config: ConfigStore) async throws -> ReviewReportDTO {
+        let args = ["review-report", "--json"] + filters + [reportPath]
+        let (out, err) = try await runIngestCommand(args: args, config: config)
+        let data = out.data(using: .utf8) ?? Data()
+        do {
+            return try JSONDecoder().decode(ReviewReportDTO.self, from: data)
+        } catch {
+            throw NSError(domain: "symingest", code: 422, userInfo: [NSLocalizedDescriptionKey: err.isEmpty ? "Failed to parse review report JSON" : err])
+        }
+    }
+
+    public func writeReviewHTML(reportPath: String, htmlPath: String, filters: [String], config: ConfigStore) async throws -> String {
+        let args = ["review-report", "--html", htmlPath] + filters + [reportPath]
+        let (out, err) = try await runIngestCommand(args: args, config: config)
+        return (err.isEmpty ? out : err).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    public func applyCorrections(vault: String, correctionsPath: String, dryRun: Bool, requireCount: Int?, max: Int?, backupDir: String, config: ConfigStore) async throws -> String {
+        var args = ["apply-corrections", "--vault", vault]
+        if dryRun { args.append("--dry-run") }
+        if let requireCount { args += ["--require-count", "\(requireCount)"] }
+        if let max { args += ["--max", "\(max)"] }
+        if !backupDir.isEmpty { args += ["--backup-dir", backupDir] }
+        args.append(correctionsPath)
+        let (out, err) = try await runIngestCommand(args: args, config: config)
+        return (err.isEmpty ? out : err).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     public func runIngestCommandStreaming(
         args: [String],
         config: ConfigStore,
         environment: [String: String] = [:],
         onOutput: @escaping @Sendable (String) -> Void
+    ) async throws -> Int32 {
+        try await runIngestCommandStreaming(args: args, config: config, environment: environment) { text, _ in
+            onOutput(text)
+        }
+    }
+
+    public func runIngestCommandStreaming(
+        args: [String],
+        config: ConfigStore,
+        environment: [String: String] = [:],
+        onOutput: @escaping @Sendable (String, StreamKind) -> Void
     ) async throws -> Int32 {
         let snapshot = await CLIConfigSnapshot(config: config)
         guard let binary = locateBinary(customPath: snapshot.customBinaryPath) else {
@@ -248,13 +365,13 @@ public final class CLIClient: Sendable {
         outHandle.readabilityHandler = { handle in
             let data = handle.availableData
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            onOutput(text)
+            onOutput(text, .stdout)
         }
 
         errHandle.readabilityHandler = { handle in
             let data = handle.availableData
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            onOutput(text)
+            onOutput(text, .stderr)
         }
 
         try process.run()

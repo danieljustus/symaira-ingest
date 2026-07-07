@@ -363,12 +363,21 @@ func TestStore_Rules(t *testing.T) {
 		t.Fatalf("rule order/ID mismatch")
 	}
 
-	// 5. Delete rule
+	// 5. Update rule
+	updated, err := s.UpdateRule(ctx, r1.ID, "acme inc", "correspondent", "Acme Inc")
+	if err != nil {
+		t.Fatalf("UpdateRule: %v", err)
+	}
+	if updated.Pattern != "acme inc" || updated.Kind != "correspondent" || updated.Value != "Acme Inc" {
+		t.Fatalf("unexpected updated rule: %+v", updated)
+	}
+
+	// 6. Delete rule
 	if err := s.DeleteRule(ctx, r1.ID); err != nil {
 		t.Fatalf("DeleteRule: %v", err)
 	}
 
-	// 6. Verify deletion
+	// 7. Verify deletion
 	rules, err = s.ListRules(ctx)
 	if err != nil {
 		t.Fatalf("ListRules: %v", err)

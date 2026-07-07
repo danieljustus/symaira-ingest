@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct JobsView: View {
     @Environment(ConfigStore.self) private var configStore
@@ -108,7 +109,7 @@ struct JobsView: View {
                         Text("Attempts").frame(width: 70, alignment: .center)
                         Text("Kind").frame(width: 70, alignment: .leading)
                         Text("Source Path").frame(maxWidth: .infinity, alignment: .leading)
-                        Text("Action").frame(width: 80, alignment: .trailing)
+                        Text("Action").frame(width: 180, alignment: .trailing)
                     }
                     .font(.subheadline.bold())
                     .foregroundStyle(Theme.textSecondary)
@@ -159,21 +160,30 @@ struct JobsView: View {
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                             
-                            // Action Button
-                            HStack {
+                            // Action Buttons
+                            HStack(spacing: 6) {
+                                Button("Reveal") {
+                                    reveal(path: job.sourcePath)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                Button("Error JSON") {
+                                    reveal(path: job.sourcePath + ".error.json")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .disabled(!FileManager.default.fileExists(atPath: job.sourcePath + ".error.json"))
                                 if job.status.lowercased() == "failed" {
                                     Button("Retry") {
                                         Task {
                                             await retryJob(id: job.id)
                                         }
                                     }
-                                    .buttonStyle(.bordered)
+                                    .buttonStyle(.borderedProminent)
                                     .controlSize(.small)
-                                } else {
-                                    Spacer().frame(width: 1)
                                 }
                             }
-                            .frame(width: 80, alignment: .trailing)
+                            .frame(width: 180, alignment: .trailing)
                         }
                         .padding(.vertical, 6)
                         .listRowBackground(Theme.bgCard)
@@ -225,6 +235,11 @@ struct JobsView: View {
     private func stopTimer() {
         timer?.invalidate()
         timer = nil
+    }
+
+    private func reveal(path: String) {
+        guard !path.isEmpty else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
     }
     
     private func badgeColor(for status: String) -> Color {
