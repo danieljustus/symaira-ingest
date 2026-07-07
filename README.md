@@ -67,6 +67,29 @@ Total Due: $284.50
 [Archived Original](file:///.../archive/39f4280386fd5df04e0e06d7d7fa1c5a2aaaa54b643e92ae9c859c0c6f1117d6.txt)
 ```
 
+**Extract structured data from a file:**
+
+```bash
+symingest extract /path/to/document.pdf --profile generic --json
+```
+
+```text
+$ symingest extract invoice.txt --profile invoice
+Profile: invoice
+File: invoice.txt
+Text length: 71
+Extractions: 4
+
+  date:                2026-03-12 [12:22]
+  amount:              $284.50 [45:53]
+  invoice_number:      INV-4471 [0:10]
+  email:               accounts@acme.com [55:72]
+```
+
+With `--json`, outputs JSONL (one JSON object per line) for programmatic consumption. Available profiles: `generic` (dates, amounts, emails, URLs, IBANs), `invoice` (adds invoice numbers, totals, due dates), `contract` (adds parties, deadlines), `jobcenter` (adds job IDs, appointment dates).
+
+During normal ingestion, if an extraction profile is configured, sidecar JSONL files are written under `.symaira/extractions/<sha256>.jsonl` in the vault and the note frontmatter includes `sidecar_path` and `extraction_count`. Extraction failures are logged but never roll back a completed ingest.
+
 Generated vault notes are private by default: note files are written with `0600` permissions and newly created vault subdirectories with `0700`, matching the archive and database defaults.
 
 **Watch a directory for new files:**

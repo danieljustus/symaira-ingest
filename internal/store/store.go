@@ -14,6 +14,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/danieljustus/symaira-corekit/sqlitekit"
+	"github.com/danieljustus/symaira-ingest/internal/annotate"
 )
 
 //go:embed migrations/*.sql
@@ -775,4 +776,61 @@ func (s *Store) DeleteRule(ctx context.Context, id int64) error {
 		return fmt.Errorf("rule not found with ID %d", id)
 	}
 	return nil
+}
+
+// RecordExtractions stores a batch of extractions for a document in the
+// document_extractions table. Store failures are logged but not fatal to the
+// caller since sidecar writes already succeeded.
+func (s *Store) RecordExtractions(ctx context.Context, documentID int64, profile string, extractions []annotate.Extraction) error {
+	for _, e := range extractions {
+		startOffset, endOffset := 0, 0
+		snippet := ""
+		if e.Span != nil {
+			startOffset = e.Span.Start
+			endOffset = e.Span.End
+			snippet = e.Span.Snippet
+		}
+		_, err := s.db.ExecContext(ctx,
+			`INSERT INTO document_extractions (document_id, profile, field_type, value, start_offset, end_offset, snippet)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			documentID, profile, e.Field, e.Value, startOffset, endOffset, snippet)
+		if err != nil {
+			return fmt.Errorf("record extraction: %w", err)
+		}
+	}
+	return nil
+}
+
+// ListExtractions returns all extractions stored for a document, ordered by
+// creation time.
+func (s *Store) ListExtractions(ctx context.Context, documentID int64) ([]annotate.Extraction, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT field_type, value, start_offset, end_offset, snippet
+		 FROM document_extractions
+		 WHERE document_id = ?
+		 ORDER BY id ASC`, documentID)
+	if err != nil {
+		return nil, fmt.Errorf("query extractions: %w", err)
+	}
+	defer rows.Close()
+
+	var result []annotate.Extraction
+	for rows.Next() {
+		var e annotate.Extraction
+		var startOffset, endOffset int
+		var snippet string
+		if err := rows.Scan(&e.Field, &e.Value, &startOffset, &endOffset, &snippet); err != nil {
+			return nil, fmt.Errorf("scan extraction: %w", err)
+		}
+		e.Type = e.Field
+		e.Matched = true
+		if startOffset != 0 || endOffset != 0 || snippet != "" {
+			e.Span = &annotate.Span{Start: startOffset, End: endOffset, Snippet: snippet}
+		}
+		result = append(result, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
