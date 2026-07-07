@@ -16,7 +16,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/danieljustus/symaira-corekit/exitcodes"
@@ -519,12 +518,4 @@ func readLockPID(path string) (int, bool) {
 		return 0, true
 	}
 	return pid, false
-}
-
-func processAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	err := syscall.Kill(pid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
 }
