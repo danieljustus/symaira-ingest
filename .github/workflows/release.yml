@@ -78,7 +78,7 @@ jobs:
             exit 0
           fi
           for ARCH in amd64 arm64; do
-            for f in dist/*_darwin_${ARCH}/*; do
+            for f in dist/*_darwin_"${ARCH}"/*; do
               if [ -f "$f" ] && file "$f" | grep -q "Mach-O"; then
                 echo "Notarizing $f..."
                 ZIP_PATH="$RUNNER_TEMP/notarize_cli_${ARCH}.zip"
@@ -161,6 +161,10 @@ jobs:
           lipo -create -output symingest symingest-amd64 symingest-arm64
           rm symingest-amd64 symingest-arm64
           file symingest
+          if [ -n "${CODESIGN_IDENTITY:-}" ]; then
+            codesign -f -s "$CODESIGN_IDENTITY" --timestamp --options runtime symingest
+            codesign --verify --strict --verbose=2 symingest
+          fi
 
       - name: Generate Xcode project
         run: |
@@ -188,8 +192,31 @@ jobs:
         if: steps.signing.outputs.signed == 'true'
         run: |
           set -euo pipefail
-          codesign -f -s "$CODESIGN_IDENTITY" --timestamp --options runtime --deep build_dd/Build/Products/Release/Symingest.app
-          codesign --verify --deep --strict --verbose=2 build_dd/Build/Products/Release/Symingest.app
+          APP_PATH="build_dd/Build/Products/Release/Symingest.app"
+          APP_EXECUTABLE="$APP_PATH/Contents/MacOS/Symingest"
+
+          while IFS= read -r -d '' item; do
+            if [ "$item" = "$APP_EXECUTABLE" ]; then
+              continue
+            fi
+            if file "$item" | grep -q "Mach-O"; then
+              echo "Signing nested Mach-O: $item"
+              codesign -f -s "$CODESIGN_IDENTITY" --timestamp --options runtime "$item"
+              codesign --verify --strict --verbose=2 "$item"
+            fi
+          done < <(find "$APP_PATH/Contents" -type f -print0)
+
+          codesign -f -s "$CODESIGN_IDENTITY" --timestamp --options runtime "$APP_PATH"
+          codesign --verify --strict --verbose=2 "$APP_PATH"
+
+          while IFS= read -r -d '' item; do
+            if [ "$item" = "$APP_EXECUTABLE" ]; then
+              continue
+            fi
+            if file "$item" | grep -q "Mach-O"; then
+              codesign --verify --strict --verbose=2 "$item"
+            fi
+          done < <(find "$APP_PATH/Contents" -type f -print0)
 
       - name: Package DMG
         run: |
@@ -221,13 +248,25 @@ jobs:
             echo "::warning::NOTARY_API_KEY secret is not set. Skipping DMG notarization."
             exit 0
           fi
-          xcrun notarytool submit dist/Symingest.dmg \
+          NOTARY_OUTPUT="$RUNNER_TEMP/notarytool-dmg-submit.json"
+          if ! xcrun notarytool submit dist/Symingest.dmg \
             --apple-id "${NOTARY_API_KEY_ID}" \
             --team-id "${NOTARY_API_ISSUER}" \
             --password "${NOTARY_API_KEY}" \
-            --wait
+            --wait \
+            --output-format json | tee "$NOTARY_OUTPUT"; then
+            SUBMISSION_ID=$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("id", ""))' "$NOTARY_OUTPUT" 2>/dev/null || true)
+            if [ -n "$SUBMISSION_ID" ]; then
+              xcrun notarytool log "$SUBMISSION_ID" \
+                --apple-id "${NOTARY_API_KEY_ID}" \
+                --team-id "${NOTARY_API_ISSUER}" \
+                --password "${NOTARY_API_KEY}" || true
+            fi
+            exit 1
+          fi
           xcrun stapler staple dist/Symingest.dmg
           xcrun stapler validate dist/Symingest.dmg
+          spctl -a -t open --context context:primary-signature -v dist/Symingest.dmg
 
       - name: Upload DMG to GitHub Release
         uses: softprops/action-gh-release@v2
