@@ -100,3 +100,22 @@ func TestReadTextKind_PreservesCSVKind(t *testing.T) {
 		t.Fatalf("engine = %q, want text", res.Engine)
 	}
 }
+
+func TestIsExplicitlyUnsupported(t *testing.T) {
+	if IsExplicitlyUnsupported(KindPDF) {
+		t.Error("IsExplicitlyUnsupported(KindPDF) = true, want false")
+	}
+	if IsExplicitlyUnsupported(KindText) {
+		t.Error("IsExplicitlyUnsupported(KindText) = true, want false")
+	}
+}
+
+func TestUnsupportedFormatError(t *testing.T) {
+	err := UnsupportedFormatError(KindPDF)
+	if err == nil {
+		t.Fatal("expected non-nil error")
+	}
+	if got := err.Error(); got == "" {
+		t.Error("error message is empty")
+	}
+}

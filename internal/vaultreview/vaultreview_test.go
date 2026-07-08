@@ -250,3 +250,89 @@ func TestBuildReviewReportFromVerifyDuplicateContent(t *testing.T) {
 		t.Fatalf("unexpected duplicate-content report: %+v", report)
 	}
 }
+
+func TestRemoveTag(t *testing.T) {
+	tests := []struct {
+		name  string
+		tags  []string
+		tag   string
+		want  []string
+	}{
+		{"empty", nil, "foo", nil},
+		{"no_match", []string{"a", "b"}, "c", []string{"a", "b"}},
+		{"match", []string{"a", "b", "c"}, "b", []string{"a", "c"}},
+		{"case_insensitive", []string{"A", "b"}, "a", []string{"b"}},
+		{"all_removed", []string{"a", "a"}, "a", []string{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := removeTag(tt.tags, tt.tag)
+			if len(got) != len(tt.want) {
+				t.Fatalf("removeTag(%v, %q) = %v, want %v", tt.tags, tt.tag, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("removeTag(%v, %q)[%d] = %q, want %q", tt.tags, tt.tag, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestParseCorrections_Versioned(t *testing.T) {
+	data := []byte(`schema_version: 1
+corrections:
+  - paperless_id: 1
+    add_tags: [reviewed]
+`)
+	corrections, err := ParseCorrections(data)
+	if err != nil {
+		t.Fatalf("ParseCorrections: %v", err)
+	}
+	if len(corrections) != 1 {
+		t.Fatalf("len(corrections) = %d, want 1", len(corrections))
+	}
+	if corrections[0].PaperlessID != 1 {
+		t.Errorf("PaperlessID = %d, want 1", corrections[0].PaperlessID)
+	}
+	if len(corrections[0].AddTags) != 1 || corrections[0].AddTags[0] != "reviewed" {
+		t.Errorf("AddTags = %v, want [reviewed]", corrections[0].AddTags)
+	}
+}
+
+func TestParseCorrections_Legacy(t *testing.T) {
+	data := []byte(`- paperless_id: 2
+  correspondent: Test
+`)
+	corrections, err := ParseCorrections(data)
+	if err != nil {
+		t.Fatalf("ParseCorrections: %v", err)
+	}
+	if len(corrections) != 1 {
+		t.Fatalf("len(corrections) = %d, want 1", len(corrections))
+	}
+	if corrections[0].PaperlessID != 2 {
+		t.Errorf("PaperlessID = %d, want 2", corrections[0].PaperlessID)
+	}
+}
+
+func TestParseCorrections_InvalidYAML(t *testing.T) {
+	data := []byte(`{invalid yaml`)
+	_, err := ParseCorrections(data)
+	if err == nil {
+		t.Fatal("expected error for invalid YAML")
+	}
+}
+
+func TestParseCorrections_WrongSchemaVersion(t *testing.T) {
+	data := []byte(`schema_version: 99
+corrections: []
+`)
+	_, err := ParseCorrections(data)
+	if err == nil {
+		t.Fatal("expected error for wrong schema version")
+	}
+	if !strings.Contains(err.Error(), "schema_version") {
+		t.Errorf("error = %v, want mention of schema_version", err)
+	}
+}
