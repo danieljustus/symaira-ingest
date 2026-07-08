@@ -352,3 +352,62 @@ func TestWriteNote_NilLayoutStaysFlat(t *testing.T) {
 		t.Errorf("path = %q, want flat .../invoice.pdf.md", path)
 	}
 }
+
+func TestUpdateNoteSidecar(t *testing.T) {
+	vault := t.TempDir()
+	w := &NoteWriter{Vault: vault}
+
+	path, err := w.WriteNote("/tmp/scans/invoice.pdf", "sidecar-hash", "application/pdf", "tesseract", "Invoice body here", "/archive/sidecar-hash.pdf", time.Unix(0, 0).UTC(), "invoice", []string{"financial"}, "", "", "", "", "", "", nil, nil)
+	if err != nil {
+		t.Fatalf("WriteNote: %v", err)
+	}
+
+	sidecarPath := filepath.Join(vault, ".symaira", "extractions", "sidecar-hash.jsonl")
+	if err := w.UpdateNoteSidecar(path, sidecarPath, 4); err != nil {
+		t.Fatalf("UpdateNoteSidecar: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	out := string(data)
+
+	if !strings.Contains(out, "sidecar_path:") {
+		t.Fatal("output missing sidecar_path")
+	}
+	if !strings.Contains(out, sidecarPath) {
+		t.Fatalf("output missing sidecar path %q", sidecarPath)
+	}
+	if !strings.Contains(out, "extraction_count: 4") {
+		t.Fatal("output missing extraction_count: 4")
+	}
+	if !strings.Contains(out, "Invoice body here") {
+		t.Fatal("body was lost during sidecar update")
+	}
+}
+
+func TestUpdateNoteSidecar_MissingFrontmatter(t *testing.T) {
+	vault := t.TempDir()
+	w := &NoteWriter{Vault: vault}
+
+	path := filepath.Join(vault, "no-frontmatter.md")
+	if err := os.WriteFile(path, []byte("just body\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	err := w.UpdateNoteSidecar(path, "/sidecar.jsonl", 1)
+	if err == nil {
+		t.Fatal("expected error for missing frontmatter")
+	}
+}
+
+func TestUpdateNoteSidecar_NonexistentFile(t *testing.T) {
+	vault := t.TempDir()
+	w := &NoteWriter{Vault: vault}
+
+	err := w.UpdateNoteSidecar(filepath.Join(vault, "nonexistent.md"), "/sidecar.jsonl", 1)
+	if err == nil {
+		t.Fatal("expected error for nonexistent file")
+	}
+}

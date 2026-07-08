@@ -4,6 +4,8 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+
+	"github.com/danieljustus/symaira-ingest/internal/annotate"
 )
 
 func TestCreateOrGet_Deduplicates(t *testing.T) {
@@ -530,5 +532,225 @@ func TestPaperlessImportState_TargetsAreIndependent(t *testing.T) {
 	}
 	if len(all) != 2 {
 		t.Fatalf("expected 2 target-specific rows, got %d: %+v", len(all), all)
+	}
+}
+
+func TestEnqueueSkippedJob(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	doc, _, err := s.CreateOrGet(ctx, "/tmp/a.pdf", "hash1", "application/pdf")
+	if err != nil {
+		t.Fatalf("CreateOrGet: %v", err)
+	}
+
+	job, err := s.EnqueueSkippedJob(ctx, doc.ID, "ingest", "unsupported mime type")
+	if err != nil {
+		t.Fatalf("EnqueueSkippedJob: %v", err)
+	}
+	if job.Status != "skipped" {
+		t.Fatalf("status = %q, want skipped", job.Status)
+	}
+	if job.LastError == nil || *job.LastError != "unsupported mime type" {
+		t.Fatalf("last_error = %v, want 'unsupported mime type'", job.LastError)
+	}
+	if job.DocumentID != doc.ID {
+		t.Fatalf("document_id = %d, want %d", job.DocumentID, doc.ID)
+	}
+	if job.Kind != "ingest" {
+		t.Fatalf("kind = %q, want ingest", job.Kind)
+	}
+
+	jobs, err := s.ListJobs(ctx, 0)
+	if err != nil {
+		t.Fatalf("ListJobs: %v", err)
+	}
+	found := false
+	for _, j := range jobs {
+		if j.ID == job.ID {
+			found = true
+			if j.Status != "skipped" {
+				t.Fatalf("listed job status = %q, want skipped", j.Status)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("skipped job not found in ListJobs")
+	}
+}
+
+func TestResetRunningJobs(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	doc, _, err := s.CreateOrGet(ctx, "/tmp/a.pdf", "hash-reset", "application/pdf")
+	if err != nil {
+		t.Fatalf("CreateOrGet: %v", err)
+	}
+
+	job, err := s.EnqueueJob(ctx, doc.ID, "ingest")
+	if err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+	claimed, err := s.ClaimJobByID(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("ClaimJobByID: %v", err)
+	}
+	if claimed.Status != "running" {
+		t.Fatalf("claimed status = %q, want running", claimed.Status)
+	}
+
+	if err := s.ResetRunningJobs(ctx); err != nil {
+		t.Fatalf("ResetRunningJobs: %v", err)
+	}
+
+	jobs, err := s.ListJobs(ctx, 0)
+	if err != nil {
+		t.Fatalf("ListJobs: %v", err)
+	}
+	for _, j := range jobs {
+		if j.ID == job.ID {
+			if j.Status != "pending" {
+				t.Fatalf("after reset, job status = %q, want pending", j.Status)
+			}
+			return
+		}
+	}
+	t.Fatal("job not found after reset")
+}
+
+func TestRecordAndListExtractions(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	doc, _, err := s.CreateOrGet(ctx, "/tmp/invoice.pdf", "hash-ext", "application/pdf")
+	if err != nil {
+		t.Fatalf("CreateOrGet: %v", err)
+	}
+
+	extractions := []annotate.Extraction{
+		{Field: "date", Type: "date", Value: "2026-03-12", Span: &annotate.Span{Start: 10, End: 20, Snippet: "2026-03-12"}, Matched: true},
+		{Field: "amount", Type: "amount", Value: "$284.50"},
+	}
+
+	if err := s.RecordExtractions(ctx, doc.ID, "invoice", extractions); err != nil {
+		t.Fatalf("RecordExtractions: %v", err)
+	}
+
+	got, err := s.ListExtractions(ctx, doc.ID)
+	if err != nil {
+		t.Fatalf("ListExtractions: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+
+	if got[0].Field != "date" || got[0].Value != "2026-03-12" {
+		t.Fatalf("extraction[0] = %+v, want date/2026-03-12", got[0])
+	}
+	if got[0].Span == nil {
+		t.Fatal("extraction[0].Span is nil, want non-nil")
+	}
+	if got[0].Span.Start != 10 || got[0].Span.End != 20 {
+		t.Fatalf("span = %+v, want 10:20", got[0].Span)
+	}
+	if !got[0].Matched {
+		t.Fatal("extraction[0].Matched should be true")
+	}
+
+	if got[1].Field != "amount" || got[1].Value != "$284.50" {
+		t.Fatalf("extraction[1] = %+v, want amount/$284.50", got[1])
+	}
+	if got[1].Span != nil {
+		t.Fatalf("extraction[1].Span = %+v, want nil", got[1].Span)
+	}
+}
+
+func TestListExtractions_Empty(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	doc, _, err := s.CreateOrGet(ctx, "/tmp/empty.pdf", "hash-empty", "application/pdf")
+	if err != nil {
+		t.Fatalf("CreateOrGet: %v", err)
+	}
+
+	got, err := s.ListExtractions(ctx, doc.ID)
+	if err != nil {
+		t.Fatalf("ListExtractions: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("len = %d, want 0", len(got))
+	}
+}
+
+func TestPaperlessImportStateByID(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	baseURL := "https://paperless.example"
+
+	if err := s.UpsertPaperlessImportState(ctx, baseURL, 42, "imported", ""); err != nil {
+		t.Fatalf("UpsertPaperlessImportState: %v", err)
+	}
+
+	state, err := s.PaperlessImportStateByID(ctx, baseURL, 42)
+	if err != nil {
+		t.Fatalf("PaperlessImportStateByID: %v", err)
+	}
+	if state == nil {
+		t.Fatal("state is nil")
+	}
+	if state.PaperlessDocumentID != 42 {
+		t.Errorf("PaperlessDocumentID = %d, want 42", state.PaperlessDocumentID)
+	}
+	if state.Status != "imported" {
+		t.Errorf("Status = %q, want imported", state.Status)
+	}
+	if state.BaseURL != baseURL {
+		t.Errorf("BaseURL = %q, want %q", state.BaseURL, baseURL)
+	}
+}
+
+func TestPaperlessImportStateByID_NotFound(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	state, err := s.PaperlessImportStateByID(ctx, "https://paperless.example", 999)
+	if err == nil {
+		t.Fatal("expected error for non-existent ID")
+	}
+	if state != nil {
+		t.Errorf("state = %+v, want nil for non-existent ID", state)
 	}
 }

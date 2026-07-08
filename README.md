@@ -174,6 +174,34 @@ Flags:
 
 After an import, `--verify` re-reads the Paperless source and the generated vault notes and reports any document that is missing, duplicated, missing its archived original, or whose metadata (tags, correspondent, document type, storage path, created date) drifted from the source. It prints a human summary, or a stable JSON report with `--json`, and exits non-zero when any discrepancy is found — suitable as an automated migration gate before Paperless is retired. Only IDs, field names, and paths appear in the output; document content never does.
 
+**Import from a Notion export:**
+
+```bash
+symingest import notion ~/Downloads/Notion-Export
+```
+
+Flags:
+
+```text
+  --vault string         Target vault directory
+  --dry-run              List what would be imported without writing
+  --import-run-id string Idempotency key; re-running with the same ID skips
+                         already-imported notes
+  --report string        Write a JSON migration report to this path
+```
+
+Export your Notion workspace as **Markdown + CSV** and unzip the archive. Then point `symingest import notion` at the top-level export directory. The importer converts:
+
+- Notion pages into Markdown notes with YAML frontmatter
+- CSV databases into one note per row, with CSV columns as top-level frontmatter
+  properties, plus an index note per database
+- Page links into `[[...]]` wikilinks using clean, unique note names
+- Attachments and images into `assets/` with relative links rewritten to
+  content-addressed filenames
+- Nested export folders into matching vault subdirectories
+
+Use `--dry-run` to preview the import without writing anything. Use `--import-run-id` when running the command repeatedly; notes already recorded under that run ID are skipped. `--report <path>` writes a stable JSON migration report (schema version, tool version, counts, and per-note results) that contains no document content and is safe to hand to a review step.
+
 **Gate Paperless cutover:**
 
 ```bash
