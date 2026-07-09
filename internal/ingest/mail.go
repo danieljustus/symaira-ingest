@@ -110,7 +110,7 @@ func (m *MailPoller) pollLoop(ctx context.Context, acc config.IMAPAccount, index
 func (m *MailPoller) pollAccount(ctx context.Context, acc config.IMAPAccount) error {
 	pwd, err := secret.Resolve(ctx, acc.PasswordSecret)
 	if err != nil {
-		return fmt.Errorf("resolve password: %w", err)
+		return fmt.Errorf("resolve password failed")
 	}
 
 	addr := fmt.Sprintf("%s:%d", acc.Host, acc.Port)
@@ -121,7 +121,7 @@ func (m *MailPoller) pollAccount(ctx context.Context, acc config.IMAPAccount) er
 	defer client.Logout()
 
 	if err := client.Login(acc.Username, pwd).Wait(); err != nil {
-		return fmt.Errorf("login: %w", err)
+		return fmt.Errorf("login failed")
 	}
 
 	folder := acc.Folder
