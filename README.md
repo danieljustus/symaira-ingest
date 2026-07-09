@@ -124,6 +124,29 @@ The generated LaunchAgent embeds paths only, never Paperless tokens or other sec
 symingest mcp
 ```
 
+**Mail ingestion:**
+
+`symingest watch` also polls configured IMAP mailboxes when accounts are set up in the config file (`~/.config/symingest/config.toml` or `./.symingest.toml`):
+
+```toml
+imap_poll_interval = "5m"
+
+[[imap_accounts]]
+host            = "imap.example.com"
+port            = 993
+username        = "invoices@example.com"
+password_secret = "symvault://imap/invoices"   # or "env://IMAP_PASSWORD", "keychain://symingest/invoices", or a plaintext password
+folder          = "INBOX"
+from            = ["billing@vendor.com"]        # optional sender filter
+subject         = ["Invoice"]                   # optional subject filter
+has_attachment  = true                          # only consider messages with attachments
+action          = "mark_seen"                   # "mark_seen" or "move"
+move_to         = "Processed"                   # required when action = "move"
+archive_mail    = false                         # also ingest the .eml message body itself
+```
+
+Each matching attachment is ingested through the normal pipeline (OCR, extraction, classification) exactly like a file dropped into the watched inbox, and appears in `symingest jobs` with the same retry semantics as filesystem-sourced jobs. Messages are tracked by Message-ID, so a mailbox is never re-ingested on the next poll. `password_secret` supports the same secret backends as other credentials in symingest (`symvault://`, `env://`, `keychain://`, or a plaintext fallback) — see `internal/secret` for resolution order. Connection or authentication failures for an account are recorded as failed jobs, retryable via `symingest retry`, and surfaced by `symingest doctor`.
+
 **Manage classification rules:**
 
 ```bash
