@@ -23,6 +23,121 @@ import (
 	"github.com/emersion/go-message/mail"
 )
 
+type imapClient interface {
+	Login(username, password string) error
+	Select(folder string) error
+	Search(criteria *imap.SearchCriteria) ([]uint32, error)
+	Fetch(seqs []uint32) ([]*imapMessage, error)
+	StoreSeen(seq uint32) error
+	Move(seq uint32, dest string) error
+	Close() error
+}
+
+type imapEnvelope struct {
+	MessageID string
+}
+
+type imapMessage struct {
+	SeqNum   uint32
+	Envelope *imapEnvelope
+	Body     []byte
+}
+
+type realIMAPClient struct {
+	*imapclient.Client
+}
+
+func (c *realIMAPClient) Login(username, password string) error {
+	return c.Client.Login(username, password).Wait()
+}
+
+func (c *realIMAPClient) Select(folder string) error {
+	_, err := c.Client.Select(folder, nil).Wait()
+	return err
+}
+
+func (c *realIMAPClient) Search(criteria *imap.SearchCriteria) ([]uint32, error) {
+	searchData, err := c.Client.Search(criteria, nil).Wait()
+	if err != nil {
+		return nil, err
+	}
+	return searchData.AllSeqNums(), nil
+}
+
+func (c *realIMAPClient) Fetch(seqs []uint32) ([]*imapMessage, error) {
+	if len(seqs) == 0 {
+		return nil, nil
+	}
+	seqSet := imap.SeqSetNum(seqs...)
+	fetchOptions := &imap.FetchOptions{
+		Envelope: true,
+		BodySection: []*imap.FetchItemBodySection{
+			{Peek: true},
+		},
+	}
+	fetchCmd := c.Client.Fetch(seqSet, fetchOptions)
+	defer fetchCmd.Close()
+
+	var results []*imapMessage
+	for {
+		msg := fetchCmd.Next()
+		if msg == nil {
+			break
+		}
+		msgBuf, err := msg.Collect()
+		if err != nil {
+			log.Printf("[MailPoller] Failed to collect message: %v", err)
+			continue
+		}
+		var body []byte
+		for _, sec := range msgBuf.BodySection {
+			if sec.Section.Specifier == imap.PartSpecifierNone {
+				body = sec.Bytes
+				break
+			}
+		}
+		var env *imapEnvelope
+		if msgBuf.Envelope != nil {
+			env = &imapEnvelope{
+				MessageID: msgBuf.Envelope.MessageID,
+			}
+		}
+		results = append(results, &imapMessage{
+			SeqNum:   msgBuf.SeqNum,
+			Envelope: env,
+			Body:     body,
+		})
+	}
+	return results, fetchCmd.Close()
+}
+
+func (c *realIMAPClient) StoreSeen(seq uint32) error {
+	seqSet := imap.SeqSetNum(seq)
+	flags := imap.StoreFlags{
+		Op:    imap.StoreFlagsAdd,
+		Flags: []imap.Flag{imap.FlagSeen},
+	}
+	return c.Client.Store(seqSet, &flags, nil).Close()
+}
+
+func (c *realIMAPClient) Move(seq uint32, dest string) error {
+	seqSet := imap.SeqSetNum(seq)
+	_, err := c.Client.Move(seqSet, dest).Wait()
+	return err
+}
+
+func (c *realIMAPClient) Close() error {
+	return c.Client.Logout().Wait()
+}
+
+func defaultDialIMAP(ctx context.Context, addr string, host string) (imapClient, error) {
+	c, err := imapclient.DialTLS(addr, &imapclient.Options{TLSConfig: &tls.Config{ServerName: host}})
+	if err != nil {
+		return nil, err
+	}
+	return &realIMAPClient{c}, nil
+}
+
 // MailPoller periodically connects to IMAP accounts to fetch and ingest attachments.
 type MailPoller struct {
 	store         *store.Store
@@ -32,6 +147,7 @@ type MailPoller struct {
 	failedDir     string
 	wg            sync.WaitGroup
 	cancel        context.CancelFunc
+	dialIMAP      func(ctx context.Context, addr string, host string) (imapClient, error)
 }
 
 type MailPollerOptions struct {
@@ -59,6 +175,7 @@ func NewMailPoller(s *store.Store, accounts []config.IMAPAccount, opts MailPolle
 		interval:      opts.Interval,
 		processingDir: processingDir,
 		failedDir:     failedDir,
+		dialIMAP:      defaultDialIMAP,
 	}, nil
 }
 
@@ -114,21 +231,21 @@ func (m *MailPoller) pollAccount(ctx context.Context, acc config.IMAPAccount) er
 	}
 
 	addr := fmt.Sprintf("%s:%d", acc.Host, acc.Port)
-	client, err := imapclient.DialTLS(addr, &imapclient.Options{TLSConfig: &tls.Config{ServerName: acc.Host}})
+	client, err := m.dialIMAP(ctx, addr, acc.Host)
 	if err != nil {
 		return fmt.Errorf("dial tls: %w", err)
 	}
-	defer client.Logout()
+	defer client.Close()
 
-	if err := client.Login(acc.Username, pwd).Wait(); err != nil {
-		return fmt.Errorf("login failed")
+	if err := client.Login(acc.Username, pwd); err != nil {
+		return fmt.Errorf("login failed: %w", err)
 	}
 
 	folder := acc.Folder
 	if folder == "" {
 		folder = "INBOX"
 	}
-	if _, err := client.Select(folder, nil).Wait(); err != nil {
+	if err := client.Select(folder); err != nil {
 		return fmt.Errorf("select folder %q: %w", folder, err)
 	}
 
@@ -137,54 +254,30 @@ func (m *MailPoller) pollAccount(ctx context.Context, acc config.IMAPAccount) er
 		searchCriteria.NotFlag = []imap.Flag{imap.FlagSeen}
 	}
 
-	// Add arbitrary limits, e.g. recent first, but imap search doesn't sort by default.
-	// For now we just get the sequence set of matching messages.
-	searchData, err := client.Search(searchCriteria, nil).Wait()
+	seqs, err := client.Search(searchCriteria)
 	if err != nil {
 		return fmt.Errorf("search: %w", err)
 	}
 
-	seqs := searchData.AllSeqNums()
 	if len(seqs) == 0 {
 		return nil // No new messages
 	}
 
-	seqSet := imap.SeqSetNum(seqs...)
-	fetchOptions := &imap.FetchOptions{
-		Envelope: true,
-		BodySection: []*imap.FetchItemBodySection{
-			{Peek: true}, // Peek to avoid automatically marking as seen
-		},
+	messages, err := client.Fetch(seqs)
+	if err != nil {
+		return fmt.Errorf("fetch: %w", err)
 	}
 
-	fetchCmd := client.Fetch(seqSet, fetchOptions)
-	defer fetchCmd.Close()
-
-	for {
-		msg := fetchCmd.Next()
-		if msg == nil {
-			break
+	for _, msg := range messages {
+		if err := m.processMessage(ctx, acc, client, msg); err != nil {
+			log.Printf("[MailPoller] Failed to process message %v: %v", msg.SeqNum, err)
 		}
-
-		msgBuf, err := msg.Collect()
-		if err != nil {
-			log.Printf("[MailPoller] Failed to collect message: %v", err)
-			continue
-		}
-
-		if err := m.processMessage(ctx, acc, client, msgBuf); err != nil {
-			log.Printf("[MailPoller] Failed to process message %v: %v", msgBuf.SeqNum, err)
-		}
-	}
-
-	if err := fetchCmd.Close(); err != nil {
-		return fmt.Errorf("fetch close: %w", err)
 	}
 
 	return nil
 }
 
-func (m *MailPoller) processMessage(ctx context.Context, acc config.IMAPAccount, client *imapclient.Client, msgBuf *imapclient.FetchMessageBuffer) error {
+func (m *MailPoller) processMessage(ctx context.Context, acc config.IMAPAccount, client imapClient, msgBuf *imapMessage) error {
 	envelope := msgBuf.Envelope
 	if envelope == nil {
 		return nil
@@ -204,14 +297,7 @@ func (m *MailPoller) processMessage(ctx context.Context, acc config.IMAPAccount,
 		return nil // already processed
 	}
 
-	var body []byte
-	for _, sec := range msgBuf.BodySection {
-		if sec.Section.Specifier == imap.PartSpecifierNone {
-			body = sec.Bytes
-			break
-		}
-	}
-
+	body := msgBuf.Body
 	if len(body) == 0 {
 		return fmt.Errorf("no body section found")
 	}
@@ -266,17 +352,12 @@ func (m *MailPoller) processMessage(ctx context.Context, acc config.IMAPAccount,
 	}
 
 	// Apply IMAP Action
-	seqSet := imap.SeqSetNum(msgBuf.SeqNum)
 	if acc.Action == "mark_seen" {
-		flags := imap.StoreFlags{
-			Op:    imap.StoreFlagsAdd,
-			Flags: []imap.Flag{imap.FlagSeen},
-		}
-		if err := client.Store(seqSet, &flags, nil).Close(); err != nil {
+		if err := client.StoreSeen(msgBuf.SeqNum); err != nil {
 			return fmt.Errorf("mark seen: %w", err)
 		}
 	} else if acc.Action == "move" && acc.MoveTo != "" {
-		if _, err := client.Move(seqSet, acc.MoveTo).Wait(); err != nil {
+		if err := client.Move(msgBuf.SeqNum, acc.MoveTo); err != nil {
 			return fmt.Errorf("move to %s: %w", acc.MoveTo, err)
 		}
 	}
