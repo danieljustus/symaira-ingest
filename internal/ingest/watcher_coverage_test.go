@@ -10,7 +10,7 @@ import (
 	"github.com/danieljustus/symaira-ingest/internal/store"
 )
 
-func newTestWatcher(t *testing.T) (*Watcher, *store.Store, string) {
+func newTestWatcher(t *testing.T) (*Watcher, *store.Store, string, *fakeClock) {
 	t.Helper()
 	dir := t.TempDir()
 	inbox := filepath.Join(dir, "inbox")
@@ -23,41 +23,47 @@ func newTestWatcher(t *testing.T) (*Watcher, *store.Store, string) {
 	}
 	t.Cleanup(func() { s.Close() })
 
-	w, err := NewWatcher(s, inbox)
+	clk := newFakeClock()
+	w, err := NewWatcherWithOptions(s, inbox, WatcherOptions{Clock: clk})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { w.Close() })
 
-	return w, s, inbox
+	return w, s, inbox, clk
 }
 
-// A file written and then removed before its 1s debounce window elapses
+// A file written and then removed before its debounce window elapses
 // must not be enqueued: the Remove event cancels the pending debounce
 // (cancelDebounce), and a stray timer fire would hit the deleted-file
 // cleanup branch in debounceFile.
 func TestWatcher_RemovedBeforeStable_DoesNotEnqueue(t *testing.T) {
-	w, s, inbox := newTestWatcher(t)
+	w, s, inbox, clk := newTestWatcher(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := w.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	time.Sleep(100 * time.Millisecond)
+	// Let the event loop goroutine start and fsnotify settle.
+	time.Sleep(50 * time.Millisecond)
 
 	path := filepath.Join(inbox, "vanishing.txt")
 	if err := os.WriteFile(path, []byte("here for a moment"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(300 * time.Millisecond)
+	// Wait for the create event to reach the event loop and schedule a timer.
+	time.Sleep(50 * time.Millisecond)
 
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
+	// Wait for the remove event to cancel the debounce.
+	time.Sleep(50 * time.Millisecond)
 
-	// Wait well past the 1s debounce window to make sure no stale timer fires.
-	time.Sleep(1500 * time.Millisecond)
+	// Advance past the debounce window — the timer was already stopped by
+	// cancelDebounce, so nothing should be enqueued.
+	clk.Advance(2 * time.Second)
 
 	w.mu.Lock()
 	_, stillPending := w.pending[path]
@@ -78,7 +84,7 @@ func TestWatcher_RemovedBeforeStable_DoesNotEnqueue(t *testing.T) {
 // cancelDebounce must stop the pending timer and remove the entry so a
 // later checkStability fire (if any were in flight) is a no-op.
 func TestCancelDebounce_StopsTimerAndClearsPending(t *testing.T) {
-	w, _, inbox := newTestWatcher(t)
+	w, _, inbox, clk := newTestWatcher(t)
 
 	path := filepath.Join(inbox, "doc.txt")
 	if err := os.WriteFile(path, []byte("content"), 0o644); err != nil {
@@ -104,9 +110,10 @@ func TestCancelDebounce_StopsTimerAndClearsPending(t *testing.T) {
 		t.Fatal("expected pending entry to be cleared after cancelDebounce")
 	}
 
-	// Give the (now-stopped) timer time to fire if it were not actually
-	// stopped, and confirm nothing got enqueued behind our back.
-	time.Sleep(1200 * time.Millisecond)
+	// Advance well past the debounce window. The timer was already stopped,
+	// so the callback should be a no-op (file not in pending map).
+	clk.Advance(2 * time.Second)
+
 	jobs, err := w.store.ListJobs(ctx, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -121,14 +128,15 @@ func TestCancelDebounce_StopsTimerAndClearsPending(t *testing.T) {
 // new-directory-detected branch), and files later written inside it must
 // be debounced and enqueued like any other watched file.
 func TestWatcher_NewSubdirectoryIsWatchedRecursively(t *testing.T) {
-	w, s, inbox := newTestWatcher(t)
+	w, s, inbox, clk := newTestWatcher(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := w.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	time.Sleep(100 * time.Millisecond)
+	// Let the event loop goroutine start.
+	time.Sleep(50 * time.Millisecond)
 
 	subdir := filepath.Join(inbox, "incoming")
 	if err := os.MkdirAll(subdir, 0o755); err != nil {
@@ -136,14 +144,17 @@ func TestWatcher_NewSubdirectoryIsWatchedRecursively(t *testing.T) {
 	}
 	// Give fsnotify time to deliver the directory-create event and for
 	// watchDirectoryRecursive to add a watch on the new directory.
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	nestedPath := filepath.Join(subdir, "nested.txt")
 	if err := os.WriteFile(nestedPath, []byte("nested content"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Wait for the create event to schedule a debounce timer.
+	time.Sleep(50 * time.Millisecond)
 
-	time.Sleep(1500 * time.Millisecond)
+	// Advance past the debounce window using the fake clock.
+	clk.Advance(2 * time.Second)
 
 	jobs, err := s.ListJobs(ctx, 0)
 	if err != nil {
@@ -164,7 +175,7 @@ func TestWatcher_NewSubdirectoryIsWatchedRecursively(t *testing.T) {
 // maxPendingAge, even if its size/modtime are still changing. Drive this
 // directly rather than waiting 5 real minutes.
 func TestCheckStability_ForceEnqueuesAfterMaxPendingAge(t *testing.T) {
-	w, s, inbox := newTestWatcher(t)
+	w, s, inbox, _ := newTestWatcher(t)
 	ctx := context.Background()
 
 	path := filepath.Join(inbox, "stuck.txt")
@@ -180,7 +191,7 @@ func TestCheckStability_ForceEnqueuesAfterMaxPendingAge(t *testing.T) {
 	w.pending[path] = &fileState{
 		lastSize:    info.Size() - 1, // pretend the size is still changing
 		lastModTime: info.ModTime(),
-		createdAt:   time.Now().Add(-6 * time.Minute),
+		createdAt:   w.clock.Now().Add(-6 * time.Minute),
 	}
 	w.mu.Unlock()
 
@@ -212,7 +223,7 @@ func TestCheckStability_ForceEnqueuesAfterMaxPendingAge(t *testing.T) {
 // from disk between the debounce timer firing and the stat check, even if
 // the pending entry was not removed via cancelDebounce first.
 func TestCheckStability_FileGoneDuringWait(t *testing.T) {
-	w, s, inbox := newTestWatcher(t)
+	w, s, inbox, _ := newTestWatcher(t)
 	ctx := context.Background()
 
 	path := filepath.Join(inbox, "gone.txt")
@@ -258,25 +269,25 @@ func TestCheckStability_FileGoneDuringWait(t *testing.T) {
 // pending must not panic or leak: the event loop's deferred cleanup stops
 // every pending timer and clears the map.
 func TestWatcher_CloseWhileDebouncePending(t *testing.T) {
-	w, _, inbox := newTestWatcher(t)
+	w, _, inbox, _ := newTestWatcher(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	if err := w.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 
 	path := filepath.Join(inbox, "pending-on-close.txt")
 	if err := os.WriteFile(path, []byte("not yet stable"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	// Let the create event register and start the debounce timer, but
-	// cancel well before the 1s debounce window elapses.
-	time.Sleep(200 * time.Millisecond)
+	// cancel well before the debounce window elapses.
+	time.Sleep(100 * time.Millisecond)
 
 	cancel()
 	// Give the event loop's goroutine time to run its deferred cleanup.
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	w.mu.Lock()
 	pendingCount := len(w.pending)

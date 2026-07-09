@@ -27,7 +27,8 @@ func TestWatcher_DebouncesAndEnqueues(t *testing.T) {
 	}
 	defer s.Close()
 
-	w, err := NewWatcher(s, inbox)
+	clk := newFakeClock()
+	w, err := NewWatcherWithOptions(s, inbox, WatcherOptions{Clock: clk})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,42 +40,41 @@ func TestWatcher_DebouncesAndEnqueues(t *testing.T) {
 	if err := w.Start(ctx); err != nil {
 		t.Fatalf("Start watcher: %v", err)
 	}
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 
-	// 1. Write an ignored file.
 	ignoredPath := filepath.Join(inbox, "test.tmp")
 	if err := os.WriteFile(ignoredPath, []byte("ignored"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	// 2. Write a real file, but write to it continuously to check debounce.
 	realPath := filepath.Join(inbox, "doc.txt")
 	if err := os.WriteFile(realPath, []byte("init"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	// Sleep 300ms, then write again. Size/modtime should change, resetting the debounce timer.
-	time.Sleep(300 * time.Millisecond)
+	// Write multiple times in quick succession to exercise debounce reset.
+	// The event loop calls debounceFile for each write, which stops the
+	// previous timer and schedules a new one.  No Advance between writes
+	// ensures the timer never fires prematurely.
+	time.Sleep(50 * time.Millisecond)
 	if err := os.WriteFile(realPath, []byte("init updated"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	// Sleep another 300ms, then write again.
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 	if err := os.WriteFile(realPath, []byte("final content"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	// Now wait 1.5 seconds for the file to become stable and enqueue.
-	time.Sleep(1500 * time.Millisecond)
+	// Advance past the debounce window — file is stable, one job enqueued.
+	time.Sleep(50 * time.Millisecond)
+	clk.Advance(2 * time.Second)
 
-	// Check if the job was enqueued in the store.
 	jobs, err := s.ListJobs(ctx, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// We should only have 1 job (for doc.txt). test.tmp should have been ignored.
 	if len(jobs) != 1 {
 		t.Fatalf("expected 1 job, got %d. Jobs: %+v", len(jobs), jobs)
 	}

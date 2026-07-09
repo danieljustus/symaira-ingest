@@ -24,6 +24,7 @@ type Watcher struct {
 	watcher       *fsnotify.Watcher
 	pending       map[string]*fileState
 	stableFor     time.Duration
+	clock         Clock
 	processingDir string
 	processedDir  string
 	failedDir     string
@@ -34,7 +35,7 @@ type fileState struct {
 	lastSize    int64
 	lastModTime time.Time
 	createdAt   time.Time
-	timer       *time.Timer
+	timer       timer
 }
 
 type WatcherOptions struct {
@@ -42,6 +43,7 @@ type WatcherOptions struct {
 	ProcessingDir string
 	ProcessedDir  string
 	FailedDir     string
+	Clock         Clock
 }
 
 // NewWatcher creates a new Watcher instance for the given inbox directory.
@@ -53,6 +55,9 @@ func NewWatcherWithOptions(s *store.Store, inboxDir string, opts WatcherOptions)
 	inboxDir = filepath.Clean(inboxDir)
 	if opts.StableFor <= 0 {
 		opts.StableFor = time.Second
+	}
+	if opts.Clock == nil {
+		opts.Clock = realClock{}
 	}
 	fw, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -81,6 +86,7 @@ func NewWatcherWithOptions(s *store.Store, inboxDir string, opts WatcherOptions)
 		watcher:       fw,
 		pending:       make(map[string]*fileState),
 		stableFor:     opts.StableFor,
+		clock:         opts.Clock,
 		processingDir: processingDir,
 		processedDir:  processedDir,
 		failedDir:     failedDir,
@@ -141,9 +147,7 @@ func (w *Watcher) Start(ctx context.Context) error {
 		defer func() {
 			w.mu.Lock()
 			for _, state := range w.pending {
-				if state.timer != nil {
-					state.timer.Stop()
-				}
+				w.clock.StopTimer(state.timer)
 			}
 			w.pending = make(map[string]*fileState)
 			w.mu.Unlock()
@@ -216,38 +220,39 @@ func (w *Watcher) watchDirectoryRecursive(ctx context.Context, dir string) {
 
 func (w *Watcher) debounceFile(ctx context.Context, path string) {
 	w.mu.Lock()
-	defer w.mu.Unlock()
 
 	info, err := os.Stat(path)
 	if err != nil {
 		// File might have been deleted, clean up
 		if state, ok := w.pending[path]; ok {
-			if state.timer != nil {
-				state.timer.Stop()
-			}
+			w.clock.StopTimer(state.timer)
 			delete(w.pending, path)
 		}
+		w.mu.Unlock()
 		return
 	}
 
 	if state, ok := w.pending[path]; ok {
-		if state.timer != nil {
-			state.timer.Stop()
-		}
+		w.clock.StopTimer(state.timer)
 		state.lastSize = info.Size()
 		state.lastModTime = info.ModTime()
 	} else {
 		w.pending[path] = &fileState{
 			lastSize:    info.Size(),
 			lastModTime: info.ModTime(),
-			createdAt:   time.Now(),
+			createdAt:   w.clock.Now(),
 		}
 	}
 
 	state := w.pending[path]
-	state.timer = time.AfterFunc(w.stableFor, func() {
+	state.timer = w.clock.AfterFunc(w.stableFor, func() {
 		w.checkStability(ctx, path)
 	})
+
+	// Release the lock before the timer callback may fire. With the real
+	// clock the callback runs in a goroutine; with a fake clock tests
+	// call Advance externally after debounceFile returns.
+	w.mu.Unlock()
 }
 
 func (w *Watcher) checkStability(ctx context.Context, path string) {
@@ -259,11 +264,9 @@ func (w *Watcher) checkStability(ctx context.Context, path string) {
 	}
 
 	const maxPendingAge = 5 * time.Minute
-	if time.Since(state.createdAt) > maxPendingAge {
+	if w.clock.Now().Sub(state.createdAt) > maxPendingAge {
 		delete(w.pending, path)
-		if state.timer != nil {
-			state.timer.Stop()
-		}
+		w.clock.StopTimer(state.timer)
 		w.mu.Unlock()
 
 		log.Printf("[Watcher] File pending longer than %v, force-enqueuing: %s", maxPendingAge, path)
@@ -302,7 +305,7 @@ func (w *Watcher) checkStability(ctx context.Context, path string) {
 
 	state.lastSize = currentSize
 	state.lastModTime = currentModTime
-	state.timer = time.AfterFunc(w.stableFor, func() {
+	state.timer = w.clock.AfterFunc(w.stableFor, func() {
 		w.checkStability(ctx, path)
 	})
 	w.mu.Unlock()
@@ -313,9 +316,7 @@ func (w *Watcher) cancelDebounce(path string) {
 	defer w.mu.Unlock()
 
 	if state, ok := w.pending[path]; ok {
-		if state.timer != nil {
-			state.timer.Stop()
-		}
+		w.clock.StopTimer(state.timer)
 		delete(w.pending, path)
 	}
 }
