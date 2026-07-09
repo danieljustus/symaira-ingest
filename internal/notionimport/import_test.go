@@ -275,9 +275,9 @@ func TestRun_Idempotency(t *testing.T) {
 
 	// First run.
 	opts := Options{
-		SourceDir:    dir,
-		Vault:        tmpVault,
-		ImportRunID:  runID,
+		SourceDir:   dir,
+		Vault:       tmpVault,
+		ImportRunID: runID,
 	}
 	stats1, err := Run(context.Background(), opts)
 	if err != nil {

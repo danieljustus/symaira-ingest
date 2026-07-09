@@ -146,14 +146,14 @@ func mapStatus(dryRun bool, realStatus string) string {
 // fields plus the CSV columns as top-level properties.
 func buildCSVRowFrontmatter(entry ExportEntry, props map[string]string, runID, sha256 string) map[string]any {
 	frontmatter := map[string]any{
-		"source_path":    entry.SourcePath,
-		"imported_from":  "notion",
-		"import_run_id":  runID,
-		"ingested_at":    time.Now().UTC(),
-		"sha256":         sha256,
-		"mime":           "text/csv",
-		"tags":           []string{"notion", "csv-row", "database"},
-		"category":       entry.Category,
+		"source_path":   entry.SourcePath,
+		"imported_from": "notion",
+		"import_run_id": runID,
+		"ingested_at":   time.Now().UTC(),
+		"sha256":        sha256,
+		"mime":          "text/csv",
+		"tags":          []string{"notion", "csv-row", "database"},
+		"category":      entry.Category,
 	}
 
 	reserved := map[string]bool{
