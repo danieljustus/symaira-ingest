@@ -130,8 +130,12 @@ func (c *realIMAPClient) Close() error {
 	return c.Client.Logout().Wait()
 }
 
+var defaultIMAPTLSConfig = func(host string) *tls.Config {
+	return &tls.Config{ServerName: host}
+}
+
 func defaultDialIMAP(ctx context.Context, addr string, host string) (imapClient, error) {
-	c, err := imapclient.DialTLS(addr, &imapclient.Options{TLSConfig: &tls.Config{ServerName: host}})
+	c, err := imapclient.DialTLS(addr, &imapclient.Options{TLSConfig: defaultIMAPTLSConfig(host)})
 	if err != nil {
 		return nil, err
 	}

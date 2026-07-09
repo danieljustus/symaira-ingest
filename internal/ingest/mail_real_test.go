@@ -500,29 +500,26 @@ func TestRealIMAPClient_EndToEnd(t *testing.T) {
 }
 
 func TestDefaultDialIMAP(t *testing.T) {
-	addr, rootCAs, cleanup := testIMAPServer(t)
+	addr, _, cleanup := testIMAPServer(t)
 	defer cleanup()
 
-	// defaultDialIMAP uses imapclient.DialTLS which uses the system root pool
-	// by default. Since our test CA is not in the system pool, we verify the
-	// connection works via the same TLS path with our CA pool, confirming the
-	// realIMAPClient wrapping logic works when TLS is established.
-	c, err := imapclient.DialTLS(addr, &imapclient.Options{
-		TLSConfig: &tls.Config{
-			RootCAs: rootCAs,
-		},
-	})
-	if err != nil {
-		t.Fatalf("dial: %v", err)
+	origTLSConfig := defaultIMAPTLSConfig
+	defer func() { defaultIMAPTLSConfig = origTLSConfig }()
+	defaultIMAPTLSConfig = func(_ string) *tls.Config {
+		return &tls.Config{InsecureSkipVerify: true}
 	}
 
-	client := &realIMAPClient{c}
-	if err := client.Login("testuser", "testpass"); err != nil {
+	ic, err := defaultDialIMAP(t.Context(), addr, "localhost")
+	if err != nil {
+		t.Fatalf("defaultDialIMAP: %v", err)
+	}
+
+	if err := ic.Login("testuser", "testpass"); err != nil {
 		t.Fatalf("Login: %v", err)
 	}
-	if err := client.Select("INBOX"); err != nil {
+	if err := ic.Select("INBOX"); err != nil {
 		t.Fatalf("Select: %v", err)
 	}
 
-	c.Logout().Wait()
+	ic.Close()
 }
