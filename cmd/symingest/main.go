@@ -1689,9 +1689,7 @@ func runMCP(args []string) error {
 	}
 	defer st.Close()
 
-	engine := ocr.DefaultRunner(cfg.ocrLang)
-	server := mcpserver.New("symingest", version.Version)
-	mcp.Register(server, st, engine, cfg.vault, cfg.archive)
+	server := newMCPServer(st, cfg.ocrLang, cfg.vault, cfg.archive)
 
 	ctx := context.Background()
 	if err := server.ServeStdio(ctx); err != nil {
@@ -1700,6 +1698,14 @@ func runMCP(args []string) error {
 	}
 	return nil
 }
+
+func newMCPServer(st *store.Store, ocrLang, vault, archive string) *mcpserver.Server {
+	engine := ocr.DefaultRunner(ocrLang)
+	server := mcpserver.New("symingest", version.Version)
+	mcp.Register(server, st, engine, vault, archive)
+	return server
+}
+
 
 func runWatch(args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
