@@ -488,13 +488,13 @@ func TestPrintVerifyReport_Empty(t *testing.T) {
 func TestPrintVerifyReport_WithIssues(t *testing.T) {
 	var sb strings.Builder
 	r := &paperlessimport.VerifyReport{
-		SourceDocuments: 10,
-		VaultNotes:      8,
-		Verified:        7,
-		Missing:         []int{1, 2},
-		Duplicate:       []int{3},
-		MissingArchive:  []int{4},
-		HashMismatch:    []int{5},
+		SourceDocuments:    10,
+		VaultNotes:         8,
+		Verified:           7,
+		Missing:            []int{1, 2},
+		Duplicate:          []int{3},
+		MissingArchive:     []int{4},
+		HashMismatch:       []int{5},
 		SourceHashMismatch: []int{6},
 		Mismatches: []paperlessimport.VerifyMismatch{
 			{DocumentID: 7, Field: "tags", Expected: "a", Got: "b"},

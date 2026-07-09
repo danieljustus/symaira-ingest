@@ -33,6 +33,7 @@ type Document struct {
 	Tags          []string
 	Correspondent string
 	DocumentType  string
+	SourceMailID  *string
 }
 
 // ClassificationRule represents a row in the classification_rules table.
@@ -108,9 +109,10 @@ func (s *Store) ByHash(ctx context.Context, sha256 string) (*Document, error) {
 	var tags sql.NullString
 	var correspondent sql.NullString
 	var documentType sql.NullString
+	var sourceMailID sql.NullString
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, source_path, sha256, mime, status, vault_path, archive_path, category, tags, correspondent, document_type FROM documents WHERE sha256 = ?`,
-		sha256).Scan(&d.ID, &d.SourcePath, &d.SHA256, &d.MIME, &d.Status, &vaultPath, &archivePath, &category, &tags, &correspondent, &documentType)
+		`SELECT id, source_path, sha256, mime, status, vault_path, archive_path, category, tags, correspondent, document_type, source_mail_id FROM documents WHERE sha256 = ?`,
+		sha256).Scan(&d.ID, &d.SourcePath, &d.SHA256, &d.MIME, &d.Status, &vaultPath, &archivePath, &category, &tags, &correspondent, &documentType, &sourceMailID)
 	if err != nil {
 		return nil, err
 	}
@@ -232,14 +234,31 @@ func (s *Store) EnqueueJob(ctx context.Context, docID int64, kind string) (*Job,
 		return nil, fmt.Errorf("enqueue job: %w", err)
 	}
 	id, _ := res.LastInsertId()
-	return &Job{
-		ID:         id,
-		DocumentID: docID,
-		Kind:       kind,
-		Status:     "pending",
-		Attempts:   0,
-	}, nil
+	return &Job{ID: id, DocumentID: docID, Kind: kind, Status: "pending"}, nil
 }
+
+// SetProvenance updates the source_mail_id and correspondent for a document.
+func (s *Store) SetProvenance(ctx context.Context, docID int64, mailID, correspondent string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE documents SET source_mail_id = ?, correspondent = ? WHERE id = ?`,
+		mailID, correspondent, docID)
+	return err
+}
+
+// HasMailMessage checks if a message_id has already been processed.
+func (s *Store) HasMailMessage(ctx context.Context, messageID string) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM mail_messages WHERE message_id = ?", messageID).Scan(&count)
+	return count > 0, err
+}
+
+// TrackMailMessage records that a message_id has been processed.
+func (s *Store) TrackMailMessage(ctx context.Context, messageID, sourceMailbox string) error {
+	_, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO mail_messages (message_id, source_mailbox) VALUES (?, ?)", messageID, sourceMailbox)
+	return err
+}
+
+// UpdateJobStatus updates the status of a job.
 
 // EnqueueSkippedJob enqueues a job records with a status of 'skipped'.
 func (s *Store) EnqueueSkippedJob(ctx context.Context, docID int64, kind string, reason string) (*Job, error) {

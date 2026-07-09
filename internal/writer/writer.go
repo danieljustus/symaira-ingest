@@ -14,23 +14,23 @@ import (
 )
 
 type Note struct {
-	SourcePath       string         `yaml:"source_path"`
-	ImportedFrom     string         `yaml:"imported_from,omitempty"`
-	ImportRunID      string         `yaml:"import_run_id,omitempty"`
-	SourceURI        string         `yaml:"source_uri,omitempty"`
-	DownloadURI      string         `yaml:"download_uri,omitempty"`
-	IngestedAt       time.Time      `yaml:"ingested_at"`
-	SHA256           string         `yaml:"sha256"`
-	MIME             string         `yaml:"mime"`
-	Tags             []string       `yaml:"tags"`
-	Category         string         `yaml:"category"`
-	Correspondent    string         `yaml:"correspondent,omitempty"`
-	DocumentType     string         `yaml:"document_type,omitempty"`
-	OCREngine        string         `yaml:"ocr_engine,omitempty"`
-	ArchivePath      string         `yaml:"archive_path"`
-	SidecarPath      string         `yaml:"sidecar_path,omitempty"`
-	ExtractionCount  int            `yaml:"extraction_count,omitempty"`
-	Paperless        *PaperlessMeta `yaml:"paperless,omitempty"`
+	SourcePath      string         `yaml:"source_path"`
+	ImportedFrom    string         `yaml:"imported_from,omitempty"`
+	ImportRunID     string         `yaml:"import_run_id,omitempty"`
+	SourceURI       string         `yaml:"source_uri,omitempty"`
+	DownloadURI     string         `yaml:"download_uri,omitempty"`
+	IngestedAt      time.Time      `yaml:"ingested_at"`
+	SHA256          string         `yaml:"sha256"`
+	MIME            string         `yaml:"mime"`
+	Tags            []string       `yaml:"tags"`
+	Category        string         `yaml:"category"`
+	Correspondent   string         `yaml:"correspondent,omitempty"`
+	DocumentType    string         `yaml:"document_type,omitempty"`
+	OCREngine       string         `yaml:"ocr_engine,omitempty"`
+	ArchivePath     string         `yaml:"archive_path"`
+	SidecarPath     string         `yaml:"sidecar_path,omitempty"`
+	ExtractionCount int            `yaml:"extraction_count,omitempty"`
+	Paperless       *PaperlessMeta `yaml:"paperless,omitempty"`
 }
 
 // PaperlessMeta carries traceability metadata from a migrated Paperless-ngx

@@ -4,10 +4,10 @@ import "fmt"
 
 // builtinProfiles is the registry of built-in extraction profiles.
 var builtinProfiles = map[string]Profile{
-	"generic":    &genericProfile{},
-	"invoice":    &invoiceProfile{},
-	"contract":   &contractProfile{},
-	"jobcenter":  &jobcenterProfile{},
+	"generic":   &genericProfile{},
+	"invoice":   &invoiceProfile{},
+	"contract":  &contractProfile{},
+	"jobcenter": &jobcenterProfile{},
 }
 
 // GetProfile returns the named built-in profile, or an error if unknown.

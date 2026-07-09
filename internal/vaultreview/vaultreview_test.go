@@ -253,10 +253,10 @@ func TestBuildReviewReportFromVerifyDuplicateContent(t *testing.T) {
 
 func TestRemoveTag(t *testing.T) {
 	tests := []struct {
-		name  string
-		tags  []string
-		tag   string
-		want  []string
+		name string
+		tags []string
+		tag  string
+		want []string
 	}{
 		{"empty", nil, "foo", nil},
 		{"no_match", []string{"a", "b"}, "c", []string{"a", "b"}},

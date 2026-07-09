@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -24,15 +25,17 @@ import (
 	"github.com/danieljustus/symaira-corekit/logkit"
 	"github.com/danieljustus/symaira-corekit/mcpserver"
 	"github.com/danieljustus/symaira-corekit/versionkit"
+	"github.com/emersion/go-imap/v2/imapclient"
 
 	"github.com/danieljustus/symaira-ingest/internal/annotate"
 	"github.com/danieljustus/symaira-ingest/internal/config"
 	"github.com/danieljustus/symaira-ingest/internal/extract"
 	"github.com/danieljustus/symaira-ingest/internal/ingest"
 	"github.com/danieljustus/symaira-ingest/internal/mcp"
-	"github.com/danieljustus/symaira-ingest/internal/ocr"
 	"github.com/danieljustus/symaira-ingest/internal/notionimport"
+	"github.com/danieljustus/symaira-ingest/internal/ocr"
 	"github.com/danieljustus/symaira-ingest/internal/paperlessimport"
+	"github.com/danieljustus/symaira-ingest/internal/secret"
 	"github.com/danieljustus/symaira-ingest/internal/store"
 	symseekint "github.com/danieljustus/symaira-ingest/internal/symseek"
 	"github.com/danieljustus/symaira-ingest/internal/vaultreview"
@@ -703,6 +706,7 @@ type resolvedConfig struct {
 	paperlessBaseURL string
 	symseekEnabled   bool
 	symseekBinary    string
+	raw              config.Config
 }
 
 // registerSharedFlags adds the shared CLI flags to fs and returns pointers to
@@ -778,6 +782,7 @@ func resolveConfig(fs *flag.FlagSet, ocrLang, vaultFlag, archiveFlag, dbFlag *st
 		paperlessBaseURL: cfg.PaperlessBaseURL,
 		symseekEnabled:   cfg.SymseekEnabled,
 		symseekBinary:    cfg.SymseekBinary,
+		raw:              *cfg,
 	}, nil
 }
 
@@ -800,6 +805,45 @@ type doctorReport struct {
 	Checks   []doctorCheck `json:"checks"`
 	Failures int           `json:"failures"`
 	Warnings int           `json:"warnings"`
+}
+
+func checkIMAP(ctx context.Context, report *doctorReport, accounts []config.IMAPAccount) {
+	for i, acc := range accounts {
+		name := fmt.Sprintf("imap.account.%d", i)
+
+		pwd, err := secret.Resolve(ctx, acc.PasswordSecret)
+		if err != nil {
+			report.add(name, doctorFail, fmt.Sprintf("cannot resolve password for %s: %v", acc.Username, err))
+			continue
+		}
+
+		addr := fmt.Sprintf("%s:%d", acc.Host, acc.Port)
+		client, err := imapclient.DialTLS(addr, &imapclient.Options{TLSConfig: &tls.Config{ServerName: acc.Host}})
+		if err != nil {
+			report.add(name, doctorFail, fmt.Sprintf("cannot connect to %s: %v", addr, err))
+			continue
+		}
+
+		if err := client.Login(acc.Username, pwd).Wait(); err != nil {
+			client.Logout()
+			report.add(name, doctorFail, fmt.Sprintf("login failed for %s: %v", acc.Username, err))
+			continue
+		}
+
+		folder := acc.Folder
+		if folder == "" {
+			folder = "INBOX"
+		}
+
+		if _, err := client.Select(folder, nil).Wait(); err != nil {
+			client.Logout()
+			report.add(name, doctorFail, fmt.Sprintf("cannot select folder %s: %v", folder, err))
+			continue
+		}
+
+		client.Logout()
+		report.add(name, doctorOK, fmt.Sprintf("connected to %s as %s", addr, acc.Username))
+	}
 }
 
 func (r *doctorReport) add(name string, status doctorStatus, message string) {
@@ -981,6 +1025,9 @@ func runDoctorChecks(ctx context.Context, cfg *resolvedConfig, includePaperless 
 	checkOptionalCommand(report, "tool.optional.pandoc", "pandoc")
 	checkOptionalCommand(report, "tool.optional.libreoffice", "libreoffice")
 	checkOptionalCommand(report, "tool.optional.soffice", "soffice")
+	if len(cfg.raw.IMAPAccounts) > 0 {
+		checkIMAP(ctx, report, cfg.raw.IMAPAccounts)
+	}
 	if includePaperless {
 		checkPaperless(ctx, report, baseURL, token)
 	}
@@ -1702,6 +1749,26 @@ func runWatch(args []string) error {
 	if err := watcher.Start(ctx); err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindInternal,
 			"failed to start watcher")
+	}
+
+	var mailPoller *ingest.MailPoller
+	if len(cfg.raw.IMAPAccounts) > 0 {
+		pollInterval, err := time.ParseDuration(cfg.raw.IMAPPollInterval)
+		if err != nil {
+			pollInterval = 5 * time.Minute
+		}
+		mailPoller, err = ingest.NewMailPoller(st, cfg.raw.IMAPAccounts, ingest.MailPollerOptions{
+			Interval:      pollInterval,
+			ProcessingDir: *processingDir,
+			FailedDir:     *failedDir,
+		})
+		if err != nil {
+			return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindInternal, "failed to initialize mail poller")
+		}
+		if err := mailPoller.Start(ctx); err != nil {
+			return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindInternal, "failed to start mail poller")
+		}
+		defer mailPoller.Close()
 	}
 
 	go ingest.StartWorker(ctx, pipeline)
