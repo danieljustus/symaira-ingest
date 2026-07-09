@@ -1856,6 +1856,52 @@ func TestRunRules_Update_WithAllCombinations(t *testing.T) {
 	}
 }
 
+// assertAddRuleOutcome runs "rules add" for one (pattern, kind, value) case and
+// asserts the outcome that internal/store.AddRule actually guarantees: an error
+// for empty pattern/value or an unknown kind, otherwise a persisted rule whose
+// fields match the input exactly.
+func assertAddRuleOutcome(t *testing.T, tempDB, pattern, kind, value string) {
+	t.Helper()
+
+	wantErr := pattern == "" || value == ""
+	switch kind {
+	case "category", "tag", "correspondent", "document_type":
+	default:
+		wantErr = true
+	}
+
+	err := run([]string{"rules", "-db", tempDB, "add", pattern, kind, value})
+	if wantErr {
+		if err == nil {
+			t.Errorf("rules add with pattern %q, kind %q, value %q: expected an error, got none", pattern, kind, value)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("rules add with pattern %q, kind %q, value %q: %v", pattern, kind, value, err)
+	}
+
+	st, err := store.Open(tempDB)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer st.Close()
+	rules, err := st.ListRules(context.Background())
+	if err != nil {
+		t.Fatalf("list rules: %v", err)
+	}
+	found := false
+	for _, r := range rules {
+		if r.Pattern == pattern && r.Kind == kind && r.Value == value {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("rules add with pattern %q, kind %q, value %q: no matching rule persisted", pattern, kind, value)
+	}
+}
+
 func TestRunRules_Add_WithEdgeCases(t *testing.T) {
 	tempDB := filepath.Join(t.TempDir(), "test.db")
 
@@ -1874,10 +1920,7 @@ func TestRunRules_Add_WithEdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		withCapturedStdout(t)
-		err := run([]string{"rules", "-db", tempDB, "add", tt.pattern, tt.kind, tt.value})
-		if err != nil {
-			t.Logf("rules add with pattern %q, kind %q, value %q: %v", tt.pattern, tt.kind, tt.value, err)
-		}
+		assertAddRuleOutcome(t, tempDB, tt.pattern, tt.kind, tt.value)
 	}
 }
 
@@ -1942,10 +1985,7 @@ func TestRunRules_Add_WithSpecialCharacters(t *testing.T) {
 
 	for _, tt := range tests {
 		withCapturedStdout(t)
-		err := run([]string{"rules", "-db", tempDB, "add", tt.pattern, tt.kind, tt.value})
-		if err != nil {
-			t.Logf("rules add with special chars: %v", err)
-		}
+		assertAddRuleOutcome(t, tempDB, tt.pattern, tt.kind, tt.value)
 	}
 }
 
@@ -2009,10 +2049,7 @@ func TestRunRules_Add_WithUnicode(t *testing.T) {
 
 	for _, tt := range tests {
 		withCapturedStdout(t)
-		err := run([]string{"rules", "-db", tempDB, "add", tt.pattern, tt.kind, tt.value})
-		if err != nil {
-			t.Logf("rules add with unicode: %v", err)
-		}
+		assertAddRuleOutcome(t, tempDB, tt.pattern, tt.kind, tt.value)
 	}
 }
 
@@ -2065,10 +2102,7 @@ func TestRunRules_Add_WithLongValues(t *testing.T) {
 
 	longValue := strings.Repeat("A", 1000)
 	withCapturedStdout(t)
-	err := run([]string{"rules", "-db", tempDB, "add", "*.pdf", "category", longValue})
-	if err != nil {
-		t.Logf("rules add with long value: %v", err)
-	}
+	assertAddRuleOutcome(t, tempDB, "*.pdf", "category", longValue)
 }
 
 func TestRunRules_Update_WithLongValues(t *testing.T) {
@@ -2119,10 +2153,7 @@ func TestRunRules_Add_WithWhitespace(t *testing.T) {
 
 	for _, tt := range tests {
 		withCapturedStdout(t)
-		err := run([]string{"rules", "-db", tempDB, "add", tt.pattern, tt.kind, tt.value})
-		if err != nil {
-			t.Logf("rules add with whitespace: %v", err)
-		}
+		assertAddRuleOutcome(t, tempDB, tt.pattern, tt.kind, tt.value)
 	}
 }
 
@@ -2185,10 +2216,7 @@ func TestRunRules_Add_WithNumbers(t *testing.T) {
 
 	for _, tt := range tests {
 		withCapturedStdout(t)
-		err := run([]string{"rules", "-db", tempDB, "add", tt.pattern, tt.kind, tt.value})
-		if err != nil {
-			t.Logf("rules add with numbers: %v", err)
-		}
+		assertAddRuleOutcome(t, tempDB, tt.pattern, tt.kind, tt.value)
 	}
 }
 
@@ -2251,10 +2279,7 @@ func TestRunRules_Add_WithMixedContent(t *testing.T) {
 
 	for _, tt := range tests {
 		withCapturedStdout(t)
-		err := run([]string{"rules", "-db", tempDB, "add", tt.pattern, tt.kind, tt.value})
-		if err != nil {
-			t.Logf("rules add with mixed content: %v", err)
-		}
+		assertAddRuleOutcome(t, tempDB, tt.pattern, tt.kind, tt.value)
 	}
 }
 
@@ -2317,10 +2342,7 @@ func TestRunRules_Add_WithPaths(t *testing.T) {
 
 	for _, tt := range tests {
 		withCapturedStdout(t)
-		err := run([]string{"rules", "-db", tempDB, "add", tt.pattern, tt.kind, tt.value})
-		if err != nil {
-			t.Logf("rules add with paths: %v", err)
-		}
+		assertAddRuleOutcome(t, tempDB, tt.pattern, tt.kind, tt.value)
 	}
 }
 
@@ -2383,10 +2405,7 @@ func TestRunRules_Add_WithSpecialChars(t *testing.T) {
 
 	for _, tt := range tests {
 		withCapturedStdout(t)
-		err := run([]string{"rules", "-db", tempDB, "add", tt.pattern, tt.kind, tt.value})
-		if err != nil {
-			t.Logf("rules add with special chars: %v", err)
-		}
+		assertAddRuleOutcome(t, tempDB, tt.pattern, tt.kind, tt.value)
 	}
 }
 
@@ -2449,10 +2468,7 @@ func TestRunRules_Add_WithBrackets(t *testing.T) {
 
 	for _, tt := range tests {
 		withCapturedStdout(t)
-		err := run([]string{"rules", "-db", tempDB, "add", tt.pattern, tt.kind, tt.value})
-		if err != nil {
-			t.Logf("rules add with brackets: %v", err)
-		}
+		assertAddRuleOutcome(t, tempDB, tt.pattern, tt.kind, tt.value)
 	}
 }
 
@@ -2515,10 +2531,7 @@ func TestRunRules_Add_WithPunctuation(t *testing.T) {
 
 	for _, tt := range tests {
 		withCapturedStdout(t)
-		err := run([]string{"rules", "-db", tempDB, "add", tt.pattern, tt.kind, tt.value})
-		if err != nil {
-			t.Logf("rules add with punctuation: %v", err)
-		}
+		assertAddRuleOutcome(t, tempDB, tt.pattern, tt.kind, tt.value)
 	}
 }
 
@@ -2582,10 +2595,7 @@ func TestRunRules_Add_WithMath(t *testing.T) {
 
 	for _, tt := range tests {
 		withCapturedStdout(t)
-		err := run([]string{"rules", "-db", tempDB, "add", tt.pattern, tt.kind, tt.value})
-		if err != nil {
-			t.Logf("rules add with math: %v", err)
-		}
+		assertAddRuleOutcome(t, tempDB, tt.pattern, tt.kind, tt.value)
 	}
 }
 
@@ -2649,10 +2659,7 @@ func TestRunRules_Add_WithComparison(t *testing.T) {
 
 	for _, tt := range tests {
 		withCapturedStdout(t)
-		err := run([]string{"rules", "-db", tempDB, "add", tt.pattern, tt.kind, tt.value})
-		if err != nil {
-			t.Logf("rules add with comparison: %v", err)
-		}
+		assertAddRuleOutcome(t, tempDB, tt.pattern, tt.kind, tt.value)
 	}
 }
 
@@ -2715,10 +2722,7 @@ func TestRunRules_Add_WithEquality(t *testing.T) {
 
 	for _, tt := range tests {
 		withCapturedStdout(t)
-		err := run([]string{"rules", "-db", tempDB, "add", tt.pattern, tt.kind, tt.value})
-		if err != nil {
-			t.Logf("rules add with equality: %v", err)
-		}
+		assertAddRuleOutcome(t, tempDB, tt.pattern, tt.kind, tt.value)
 	}
 }
 
@@ -2781,10 +2785,7 @@ func TestRunRules_Add_WithLogical(t *testing.T) {
 
 	for _, tt := range tests {
 		withCapturedStdout(t)
-		err := run([]string{"rules", "-db", tempDB, "add", tt.pattern, tt.kind, tt.value})
-		if err != nil {
-			t.Logf("rules add with logical: %v", err)
-		}
+		assertAddRuleOutcome(t, tempDB, tt.pattern, tt.kind, tt.value)
 	}
 }
 
@@ -2848,10 +2849,7 @@ func TestRunRules_Add_WithBitwise(t *testing.T) {
 
 	for _, tt := range tests {
 		withCapturedStdout(t)
-		err := run([]string{"rules", "-db", tempDB, "add", tt.pattern, tt.kind, tt.value})
-		if err != nil {
-			t.Logf("rules add with bitwise: %v", err)
-		}
+		assertAddRuleOutcome(t, tempDB, tt.pattern, tt.kind, tt.value)
 	}
 }
 
