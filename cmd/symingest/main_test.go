@@ -788,3 +788,233 @@ func setEnv(t *testing.T, vars map[string]string) func() {
 		}
 	}
 }
+
+type doctorFakeIMAPClient struct {
+	loginErr    error
+	selectErr   error
+	loggedIn    bool
+	selectedDir string
+	loggedOut   bool
+}
+
+func (f *doctorFakeIMAPClient) Login(username, password string) error {
+	f.loggedIn = true
+	return f.loginErr
+}
+
+func (f *doctorFakeIMAPClient) Select(folder string) error {
+	f.selectedDir = folder
+	return f.selectErr
+}
+
+func (f *doctorFakeIMAPClient) Logout() error {
+	f.loggedOut = true
+	return nil
+}
+
+func TestCheckIMAP_SecretResolutionFailure(t *testing.T) {
+	origDial := doctorDialIMAP
+	defer func() { doctorDialIMAP = origDial }()
+
+	var dialCalled bool
+	doctorDialIMAP = func(addr, host string) (doctorIMAPClient, error) {
+		dialCalled = true
+		return nil, errors.New("should not reach dial")
+	}
+
+	report := &doctorReport{Status: doctorOK}
+	accounts := []config.IMAPAccount{{
+		Username:       "user@example.com",
+		PasswordSecret: "env://CHECKIMAP_NONEXISTENT_VAR_12345",
+		Host:           "imap.example.com",
+		Port:           993,
+	}}
+	checkIMAP(context.Background(), report, accounts)
+
+	if dialCalled {
+		t.Fatal("dial should not be called when secret resolution fails")
+	}
+	if report.Failures != 1 {
+		t.Fatalf("expected 1 failure, got %d", report.Failures)
+	}
+	if report.Checks[0].Status != doctorFail {
+		t.Fatalf("expected fail status, got %s", report.Checks[0].Status)
+	}
+	if !strings.Contains(report.Checks[0].Message, "cannot resolve password") {
+		t.Fatalf("unexpected message: %s", report.Checks[0].Message)
+	}
+}
+
+func TestCheckIMAP_DialFailure(t *testing.T) {
+	origDial := doctorDialIMAP
+	defer func() { doctorDialIMAP = origDial }()
+
+	doctorDialIMAP = func(addr, host string) (doctorIMAPClient, error) {
+		return nil, errors.New("connection refused")
+	}
+
+	report := &doctorReport{Status: doctorOK}
+	accounts := []config.IMAPAccount{{
+		Username:       "user@example.com",
+		PasswordSecret: "plaintext-pw",
+		Host:           "imap.example.com",
+		Port:           993,
+	}}
+	checkIMAP(context.Background(), report, accounts)
+
+	if report.Failures != 1 {
+		t.Fatalf("expected 1 failure, got %d", report.Failures)
+	}
+	if !strings.Contains(report.Checks[0].Message, "cannot connect") {
+		t.Fatalf("unexpected message: %s", report.Checks[0].Message)
+	}
+}
+
+func TestCheckIMAP_LoginFailure(t *testing.T) {
+	origDial := doctorDialIMAP
+	defer func() { doctorDialIMAP = origDial }()
+
+	fake := &doctorFakeIMAPClient{loginErr: errors.New("invalid credentials")}
+	doctorDialIMAP = func(addr, host string) (doctorIMAPClient, error) {
+		return fake, nil
+	}
+
+	report := &doctorReport{Status: doctorOK}
+	accounts := []config.IMAPAccount{{
+		Username:       "user@example.com",
+		PasswordSecret: "plaintext-pw",
+		Host:           "imap.example.com",
+		Port:           993,
+	}}
+	checkIMAP(context.Background(), report, accounts)
+
+	if report.Failures != 1 {
+		t.Fatalf("expected 1 failure, got %d", report.Failures)
+	}
+	if !fake.loggedOut {
+		t.Fatal("expected client to be logged out after login failure")
+	}
+	if !strings.Contains(report.Checks[0].Message, "login failed") {
+		t.Fatalf("unexpected message: %s", report.Checks[0].Message)
+	}
+}
+
+func TestCheckIMAP_FolderSelectionFailure(t *testing.T) {
+	origDial := doctorDialIMAP
+	defer func() { doctorDialIMAP = origDial }()
+
+	fake := &doctorFakeIMAPClient{selectErr: errors.New("folder not found")}
+	doctorDialIMAP = func(addr, host string) (doctorIMAPClient, error) {
+		return fake, nil
+	}
+
+	report := &doctorReport{Status: doctorOK}
+	accounts := []config.IMAPAccount{{
+		Username:       "user@example.com",
+		PasswordSecret: "plaintext-pw",
+		Host:           "imap.example.com",
+		Port:           993,
+		Folder:         "BadFolder",
+	}}
+	checkIMAP(context.Background(), report, accounts)
+
+	if report.Failures != 1 {
+		t.Fatalf("expected 1 failure, got %d", report.Failures)
+	}
+	if !fake.loggedOut {
+		t.Fatal("expected client to be logged out after select failure")
+	}
+	if !strings.Contains(report.Checks[0].Message, "cannot select folder") {
+		t.Fatalf("unexpected message: %s", report.Checks[0].Message)
+	}
+}
+
+func TestCheckIMAP_Success(t *testing.T) {
+	origDial := doctorDialIMAP
+	defer func() { doctorDialIMAP = origDial }()
+
+	fake := &doctorFakeIMAPClient{}
+	doctorDialIMAP = func(addr, host string) (doctorIMAPClient, error) {
+		return fake, nil
+	}
+
+	report := &doctorReport{Status: doctorOK}
+	accounts := []config.IMAPAccount{{
+		Username:       "user@example.com",
+		PasswordSecret: "plaintext-pw",
+		Host:           "imap.example.com",
+		Port:           993,
+	}}
+	checkIMAP(context.Background(), report, accounts)
+
+	if report.Failures != 0 {
+		t.Fatalf("expected 0 failures, got %d", report.Failures)
+	}
+	if report.Checks[0].Status != doctorOK {
+		t.Fatalf("expected ok status, got %s", report.Checks[0].Status)
+	}
+	if !fake.loggedOut {
+		t.Fatal("expected client to be logged out")
+	}
+	if fake.selectedDir != "INBOX" {
+		t.Fatalf("expected default folder INBOX, got %s", fake.selectedDir)
+	}
+}
+
+func TestCheckIMAP_EmptyFolderDefaultsToINBOX(t *testing.T) {
+	origDial := doctorDialIMAP
+	defer func() { doctorDialIMAP = origDial }()
+
+	fake := &doctorFakeIMAPClient{}
+	doctorDialIMAP = func(addr, host string) (doctorIMAPClient, error) {
+		return fake, nil
+	}
+
+	report := &doctorReport{Status: doctorOK}
+	accounts := []config.IMAPAccount{{
+		Username:       "user@example.com",
+		PasswordSecret: "secret",
+		Host:           "imap.example.com",
+		Port:           993,
+		Folder:         "",
+	}}
+	checkIMAP(context.Background(), report, accounts)
+
+	if fake.selectedDir != "INBOX" {
+		t.Fatalf("expected INBOX default, got %s", fake.selectedDir)
+	}
+}
+
+func TestCheckIMAP_MultipleAccounts(t *testing.T) {
+	origDial := doctorDialIMAP
+	defer func() { doctorDialIMAP = origDial }()
+
+	callCount := 0
+	doctorDialIMAP = func(addr, host string) (doctorIMAPClient, error) {
+		callCount++
+		if callCount == 1 {
+			return nil, errors.New("first fails")
+		}
+		return &doctorFakeIMAPClient{}, nil
+	}
+
+	report := &doctorReport{Status: doctorOK}
+	accounts := []config.IMAPAccount{
+		{Username: "a@test.com", PasswordSecret: "pw1", Host: "h1", Port: 993},
+		{Username: "b@test.com", PasswordSecret: "pw2", Host: "h2", Port: 993},
+	}
+	checkIMAP(context.Background(), report, accounts)
+
+	if report.Failures != 1 {
+		t.Fatalf("expected 1 failure, got %d", report.Failures)
+	}
+	if len(report.Checks) != 2 {
+		t.Fatalf("expected 2 checks, got %d", len(report.Checks))
+	}
+	if report.Checks[0].Status != doctorFail {
+		t.Fatalf("first check should fail, got %s", report.Checks[0].Status)
+	}
+	if report.Checks[1].Status != doctorOK {
+		t.Fatalf("second check should pass, got %s", report.Checks[1].Status)
+	}
+}

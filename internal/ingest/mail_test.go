@@ -5,14 +5,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/danieljustus/symaira-ingest/internal/config"
 	"github.com/danieljustus/symaira-ingest/internal/store"
 	"github.com/emersion/go-imap/v2"
+	"github.com/emersion/go-message/mail"
 )
 
 type fakeIMAPClient struct {
@@ -511,5 +515,726 @@ func TestMailPoller_StartStop(t *testing.T) {
 
 	if err := poller.Close(); err != nil {
 		t.Fatalf("Close failed: %v", err)
+	}
+}
+
+func TestMailPoller_SecretResolutionFailure(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	acc := config.IMAPAccount{
+		Username:       "test@example.com",
+		PasswordSecret: "env://NONEXISTENT_VAR_12345",
+		Host:           "imap.example.com",
+		Port:           993,
+	}
+
+	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{})
+
+	dialCalled := false
+	poller.dialIMAP = func(ctx context.Context, addr, host string) (imapClient, error) {
+		dialCalled = true
+		return nil, errors.New("should not reach dial")
+	}
+
+	err = poller.pollAccount(context.Background(), acc)
+	if err == nil {
+		t.Fatal("expected error from secret resolution failure")
+	}
+	if dialCalled {
+		t.Fatal("dial should not be called when secret resolution fails")
+	}
+}
+
+func TestMailPoller_SelectFailure(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := store.Open(filepath.Join(dir, "test.db"))
+	defer s.Close()
+
+	acc := config.IMAPAccount{
+		Username:       "test@example.com",
+		PasswordSecret: "myplaintextpw",
+		Host:           "imap.example.com",
+		Port:           993,
+		Folder:         "BadFolder",
+	}
+
+	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{})
+
+	fakeClient := &fakeIMAPClient{
+		selectErr: errors.New("folder not found"),
+	}
+	poller.dialIMAP = func(ctx context.Context, addr, host string) (imapClient, error) {
+		return fakeClient, nil
+	}
+
+	err := poller.pollAccount(context.Background(), acc)
+	if err == nil {
+		t.Fatal("expected error from select failure")
+	}
+	if !fakeClient.closed {
+		t.Fatal("expected client to be closed after select failure")
+	}
+}
+
+func TestMailPoller_SearchFailure(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := store.Open(filepath.Join(dir, "test.db"))
+	defer s.Close()
+
+	acc := config.IMAPAccount{
+		Username:       "test@example.com",
+		PasswordSecret: "myplaintextpw",
+		Host:           "imap.example.com",
+		Port:           993,
+	}
+
+	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{})
+
+	fakeClient := &fakeIMAPClient{
+		searchErr: errors.New("search protocol error"),
+	}
+	poller.dialIMAP = func(ctx context.Context, addr, host string) (imapClient, error) {
+		return fakeClient, nil
+	}
+
+	err := poller.pollAccount(context.Background(), acc)
+	if err == nil {
+		t.Fatal("expected error from search failure")
+	}
+	if !strings.Contains(err.Error(), "search") {
+		t.Fatalf("expected search-related error, got: %v", err)
+	}
+}
+
+func TestMailPoller_FetchFailure(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := store.Open(filepath.Join(dir, "test.db"))
+	defer s.Close()
+
+	acc := config.IMAPAccount{
+		Username:       "test@example.com",
+		PasswordSecret: "myplaintextpw",
+		Host:           "imap.example.com",
+		Port:           993,
+	}
+
+	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{})
+
+	fakeClient := &fakeIMAPClient{
+		searchRes: []uint32{1},
+		fetchErr:  errors.New("fetch failed"),
+	}
+	poller.dialIMAP = func(ctx context.Context, addr, host string) (imapClient, error) {
+		return fakeClient, nil
+	}
+
+	err := poller.pollAccount(context.Background(), acc)
+	if err == nil {
+		t.Fatal("expected error from fetch failure")
+	}
+	if !strings.Contains(err.Error(), "fetch") {
+		t.Fatalf("expected fetch-related error, got: %v", err)
+	}
+}
+
+func TestMailPoller_ProcessMessage_NilEnvelope(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := store.Open(filepath.Join(dir, "test.db"))
+	defer s.Close()
+
+	poller, _ := NewMailPoller(s, nil, MailPollerOptions{})
+
+	msg := &imapMessage{
+		SeqNum:   1,
+		Envelope: nil,
+		Body:     []byte("body"),
+	}
+
+	err := poller.processMessage(context.Background(), config.IMAPAccount{}, nil, msg)
+	if err != nil {
+		t.Fatalf("expected nil error for nil envelope, got: %v", err)
+	}
+}
+
+func TestMailPoller_ProcessMessage_EmptyBody(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := store.Open(filepath.Join(dir, "test.db"))
+	defer s.Close()
+
+	poller, _ := NewMailPoller(s, nil, MailPollerOptions{})
+
+	msg := &imapMessage{
+		SeqNum: 1,
+		Envelope: &imapEnvelope{
+			MessageID: "test@example.com",
+		},
+		Body: []byte{},
+	}
+
+	fakeClient := &fakeIMAPClient{}
+	err := poller.processMessage(context.Background(), config.IMAPAccount{}, fakeClient, msg)
+	if err == nil {
+		t.Fatal("expected error for empty body")
+	}
+	if !strings.Contains(err.Error(), "no body section") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestMailPoller_ProcessMessage_InvalidMailBody(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := store.Open(filepath.Join(dir, "test.db"))
+	defer s.Close()
+
+	poller, _ := NewMailPoller(s, nil, MailPollerOptions{})
+
+	msg := &imapMessage{
+		SeqNum: 1,
+		Envelope: &imapEnvelope{
+			MessageID: "test@example.com",
+		},
+		Body: []byte("not a valid email at all {{{"),
+	}
+
+	fakeClient := &fakeIMAPClient{}
+	err := poller.processMessage(context.Background(), config.IMAPAccount{}, fakeClient, msg)
+	if err == nil {
+		t.Fatal("expected error for invalid mail body")
+	}
+	if !strings.Contains(err.Error(), "create mail reader") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestMailPoller_ProcessMessage_StoreSeenError(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := store.Open(filepath.Join(dir, "test.db"))
+	defer s.Close()
+
+	poller, _ := NewMailPoller(s, nil, MailPollerOptions{
+		ProcessingDir: dir,
+	})
+
+	msg := &imapMessage{
+		SeqNum: 5,
+		Envelope: &imapEnvelope{
+			MessageID: "seen-error@example.com",
+		},
+		Body: createFakeEmail("seen-error@example.com", "sender@example.com", "doc.txt", "data"),
+	}
+
+	fakeClient := &fakeIMAPClient{
+		storeSeenErr: errors.New("store failed"),
+	}
+	acc := config.IMAPAccount{
+		Action: "mark_seen",
+	}
+
+	err := poller.processMessage(context.Background(), acc, fakeClient, msg)
+	if err == nil {
+		t.Fatal("expected error from StoreSeen failure")
+	}
+	if !strings.Contains(err.Error(), "mark seen") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestMailPoller_ProcessMessage_MoveError(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := store.Open(filepath.Join(dir, "test.db"))
+	defer s.Close()
+
+	poller, _ := NewMailPoller(s, nil, MailPollerOptions{
+		ProcessingDir: dir,
+	})
+
+	msg := &imapMessage{
+		SeqNum: 5,
+		Envelope: &imapEnvelope{
+			MessageID: "move-error@example.com",
+		},
+		Body: createFakeEmail("move-error@example.com", "sender@example.com", "doc.txt", "data"),
+	}
+
+	fakeClient := &fakeIMAPClient{
+		moveErr: errors.New("move failed"),
+	}
+	acc := config.IMAPAccount{
+		Action: "move",
+		MoveTo: "Archive",
+	}
+
+	err := poller.processMessage(context.Background(), acc, fakeClient, msg)
+	if err == nil {
+		t.Fatal("expected error from Move failure")
+	}
+	if !strings.Contains(err.Error(), "move to") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestMailPoller_ProcessMessage_EmptyMessageID(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := store.Open(filepath.Join(dir, "test.db"))
+	defer s.Close()
+
+	poller, _ := NewMailPoller(s, nil, MailPollerOptions{
+		ProcessingDir: dir,
+	})
+
+	msg := &imapMessage{
+		SeqNum: 7,
+		Envelope: &imapEnvelope{
+			MessageID: "",
+		},
+		Body: createFakeEmail("", "sender@example.com", "doc.txt", "data"),
+	}
+
+	fakeClient := &fakeIMAPClient{}
+	acc := config.IMAPAccount{Action: "mark_seen"}
+
+	err := poller.processMessage(context.Background(), acc, fakeClient, msg)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if len(fakeClient.storedSeenSeqs) != 1 {
+		t.Fatalf("expected StoreSeen to be called, got %v", fakeClient.storedSeenSeqs)
+	}
+}
+
+func TestMailPoller_ProcessMessage_AlreadyProcessed(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	poller, _ := NewMailPoller(s, nil, MailPollerOptions{
+		ProcessingDir: dir,
+	})
+
+	ctx := context.Background()
+	msgID := "dup-process@example.com"
+	if err := s.TrackMailMessage(ctx, msgID, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := &imapMessage{
+		SeqNum: 1,
+		Envelope: &imapEnvelope{
+			MessageID: msgID,
+		},
+		Body: createFakeEmail(msgID, "sender@example.com", "doc.txt", "data"),
+	}
+
+	fakeClient := &fakeIMAPClient{}
+	acc := config.IMAPAccount{Action: "mark_seen"}
+
+	err = poller.processMessage(ctx, acc, fakeClient, msg)
+	if err != nil {
+		t.Fatalf("expected no error for already-processed message, got: %v", err)
+	}
+	if len(fakeClient.storedSeenSeqs) != 0 {
+		t.Fatalf("expected StoreSeen not to be called for already-processed message, got %v", fakeClient.storedSeenSeqs)
+	}
+}
+
+// errReader returns data up to errAfter bytes, then err. After the first error,
+// subsequent reads return io.EOF so the mail part loop terminates.
+type errReader struct {
+	data     []byte
+	pos      int
+	errAfter int
+	err      error
+	errored  bool
+}
+
+func (r *errReader) Read(p []byte) (int, error) {
+	if r.errored {
+		return 0, io.EOF
+	}
+	if r.pos >= r.errAfter {
+		r.errored = true
+		return 0, r.err
+	}
+	remaining := r.errAfter - r.pos
+	toRead := len(p)
+	if toRead > remaining {
+		toRead = remaining
+	}
+	if r.pos+toRead > len(r.data) {
+		toRead = len(r.data) - r.pos
+	}
+	if toRead == 0 {
+		r.errored = true
+		return 0, r.err
+	}
+	n := copy(p, r.data[r.pos:r.pos+toRead])
+	r.pos += n
+	if r.pos >= r.errAfter {
+		r.errored = true
+		return n, r.err
+	}
+	return n, nil
+}
+
+func TestNewMailPoller_InvalidProcessingDir(t *testing.T) {
+	dbDir := t.TempDir()
+	s, err := store.Open(filepath.Join(dbDir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	origGetwd := getwdFn
+	getwdFn = func() (string, error) {
+		return "", errors.New("getcwd: no such file or directory")
+	}
+	defer func() { getwdFn = origGetwd }()
+
+	_, err = NewMailPoller(s, nil, MailPollerOptions{
+		ProcessingDir: "relative/path",
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid processing dir")
+	}
+	if !strings.Contains(err.Error(), "resolve processing dir") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNewMailPoller_InvalidFailedDir(t *testing.T) {
+	dbDir := t.TempDir()
+	s, err := store.Open(filepath.Join(dbDir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	origGetwd := getwdFn
+	getwdFn = func() (string, error) {
+		return "", errors.New("getcwd: no such file or directory")
+	}
+	defer func() { getwdFn = origGetwd }()
+
+	_, err = NewMailPoller(s, nil, MailPollerOptions{
+		FailedDir: "relative/path",
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid failed dir")
+	}
+	if !strings.Contains(err.Error(), "resolve failed dir") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestMailPoller_PollLoopErrorLogging(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	acc := config.IMAPAccount{
+		Username:       "test@example.com",
+		PasswordSecret: "myplaintextpw",
+		Host:           "imap.example.com",
+		Port:           993,
+	}
+
+	poller, err := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{
+		Interval: 1 * time.Nanosecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	poller.dialIMAP = func(ctx context.Context, addr, host string) (imapClient, error) {
+		return nil, errors.New("connection refused")
+	}
+
+	var logBuf bytes.Buffer
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(os.Stderr)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := poller.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	// Let the loop run for a short time to trigger both initial + ticker poll errors.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	poller.Close()
+
+	output := logBuf.String()
+	if !strings.Contains(output, "initial poll error") {
+		t.Errorf("expected log to contain 'initial poll error', got: %s", output)
+	}
+	if !strings.Contains(output, "poll error") {
+		t.Errorf("expected log to contain 'poll error', got: %s", output)
+	}
+}
+
+func TestMailPoller_ProcessMessage_HasMailMessageError(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Close the store so HasMailMessage fails.
+	s.Close()
+
+	poller, err := NewMailPoller(s, nil, MailPollerOptions{ProcessingDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	msg := &imapMessage{
+		SeqNum: 1,
+		Envelope: &imapEnvelope{
+			MessageID: "has-mail-err@example.com",
+		},
+		Body: createFakeEmail("has-mail-err@example.com", "sender@example.com", "doc.txt", "data"),
+	}
+
+	err = poller.processMessage(context.Background(), config.IMAPAccount{}, &fakeIMAPClient{}, msg)
+	if err == nil {
+		t.Fatal("expected error from HasMailMessage failure")
+	}
+	if !strings.Contains(err.Error(), "check idempotency") {
+		t.Fatalf("expected 'check idempotency' in error, got: %v", err)
+	}
+}
+
+func TestMailPoller_ProcessMessage_NextPartError(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	poller, err := NewMailPoller(s, nil, MailPollerOptions{ProcessingDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	emailData := []byte("MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=boundary\r\n\r\n--boundary\r\nContent-Type: text/plain\r\n\r\nHello\r\n--boundary\r\nContent-Type: text/plain\r\n\r\nWorld\r\n--boundary--\r\n")
+
+	poller.newMailReader = func(r io.Reader) (*mail.Reader, error) {
+		er := &errReader{data: emailData, errAfter: 80, err: io.ErrUnexpectedEOF}
+		return mail.CreateReader(er)
+	}
+
+	msg := &imapMessage{
+		SeqNum: 1,
+		Envelope: &imapEnvelope{
+			MessageID: "nextpart-err@example.com",
+		},
+		Body: emailData,
+	}
+
+	var logBuf bytes.Buffer
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(os.Stderr)
+
+	// The go-message multipart reader caches non-EOF errors permanently, so
+	// processMessage's `continue` on NextPart error creates an infinite loop.
+	// Run in a goroutine with a short deadline to cover lines 326-328.
+	done := make(chan error, 1)
+	go func() {
+		done <- poller.processMessage(context.Background(), config.IMAPAccount{}, &fakeIMAPClient{}, msg)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+	}
+
+	output := logBuf.String()
+	if !strings.Contains(output, "Error reading part") {
+		t.Errorf("expected log to contain 'Error reading part', got: %s", output)
+	}
+}
+
+func TestMailPoller_ProcessMessage_EmptyAttachmentFilename(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	processingDir := filepath.Join(dir, "processing")
+	if err := os.MkdirAll(processingDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	poller, err := NewMailPoller(s, nil, MailPollerOptions{ProcessingDir: processingDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create an email with an attachment that has NO filename in Content-Disposition.
+	var emailBuf bytes.Buffer
+	emailBuf.WriteString("MIME-Version: 1.0\r\n")
+	emailBuf.WriteString("Message-ID: <empty-fn@example.com>\r\n")
+	emailBuf.WriteString("From: sender@example.com\r\n")
+	emailBuf.WriteString("Content-Type: multipart/mixed; boundary=boundary\r\n\r\n")
+	emailBuf.WriteString("--boundary\r\n")
+	emailBuf.WriteString("Content-Type: text/plain; charset=utf-8\r\n\r\n")
+	emailBuf.WriteString("Body text.\r\n")
+	emailBuf.WriteString("--boundary\r\n")
+	emailBuf.WriteString("Content-Type: application/octet-stream\r\n")
+	emailBuf.WriteString("Content-Disposition: attachment\r\n\r\n") // No filename!
+	emailBuf.WriteString("attachment data here\r\n")
+	emailBuf.WriteString("--boundary--\r\n")
+
+	msg := &imapMessage{
+		SeqNum: 1,
+		Envelope: &imapEnvelope{
+			MessageID: "empty-fn@example.com",
+		},
+		Body: emailBuf.Bytes(),
+	}
+
+	fakeClient := &fakeIMAPClient{}
+	acc := config.IMAPAccount{Action: "mark_seen"}
+
+	err = poller.processMessage(context.Background(), acc, fakeClient, msg)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	// The file should be saved with the default name "attachment.bin".
+	expectedFile := filepath.Join(processingDir, "empty-fn@example.com-attachment.bin")
+	if _, err := os.Stat(expectedFile); os.IsNotExist(err) {
+		t.Errorf("expected file %s to exist (empty filename defaults to attachment.bin)", expectedFile)
+	}
+}
+
+func TestMailPoller_ProcessMessage_EnqueueFileError(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	processingDir := filepath.Join(dir, "processing")
+	if err := os.MkdirAll(processingDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	poller, err := NewMailPoller(s, nil, MailPollerOptions{ProcessingDir: processingDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create an email with an attachment with an unsupported extension (.xyzunknown).
+	// extract.Detect will fail with "unsupported file type", causing enqueueFile to error.
+	var emailBuf bytes.Buffer
+	emailBuf.WriteString("MIME-Version: 1.0\r\n")
+	emailBuf.WriteString("Message-ID: <enqueue-err@example.com>\r\n")
+	emailBuf.WriteString("From: sender@example.com\r\n")
+	emailBuf.WriteString("Content-Type: multipart/mixed; boundary=boundary\r\n\r\n")
+	emailBuf.WriteString("--boundary\r\n")
+	emailBuf.WriteString("Content-Type: text/plain; charset=utf-8\r\n\r\n")
+	emailBuf.WriteString("Body text.\r\n")
+	emailBuf.WriteString("--boundary\r\n")
+	emailBuf.WriteString("Content-Type: application/octet-stream; name=\"data.xyzunknown\"\r\n")
+	emailBuf.WriteString("Content-Disposition: attachment; filename=\"data.xyzunknown\"\r\n\r\n")
+	emailBuf.WriteString("some data\r\n")
+	emailBuf.WriteString("--boundary--\r\n")
+
+	msg := &imapMessage{
+		SeqNum: 1,
+		Envelope: &imapEnvelope{
+			MessageID: "enqueue-err@example.com",
+		},
+		Body: emailBuf.Bytes(),
+	}
+
+	fakeClient := &fakeIMAPClient{}
+	acc := config.IMAPAccount{}
+
+	var logBuf bytes.Buffer
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(os.Stderr)
+
+	err = poller.processMessage(context.Background(), acc, fakeClient, msg)
+	if err != nil {
+		t.Fatalf("expected no error (enqueueFile errors are logged), got: %v", err)
+	}
+
+	output := logBuf.String()
+	if !strings.Contains(output, "Failed to enqueue attachment") {
+		t.Errorf("expected log to contain 'Failed to enqueue attachment', got: %s", output)
+	}
+}
+
+func TestMailPoller_PollAccount_ProcessMessageError(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	processingDir := filepath.Join(dir, "processing")
+	os.MkdirAll(processingDir, 0700)
+
+	acc := config.IMAPAccount{
+		Username:       "test@example.com",
+		PasswordSecret: "myplaintextpw",
+		Host:           "imap.example.com",
+		Port:           993,
+	}
+
+	poller, err := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{
+		ProcessingDir: processingDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	msgWithEmptyBody := &imapMessage{
+		SeqNum: 1,
+		Envelope: &imapEnvelope{
+			MessageID: "empty-body@example.com",
+		},
+		Body: []byte{}, // empty body → processMessage returns error
+	}
+
+	fakeClient := &fakeIMAPClient{
+		searchRes: []uint32{1},
+		fetchRes:  []*imapMessage{msgWithEmptyBody},
+	}
+	poller.dialIMAP = func(ctx context.Context, addr, host string) (imapClient, error) {
+		return fakeClient, nil
+	}
+
+	var logBuf bytes.Buffer
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(os.Stderr)
+
+	err = poller.pollAccount(context.Background(), acc)
+	if err != nil {
+		t.Fatalf("pollAccount should not fail (errors are logged): %v", err)
+	}
+
+	output := logBuf.String()
+	if !strings.Contains(output, "Failed to process message") {
+		t.Errorf("expected log to contain 'Failed to process message', got: %s", output)
 	}
 }

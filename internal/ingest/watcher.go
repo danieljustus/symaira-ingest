@@ -87,15 +87,20 @@ func NewWatcherWithOptions(s *store.Store, inboxDir string, opts WatcherOptions)
 	}, nil
 }
 
+var getwdFn = os.Getwd
+
 func cleanOptionalDir(path string) (string, error) {
 	if path == "" {
 		return "", nil
 	}
-	abs, err := filepath.Abs(path)
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path), nil
+	}
+	pwd, err := getwdFn()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Clean(abs), nil
+	return filepath.Clean(filepath.Join(pwd, path)), nil
 }
 
 // Close closes the underlying fsnotify watcher.

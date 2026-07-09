@@ -807,6 +807,40 @@ type doctorReport struct {
 	Warnings int           `json:"warnings"`
 }
 
+// doctorIMAPClient is the subset of IMAP operations needed by checkIMAP.
+type doctorIMAPClient interface {
+	Login(username, password string) error
+	Select(folder string) error
+	Logout() error
+}
+
+type doctorIMAPReal struct {
+	client *imapclient.Client
+}
+
+func (c *doctorIMAPReal) Login(username, password string) error {
+	return c.client.Login(username, password).Wait()
+}
+
+func (c *doctorIMAPReal) Select(folder string) error {
+	_, err := c.client.Select(folder, nil).Wait()
+	return err
+}
+
+func (c *doctorIMAPReal) Logout() error {
+	return c.client.Logout().Wait()
+}
+
+// doctorDialIMAP connects to an IMAP server over TLS. Package-level so tests
+// can replace it with a fake.
+var doctorDialIMAP = func(addr, host string) (doctorIMAPClient, error) {
+	c, err := imapclient.DialTLS(addr, &imapclient.Options{TLSConfig: &tls.Config{ServerName: host}})
+	if err != nil {
+		return nil, err
+	}
+	return &doctorIMAPReal{client: c}, nil
+}
+
 func checkIMAP(ctx context.Context, report *doctorReport, accounts []config.IMAPAccount) {
 	for i, acc := range accounts {
 		name := fmt.Sprintf("imap.account.%d", i)
@@ -818,13 +852,13 @@ func checkIMAP(ctx context.Context, report *doctorReport, accounts []config.IMAP
 		}
 
 		addr := fmt.Sprintf("%s:%d", acc.Host, acc.Port)
-		client, err := imapclient.DialTLS(addr, &imapclient.Options{TLSConfig: &tls.Config{ServerName: acc.Host}})
+		client, err := doctorDialIMAP(addr, acc.Host)
 		if err != nil {
 			report.add(name, doctorFail, fmt.Sprintf("cannot connect to %s: %v", addr, err))
 			continue
 		}
 
-		if err := client.Login(acc.Username, pwd).Wait(); err != nil {
+		if err := client.Login(acc.Username, pwd); err != nil {
 			client.Logout()
 			report.add(name, doctorFail, fmt.Sprintf("login failed for %s: %v", acc.Username, err))
 			continue
@@ -835,7 +869,7 @@ func checkIMAP(ctx context.Context, report *doctorReport, accounts []config.IMAP
 			folder = "INBOX"
 		}
 
-		if _, err := client.Select(folder, nil).Wait(); err != nil {
+		if err := client.Select(folder); err != nil {
 			client.Logout()
 			report.add(name, doctorFail, fmt.Sprintf("cannot select folder %s: %v", folder, err))
 			continue
