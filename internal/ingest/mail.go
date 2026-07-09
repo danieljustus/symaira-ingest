@@ -152,6 +152,7 @@ type MailPoller struct {
 	wg            sync.WaitGroup
 	cancel        context.CancelFunc
 	dialIMAP      func(ctx context.Context, addr string, host string) (imapClient, error)
+	newMailReader func(r io.Reader) (*mail.Reader, error)
 }
 
 type MailPollerOptions struct {
@@ -180,6 +181,7 @@ func NewMailPoller(s *store.Store, accounts []config.IMAPAccount, opts MailPolle
 		processingDir: processingDir,
 		failedDir:     failedDir,
 		dialIMAP:      defaultDialIMAP,
+		newMailReader: mail.CreateReader,
 	}, nil
 }
 
@@ -306,7 +308,7 @@ func (m *MailPoller) processMessage(ctx context.Context, acc config.IMAPAccount,
 		return fmt.Errorf("no body section found")
 	}
 
-	mr, err := mail.CreateReader(bytes.NewReader(body))
+	mr, err := m.newMailReader(bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create mail reader: %w", err)
 	}
