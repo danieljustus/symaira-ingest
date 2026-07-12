@@ -89,6 +89,8 @@ func run(args []string) error {
 		return runRetry(args[1:])
 	case "rules":
 		return runRules(args[1:])
+	case "mail":
+		return runMail(args[1:])
 	case "import":
 		return runImport(args[1:])
 	case "doctor":
@@ -131,6 +133,7 @@ Commands:
   watch <dir>         Watch a directory for new/modified files and ingest in the background
   service             Manage the macOS LaunchAgent for the watcher
   search              Index the vault with symseek and validate search fixtures
+  mail                Read/write IMAP mail-ingest configuration
   import paperless    Import documents from a Paperless-ngx instance
   import notion       Import a Notion Markdown + CSV export into the vault
   doctor              Validate production readiness
@@ -144,7 +147,7 @@ Commands:
   cutover-check       Gate whether Paperless can stop being source of truth
   jobs                List ingestion jobs in the queue
   retry <id>          Retry a failed job by ID
-  rules               Manage classification rules (list, add, update, test, delete)
+  rules               Manage classification rules (list, add, update, test, dry-run, delete)
   mcp                 Start the MCP server
   version             Print version
   help                Show this help`)
@@ -1928,7 +1931,7 @@ func runRules(args []string) error {
 	fs := flag.NewFlagSet("rules", flag.ContinueOnError)
 	jsonFlag := fs.Bool("json", false, "Output rules in JSON format")
 	ocrLang, vault, archive, db := registerSharedFlags(fs)
-	configureUsage(fs, "rules [flags] [command]", "Manage classification rules. Patterns are case-insensitive substrings matched against extracted document text, not filename globs.\n\nCommands:\n  list                                  List all classification rules\n  add <pattern> <kind> <value>          Add a classification rule\n  update <id> <pattern> <kind> <value>  Update a classification rule\n  test <text>                           Test rules against text\n  delete <id>                           Delete a classification rule by ID\n\nKinds for add/update command: category, tag, correspondent, document_type")
+	configureUsage(fs, "rules [flags] [command]", "Manage classification rules. Patterns are case-insensitive substrings matched against extracted document text, not filename globs.\n\nCommands:\n  list                                  List all classification rules\n  add <pattern> <kind> <value>          Add a classification rule\n  update <id> <pattern> <kind> <value>  Update a classification rule\n  test <text>                           Test rules against text\n  dry-run <pattern> <kind> <value>      Test a proposed rule against existing notes\n  delete <id>                           Delete a classification rule by ID\n\nKinds for add/update command: category, tag, correspondent, document_type")
 	help, err := parseFlags(fs, args, "invalid rules flags")
 	if help || err != nil {
 		return err
@@ -1962,6 +1965,24 @@ func runRules(args []string) error {
 		return updateRule(ctx, st, remaining[1:], *jsonFlag)
 	case "test":
 		return testRules(ctx, st, remaining[1:], *jsonFlag)
+	case "dry-run":
+		if len(remaining) < 4 {
+			return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation,
+				"missing arguments; usage: symingest rules dry-run <pattern> <kind> <value>")
+		}
+		if cfg.vault == "" {
+			return exitcodes.Wrapf(nil, exitcodes.ExitConfig, exitcodes.KindConfig,
+				"no vault configured; use --vault or set vault in config")
+		}
+		response, err := dryRunRuleAgainstDocuments(ctx, st, cfg.vault, remaining[1], remaining[2], remaining[3])
+		if err != nil {
+			return err
+		}
+		if *jsonFlag {
+			return printRulesJSON(response, "failed to marshal rules dry-run result")
+		}
+		formatDryRunHuman(response)
+		return nil
 	case "delete":
 		return deleteRule(ctx, st, remaining[1:], *jsonFlag)
 	default:
@@ -1974,9 +1995,12 @@ func printRulesUsage() error {
 	fmt.Fprintln(stdout, `Usage: symingest rules [flags] [command]
 
 Commands:
-  list                         List all classification rules
-  add <pattern> <kind> <value> Add a classification rule
-  delete <id>                  Delete a classification rule by ID
+  list                                  List all classification rules
+  add <pattern> <kind> <value>          Add a classification rule
+  update <id> <pattern> <kind> <value>  Update a classification rule
+  test <text>                           Test rules against text
+  dry-run <pattern> <kind> <value>      Test a proposed rule against existing notes
+  delete <id>                           Delete a classification rule by ID
 
 Patterns are case-insensitive substrings matched against extracted document text, not filename globs.
 Kinds for add command: category, tag, correspondent, document_type`)
