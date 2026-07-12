@@ -137,7 +137,15 @@ func (s *Store) ByHash(ctx context.Context, sha256 string) (*Document, error) {
 	return &d, nil
 }
 
-// SetVaultAndArchivePath marks a document as done and records its vault, archive paths, and metadata.
+// ByArchivePath returns the document associated with an archived original.
+func (s *Store) ByArchivePath(ctx context.Context, archivePath string) (*Document, error) {
+	var id int64
+	if err := s.db.QueryRowContext(ctx, `SELECT id FROM documents WHERE archive_path = ?`, archivePath).Scan(&id); err != nil {
+		return nil, err
+	}
+	return s.ByID(ctx, id)
+}
+
 func (s *Store) SetVaultAndArchivePath(ctx context.Context, id int64, vaultPath, archivePath string, category string, tags []string, correspondent, documentType string) error {
 	var tagsJSON []byte
 	if len(tags) > 0 {
@@ -235,6 +243,54 @@ func (s *Store) EnqueueJob(ctx context.Context, docID int64, kind string) (*Job,
 	}
 	id, _ := res.LastInsertId()
 	return &Job{ID: id, DocumentID: docID, Kind: kind, Status: "pending"}, nil
+}
+
+// EnqueueReprocessJob creates a reocr job unless the document already has a
+// pending or running reocr job. A false created value means the existing job
+// was returned and callers should not process the document twice concurrently.
+func (s *Store) EnqueueReprocessJob(ctx context.Context, docID int64) (*Job, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	defer tx.Rollback()
+
+	var job Job
+	var lastErr sql.NullString
+	err = tx.QueryRowContext(ctx, `
+		SELECT id, document_id, kind, status, attempts, last_error, created_at, updated_at
+		FROM jobs
+		WHERE document_id = ? AND kind = 'reocr' AND status IN ('pending', 'running')
+		ORDER BY id DESC LIMIT 1`, docID).Scan(
+		&job.ID, &job.DocumentID, &job.Kind, &job.Status, &job.Attempts,
+		&lastErr, &job.CreatedAt, &job.UpdatedAt,
+	)
+	if err == nil {
+		if lastErr.Valid {
+			job.LastError = &lastErr.String
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, false, err
+		}
+		return &job, false, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, false, fmt.Errorf("find active reprocess job: %w", err)
+	}
+
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO jobs (document_id, kind, status, attempts) VALUES (?, 'reocr', 'pending', 0)`, docID)
+	if err != nil {
+		return nil, false, fmt.Errorf("insert reprocess job: %w", err)
+	}
+	jobID, err := res.LastInsertId()
+	if err != nil {
+		return nil, false, fmt.Errorf("get reprocess job ID: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, false, err
+	}
+	return &Job{ID: jobID, DocumentID: docID, Kind: "reocr", Status: "pending"}, true, nil
 }
 
 // SetProvenance updates the source_mail_id and correspondent for a document.

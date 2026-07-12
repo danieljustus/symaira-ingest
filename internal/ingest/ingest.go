@@ -35,6 +35,11 @@ type IngestOptions struct {
 	// every Paperless document ID gets its own traceable Markdown note while the
 	// archive can still deduplicate identical originals by SHA-256.
 	AllowDuplicateContent bool
+	// ExistingVaultPath updates an already-written note in place while
+	// preserving user-owned frontmatter fields. Used by reprocessing only.
+	ExistingVaultPath string
+	// ArchivePathOverride keeps the original archived path during reprocessing.
+	ArchivePathOverride string
 }
 
 // Result is the outcome of a one-shot ingest.
