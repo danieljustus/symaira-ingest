@@ -1706,7 +1706,6 @@ func newMCPServer(st *store.Store, ocrLang, vault, archive string) *mcpserver.Se
 	return server
 }
 
-
 func runWatch(args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 	processingDir := fs.String("processing-dir", "", "Move stable files here before enqueueing them")
@@ -1958,13 +1957,13 @@ func runRules(args []string) error {
 	case "list":
 		return listRules(ctx, st, *jsonFlag)
 	case "add":
-		return addRule(ctx, st, remaining[1:])
+		return addRule(ctx, st, remaining[1:], *jsonFlag)
 	case "update":
-		return updateRule(ctx, st, remaining[1:])
+		return updateRule(ctx, st, remaining[1:], *jsonFlag)
 	case "test":
 		return testRules(ctx, st, remaining[1:], *jsonFlag)
 	case "delete":
-		return deleteRule(ctx, st, remaining[1:])
+		return deleteRule(ctx, st, remaining[1:], *jsonFlag)
 	default:
 		return exitcodes.Wrapf(nil, exitcodes.ExitNoInput, exitcodes.KindValidation,
 			"unknown rules subcommand %q", remaining[0])
@@ -1993,16 +1992,12 @@ func listRules(ctx context.Context, st *store.Store, outputJSON bool) error {
 
 	if outputJSON {
 		if rules == nil {
-			fmt.Fprintln(stdout, "[]")
-			return nil
+			rules = []*store.ClassificationRule{}
 		}
-		data, err := json.MarshalIndent(rules, "", "  ")
-		if err != nil {
-			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
-				"failed to marshal rules to JSON")
-		}
-		fmt.Fprintln(stdout, string(data))
-		return nil
+		return printRulesJSON(rulesListJSONResponse{
+			SchemaVersion: rulesJSONSchemaVersion,
+			Rules:         rules,
+		}, "failed to marshal rules to JSON")
 	}
 
 	if len(rules) == 0 {
@@ -2020,7 +2015,7 @@ func listRules(ctx context.Context, st *store.Store, outputJSON bool) error {
 	return nil
 }
 
-func addRule(ctx context.Context, st *store.Store, args []string) error {
+func addRule(ctx context.Context, st *store.Store, args []string, outputJSON bool) error {
 	if len(args) < 3 {
 		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation,
 			"missing arguments; usage: symingest rules add <pattern> <kind> <value>")
@@ -2036,12 +2031,18 @@ func addRule(ctx context.Context, st *store.Store, args []string) error {
 			"failed to add rule")
 	}
 
+	if outputJSON {
+		return printRulesJSON(rulesRuleJSONResponse{
+			SchemaVersion: rulesJSONSchemaVersion,
+			Rule:          rule,
+		}, "failed to marshal added rule to JSON")
+	}
 	fmt.Fprintf(stdout, "Added classification rule %d: pattern=%q, kind=%q, value=%q\n",
 		rule.ID, rule.Pattern, rule.Kind, rule.Value)
 	return nil
 }
 
-func updateRule(ctx context.Context, st *store.Store, args []string) error {
+func updateRule(ctx context.Context, st *store.Store, args []string, outputJSON bool) error {
 	if len(args) < 4 {
 		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation,
 			"missing arguments; usage: symingest rules update <id> <pattern> <kind> <value>")
@@ -2055,6 +2056,12 @@ func updateRule(ctx context.Context, st *store.Store, args []string) error {
 	if err != nil {
 		return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal,
 			"failed to update rule")
+	}
+	if outputJSON {
+		return printRulesJSON(rulesRuleJSONResponse{
+			SchemaVersion: rulesJSONSchemaVersion,
+			Rule:          rule,
+		}, "failed to marshal updated rule to JSON")
 	}
 	fmt.Fprintf(stdout, "Updated classification rule %d: pattern=%q, kind=%q, value=%q\n",
 		rule.ID, rule.Pattern, rule.Kind, rule.Value)
@@ -2089,12 +2096,10 @@ func testRules(ctx context.Context, st *store.Store, args []string, outputJSON b
 		if matches == nil {
 			matches = []ruleTestMatch{}
 		}
-		data, err := json.MarshalIndent(matches, "", "  ")
-		if err != nil {
-			return exitcodes.Wrap(err, exitcodes.ExitGeneric, exitcodes.KindInternal, "failed to marshal rule test result")
-		}
-		fmt.Fprintln(stdout, string(data))
-		return nil
+		return printRulesJSON(rulesTestJSONResponse{
+			SchemaVersion: rulesJSONSchemaVersion,
+			Matches:       matches,
+		}, "failed to marshal rule test result")
 	}
 	if len(matches) == 0 {
 		fmt.Fprintln(stdout, "No matching classification rules.")
@@ -2106,7 +2111,7 @@ func testRules(ctx context.Context, st *store.Store, args []string, outputJSON b
 	return nil
 }
 
-func deleteRule(ctx context.Context, st *store.Store, args []string) error {
+func deleteRule(ctx context.Context, st *store.Store, args []string, outputJSON bool) error {
 	if len(args) < 1 {
 		return exitcodes.Wrapf(nil, exitcodes.ExitData, exitcodes.KindValidation,
 			"missing rule ID; usage: symingest rules delete <id>")
@@ -2124,6 +2129,13 @@ func deleteRule(ctx context.Context, st *store.Store, args []string) error {
 			"failed to delete rule %d", id)
 	}
 
+	if outputJSON {
+		return printRulesJSON(rulesDeleteJSONResponse{
+			SchemaVersion: rulesJSONSchemaVersion,
+			ID:            id,
+			Deleted:       true,
+		}, "failed to marshal deleted rule result to JSON")
+	}
 	fmt.Fprintf(stdout, "Deleted classification rule %d.\n", id)
 	return nil
 }

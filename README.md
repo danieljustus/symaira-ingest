@@ -156,6 +156,15 @@ symingest rules add "invoice" category Finance
 
 Rule patterns are case-insensitive substrings matched against extracted document text. They are not filename globs, so a pattern like `*.pdf` will only match literal text in a document, not PDF filenames.
 
+For integrations, pass `--json` before the rules subcommand. All successful rules JSON responses use `schema_version: 1` and stable operation-specific envelopes:
+
+- `list`: `{ "schema_version": 1, "rules": [...] }`
+- `add` / `update`: `{ "schema_version": 1, "rule": { ... } }`
+- `test`: `{ "schema_version": 1, "matches": [...] }`
+- `delete`: `{ "schema_version": 1, "id": 123, "deleted": true }`
+
+The rule objects contain `id`, `pattern`, `kind`, `value`, and `created_at`. A successful empty list or test returns an empty JSON array rather than `null`. Human-readable output remains unchanged when `--json` is omitted.
+
 **Check job queue:**
 
 ```bash
