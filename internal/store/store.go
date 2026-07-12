@@ -45,6 +45,22 @@ type ClassificationRule struct {
 	CreatedAt string `json:"created_at"`
 }
 
+// ValidateClassificationRule validates rule fields without mutating the store.
+func ValidateClassificationRule(pattern, kind, value string) error {
+	if pattern == "" {
+		return errors.New("pattern cannot be empty")
+	}
+	switch kind {
+	case "category", "tag", "correspondent", "document_type":
+	default:
+		return fmt.Errorf("invalid rule kind: %q", kind)
+	}
+	if value == "" {
+		return errors.New("value cannot be empty")
+	}
+	return nil
+}
+
 // Store provides document persistence.
 type Store struct {
 	db *sql.DB
@@ -98,6 +114,71 @@ func (s *Store) CreateOrGet(ctx context.Context, sourcePath, sha256, mime string
 	}
 	id, _ := res.LastInsertId()
 	return &Document{ID: id, SourcePath: sourcePath, SHA256: sha256, MIME: mime, Status: "pending"}, true, nil
+}
+
+// ListDocuments returns ingested documents with note paths in deterministic
+// note-path order. It intentionally returns metadata only; note bodies remain
+// on disk and are never included in this result.
+func (s *Store) ListDocuments(ctx context.Context) ([]*Document, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, source_path, sha256, mime, status, vault_path, archive_path,
+		       category, tags, correspondent, document_type, source_mail_id
+		FROM documents
+		WHERE vault_path IS NOT NULL AND vault_path <> ''
+		ORDER BY vault_path ASC, id ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query documents: %w", err)
+	}
+	defer rows.Close()
+
+	var documents []*Document
+	for rows.Next() {
+		doc, err := scanDocument(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan document: %w", err)
+		}
+		documents = append(documents, doc)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return documents, nil
+}
+
+type rowScanner interface {
+	Scan(...any) error
+}
+
+func scanDocument(row rowScanner) (*Document, error) {
+	var d Document
+	var vaultPath, archivePath, category, tags, correspondent, documentType, sourceMailID sql.NullString
+	if err := row.Scan(&d.ID, &d.SourcePath, &d.SHA256, &d.MIME, &d.Status,
+		&vaultPath, &archivePath, &category, &tags, &correspondent, &documentType, &sourceMailID); err != nil {
+		return nil, err
+	}
+	if vaultPath.Valid {
+		d.VaultPath = &vaultPath.String
+	}
+	if archivePath.Valid {
+		d.ArchivePath = &archivePath.String
+	}
+	if category.Valid {
+		d.Category = category.String
+	}
+	if tags.Valid && tags.String != "" {
+		_ = json.Unmarshal([]byte(tags.String), &d.Tags)
+	}
+	if correspondent.Valid {
+		d.Correspondent = correspondent.String
+	}
+	if documentType.Valid {
+		d.DocumentType = documentType.String
+	}
+	if sourceMailID.Valid {
+		d.SourceMailID = &sourceMailID.String
+	}
+	return &d, nil
 }
 
 // ByHash returns the document with the given sha256.
@@ -556,16 +637,8 @@ func (s *Store) ResetRunningJobs(ctx context.Context) error {
 
 // AddRule adds a new classification rule to the store.
 func (s *Store) AddRule(ctx context.Context, pattern, kind, value string) (*ClassificationRule, error) {
-	if pattern == "" {
-		return nil, errors.New("pattern cannot be empty")
-	}
-	switch kind {
-	case "category", "tag", "correspondent", "document_type":
-	default:
-		return nil, fmt.Errorf("invalid rule kind: %q", kind)
-	}
-	if value == "" {
-		return nil, errors.New("value cannot be empty")
+	if err := ValidateClassificationRule(pattern, kind, value); err != nil {
+		return nil, err
 	}
 
 	res, err := s.db.ExecContext(ctx,

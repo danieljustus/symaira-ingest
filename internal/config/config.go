@@ -23,17 +23,17 @@ type Config struct {
 
 // IMAPAccount configures an IMAP mailbox source for ingestion.
 type IMAPAccount struct {
-	Host           string   `json:"host"`
-	Port           int      `json:"port"`
-	Username       string   `json:"username"`
-	PasswordSecret string   `json:"password_secret"` // symvault:// or env:// or plaintext
-	Folder         string   `json:"folder"`          // e.g. "INBOX"
-	From           []string `json:"from"`            // filter rules
-	Subject        []string `json:"subject"`         // filter rules
-	HasAttachment  bool     `json:"has_attachment"`  // require attachment
-	Action         string   `json:"action"`          // "mark_seen" or "move"
-	MoveTo         string   `json:"move_to"`         // folder to move to if action="move"
-	ArchiveMail    bool     `json:"archive_mail"`    // whether to ingest the .eml message itself
+	Host           string   `json:"host" toml:"host"`
+	Port           int      `json:"port" toml:"port"`
+	Username       string   `json:"username" toml:"username"`
+	PasswordSecret string   `json:"password_secret" toml:"password_secret"` // symvault:// or env:// or plaintext
+	Folder         string   `json:"folder" toml:"folder"`                   // e.g. "INBOX"
+	From           []string `json:"from" toml:"from"`                       // filter rules
+	Subject        []string `json:"subject" toml:"subject"`                 // filter rules
+	HasAttachment  bool     `json:"has_attachment" toml:"has_attachment"`   // require attachment
+	Action         string   `json:"action" toml:"action"`                   // "mark_seen" or "move"
+	MoveTo         string   `json:"move_to" toml:"move_to"`                 // folder to move to if action="move"
+	ArchiveMail    bool     `json:"archive_mail" toml:"archive_mail"`       // whether to ingest the .eml message itself
 }
 
 // Defaults returns the default configuration.
