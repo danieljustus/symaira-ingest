@@ -189,6 +189,30 @@ func (w *NoteWriter) WriteNote(sourcePath, sha256, mime, ocrEngine, text, archiv
 	return vaultPath, nil
 }
 
+// UpdateNote replaces the machine-owned frontmatter and Markdown body of an
+// existing note while preserving any frontmatter fields owned by the user.
+// The note path is kept stable so reprocessing does not create a second note.
+func (w *NoteWriter) UpdateNote(vaultPath string, meta Note, text string) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	data, err := os.ReadFile(vaultPath)
+	if err != nil {
+		return fmt.Errorf("read note: %w", err)
+	}
+	fields, _, err := parseFrontmatter(string(data))
+	if err != nil {
+		return err
+	}
+	updateMachineFields(fields, meta)
+
+	body := renderBody(text, meta.ArchivePath)
+	if err := writeFrontmatterAndBody(vaultPath, fields, body); err != nil {
+		return fmt.Errorf("rewrite note: %w", err)
+	}
+	return nil
+}
+
 // UpdateNoteSidecar rewrites a note's YAML frontmatter to include sidecar
 // path and extraction count without touching the Markdown body.
 func (w *NoteWriter) UpdateNoteSidecar(vaultPath, sidecarPath string, extractionCount int) error {
@@ -200,40 +224,82 @@ func (w *NoteWriter) UpdateNoteSidecar(vaultPath, sidecarPath string, extraction
 		return fmt.Errorf("read note: %w", err)
 	}
 
-	content := string(data)
+	fields, body, err := parseFrontmatter(string(data))
+	if err != nil {
+		return err
+	}
+	fields["sidecar_path"] = sidecarPath
+	fields["extraction_count"] = extractionCount
+
+	if err := writeFrontmatterAndBody(vaultPath, fields, body); err != nil {
+		return fmt.Errorf("rewrite note: %w", err)
+	}
+	return nil
+}
+
+func parseFrontmatter(content string) (map[string]interface{}, string, error) {
 	if !strings.HasPrefix(content, "---\n") {
-		return fmt.Errorf("note missing YAML frontmatter")
+		return nil, "", fmt.Errorf("note missing YAML frontmatter")
 	}
 	endIdx := strings.Index(content[4:], "\n---\n")
 	if endIdx < 0 {
-		return fmt.Errorf("note missing closing frontmatter delimiter")
+		return nil, "", fmt.Errorf("note missing closing frontmatter delimiter")
 	}
 	endIdx += 4
-
-	frontmatter := content[4:endIdx]
-	body := content[endIdx+5:]
-
-	var meta Note
-	if err := yaml.Unmarshal([]byte(frontmatter), &meta); err != nil {
-		return fmt.Errorf("parse frontmatter: %w", err)
+	fields := make(map[string]interface{})
+	if err := yaml.Unmarshal([]byte(content[4:endIdx]), &fields); err != nil {
+		return nil, "", fmt.Errorf("parse frontmatter: %w", err)
 	}
+	return fields, content[endIdx+5:], nil
+}
 
-	meta.SidecarPath = sidecarPath
-	meta.ExtractionCount = extractionCount
+func updateMachineFields(fields map[string]interface{}, meta Note) {
+	fields["source_path"] = meta.SourcePath
+	fields["ingested_at"] = meta.IngestedAt
+	fields["sha256"] = meta.SHA256
+	fields["mime"] = meta.MIME
+	if meta.Tags == nil {
+		fields["tags"] = []string{}
+	} else {
+		fields["tags"] = meta.Tags
+	}
+	fields["category"] = meta.Category
+	if meta.Correspondent == "" {
+		delete(fields, "correspondent")
+	} else {
+		fields["correspondent"] = meta.Correspondent
+	}
+	if meta.DocumentType == "" {
+		delete(fields, "document_type")
+	} else {
+		fields["document_type"] = meta.DocumentType
+	}
+	fields["ocr_engine"] = meta.OCREngine
+	fields["archive_path"] = meta.ArchivePath
+}
 
-	yamlBytes, err := yaml.Marshal(meta)
+func renderBody(text, archivePath string) string {
+	var sb strings.Builder
+	sb.WriteString(text)
+	if !strings.HasSuffix(text, "\n") {
+		sb.WriteByte('\n')
+	}
+	if archivePath != "" {
+		sb.WriteString("\n---\n")
+		sb.WriteString(fmt.Sprintf("[Archived Original](file://%s)\n", filepath.ToSlash(archivePath)))
+	}
+	return sb.String()
+}
+
+func writeFrontmatterAndBody(path string, fields map[string]interface{}, body string) error {
+	yamlBytes, err := yaml.Marshal(fields)
 	if err != nil {
 		return fmt.Errorf("marshal frontmatter: %w", err)
 	}
-
 	var sb strings.Builder
 	sb.WriteString("---\n")
 	sb.Write(yamlBytes)
 	sb.WriteString("---\n\n")
 	sb.WriteString(body)
-
-	if err := fsutil.AtomicWriteFile(vaultPath, []byte(sb.String()), 0o600); err != nil {
-		return fmt.Errorf("rewrite note: %w", err)
-	}
-	return nil
+	return fsutil.AtomicWriteFile(path, []byte(sb.String()), 0o600)
 }

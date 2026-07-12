@@ -42,6 +42,98 @@ type Pipeline struct {
 // ErrDuplicate is returned when a source has already been ingested.
 var ErrDuplicate = errors.New("source already ingested")
 
+// ReprocessJobKind is the stable queue kind used by the reocr command.
+const ReprocessJobKind = "reocr"
+
+// ReprocessResult describes a synchronous reprocessing request.
+type ReprocessResult struct {
+	Result         *Result
+	Job            *store.Job
+	AlreadyRunning bool
+}
+
+// Reprocess validates an archived original, queues one reprocessing job for
+// the existing document, and runs that job through the normal extraction and
+// note-writing pipeline. A pending/running reprocessing job is returned without
+// creating another job.
+func (p *Pipeline) Reprocess(ctx context.Context, documentID int64, source string, opts *IngestOptions) (*ReprocessResult, error) {
+	doc, err := p.Store.ByID(ctx, documentID)
+	if err != nil {
+		return nil, fmt.Errorf("get document: %w", err)
+	}
+	if doc.ArchivePath == nil || *doc.ArchivePath == "" {
+		return nil, fmt.Errorf("archived source is not recorded for document %d", documentID)
+	}
+	if doc.VaultPath == nil || *doc.VaultPath == "" {
+		return nil, fmt.Errorf("output note is not recorded for document %d", documentID)
+	}
+	if source == "" {
+		source = *doc.ArchivePath
+	}
+	info, err := os.Stat(source)
+	if err != nil {
+		return nil, fmt.Errorf("stat archived source: %w", err)
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("archived source is a directory: %s", source)
+	}
+	hash, err := hashFile(source)
+	if err != nil {
+		return nil, fmt.Errorf("hash archived source: %w", err)
+	}
+	if hash != doc.SHA256 {
+		return nil, fmt.Errorf("archived source hash mismatch for document %d", documentID)
+	}
+	if _, err := extract.Detect(source); err != nil {
+		return nil, fmt.Errorf("detect archived source type: %w", err)
+	}
+
+	job, created, err := p.Store.EnqueueReprocessJob(ctx, documentID)
+	if err != nil {
+		return nil, fmt.Errorf("enqueue reprocess job: %w", err)
+	}
+	if !created {
+		return &ReprocessResult{Job: job, AlreadyRunning: true}, nil
+	}
+	claimed, err := p.Store.ClaimJobByID(ctx, job.ID)
+	if err != nil {
+		return nil, fmt.Errorf("claim reprocess job: %w", err)
+	}
+	if claimed == nil {
+		return nil, fmt.Errorf("reprocess job %d is no longer available", job.ID)
+	}
+
+	if opts == nil {
+		opts = &IngestOptions{}
+	}
+	opts = cloneIngestOptions(opts)
+	opts.SourcePathOverride = doc.SourcePath
+	opts.ExistingVaultPath = *doc.VaultPath
+	opts.ArchivePathOverride = *doc.ArchivePath
+	res, err := p.processJob(ctx, claimed, opts)
+	if err != nil {
+		if failErr := p.Store.FailJob(ctx, claimed.ID, err.Error()); failErr != nil {
+			return nil, fmt.Errorf("reprocess failed: %v (failed to mark job as failed: %v)", err, failErr)
+		}
+		return nil, err
+	}
+	if err := p.Store.SetVaultAndArchivePath(ctx, documentID, res.VaultPath, res.ArchivePath, res.Category, res.Tags, res.Correspondent, res.DocumentType); err != nil {
+		return nil, fmt.Errorf("set reprocessed document paths: %w", err)
+	}
+	if err := p.Store.CompleteJob(ctx, claimed.ID); err != nil {
+		return nil, fmt.Errorf("complete reprocess job: %w", err)
+	}
+	return &ReprocessResult{Result: res, Job: claimed}, nil
+}
+
+func cloneIngestOptions(opts *IngestOptions) *IngestOptions {
+	clone := *opts
+	if opts.PresetTags != nil {
+		clone.PresetTags = append([]string(nil), opts.PresetTags...)
+	}
+	return &clone
+}
+
 // DuplicateError holds details of a duplicate document that was already ingested.
 type DuplicateError struct {
 	SourcePath  string
@@ -145,6 +237,26 @@ func (p *Pipeline) processJob(ctx context.Context, job *store.Job, opts *IngestO
 	if err != nil {
 		return nil, fmt.Errorf("get document: %w", err)
 	}
+	if job.Kind == ReprocessJobKind {
+		if doc.ArchivePath == nil || *doc.ArchivePath == "" {
+			return nil, fmt.Errorf("archived source is not recorded for document %d", doc.ID)
+		}
+		kind, err := extract.Detect(*doc.ArchivePath)
+		if err != nil {
+			return nil, fmt.Errorf("detect archived source type: %w", err)
+		}
+		if opts == nil {
+			opts = &IngestOptions{}
+		} else {
+			opts = cloneIngestOptions(opts)
+		}
+		opts.SourcePathOverride = doc.SourcePath
+		opts.ArchivePathOverride = *doc.ArchivePath
+		if doc.VaultPath != nil {
+			opts.ExistingVaultPath = *doc.VaultPath
+		}
+		return p.processSource(ctx, *doc.ArchivePath, doc.SHA256, kind, opts)
+	}
 	return p.processSource(ctx, doc.SourcePath, doc.SHA256, extract.Kind(job.Kind), opts)
 }
 
@@ -165,7 +277,9 @@ func (p *Pipeline) processSource(ctx context.Context, source, hash string, kind 
 	}
 
 	var archivePath string
-	if p.ArchiveDir != "" {
+	if opts != nil && opts.ArchivePathOverride != "" {
+		archivePath = opts.ArchivePathOverride
+	} else if p.ArchiveDir != "" {
 		ext := filepath.Ext(source)
 		archivePath = filepath.Join(p.ArchiveDir, hash+ext)
 		if err := atomicCopy(source, archivePath); err != nil {
@@ -249,25 +363,42 @@ func (p *Pipeline) processSource(ctx context.Context, source, hash string, kind 
 		downloadURI = opts.DownloadURI
 	}
 
-	vaultPath, err := p.Writer.WriteNote(
-		noteSourcePath,
-		hash,
-		extractRes.MIME,
-		extractRes.Engine,
-		extractRes.Text,
-		archivePath,
-		time.Now().UTC(),
-		category,
-		tags,
-		correspondent,
-		documentType,
-		importedFrom,
-		importRunID,
-		sourceURI,
-		downloadURI,
-		paperlessMeta,
-		layout,
-	)
+	var vaultPath string
+	if opts != nil && opts.ExistingVaultPath != "" {
+		vaultPath = opts.ExistingVaultPath
+		err = p.Writer.UpdateNote(vaultPath, writer.Note{
+			SourcePath:    noteSourcePath,
+			IngestedAt:    time.Now().UTC(),
+			SHA256:        hash,
+			MIME:          extractRes.MIME,
+			Tags:          tags,
+			Category:      category,
+			Correspondent: correspondent,
+			DocumentType:  documentType,
+			OCREngine:     extractRes.Engine,
+			ArchivePath:   archivePath,
+		}, extractRes.Text)
+	} else {
+		vaultPath, err = p.Writer.WriteNote(
+			noteSourcePath,
+			hash,
+			extractRes.MIME,
+			extractRes.Engine,
+			extractRes.Text,
+			archivePath,
+			time.Now().UTC(),
+			category,
+			tags,
+			correspondent,
+			documentType,
+			importedFrom,
+			importRunID,
+			sourceURI,
+			downloadURI,
+			paperlessMeta,
+			layout,
+		)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("write note: %w", err)
 	}
