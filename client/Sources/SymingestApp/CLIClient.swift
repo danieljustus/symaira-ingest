@@ -42,6 +42,73 @@ public struct SwiftRule: Codable, Identifiable, Sendable {
     }
 }
 
+private protocol RulesJSONEnvelope: Decodable {
+    var schemaVersion: Int { get }
+}
+
+public struct RulesListResponse: Codable, Sendable, RulesJSONEnvelope {
+    public let schemaVersion: Int
+    public let rules: [SwiftRule]
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case rules
+    }
+}
+
+public struct RuleResponse: Codable, Sendable, RulesJSONEnvelope {
+    public let schemaVersion: Int
+    public let rule: SwiftRule
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case rule
+    }
+}
+
+public struct SwiftRuleMatch: Codable, Sendable {
+    public let id: Int64
+    public let pattern: String
+    public let kind: String
+    public let value: String
+}
+
+public struct RuleTestResponse: Codable, Sendable, RulesJSONEnvelope {
+    public let schemaVersion: Int
+    public let matches: [SwiftRuleMatch]
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case matches
+    }
+}
+
+public struct RuleDeleteResponse: Codable, Sendable, RulesJSONEnvelope {
+    public let schemaVersion: Int
+    public let id: Int64
+    public let deleted: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case id
+        case deleted
+    }
+}
+
+private enum RulesJSONError: LocalizedError {
+    case unsupportedSchema(Int)
+    case invalidResponse(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedSchema(let version):
+            return "Unsupported symingest rules JSON schema version \(version). Update symingest to continue."
+        case .invalidResponse(let message):
+            return "Invalid symingest rules JSON response: \(message)"
+        }
+    }
+}
+
 public struct ReviewFindingDTO: Codable, Identifiable, Sendable {
     public var id: String { "\(kind)-\(documentID ?? 0)-\(message)" }
     public let kind: String
@@ -138,10 +205,40 @@ public struct CLIConfigSnapshot: Sendable {
 public final class CLIClient: Sendable {
     public static let shared = CLIClient()
 
+    private static let rulesJSONSchemaVersion = 1
+
     // OCR runs over large PDFs can take a while; keep the timeout generous.
     private let runner = CLIRunner(defaultTimeout: 600)
 
     private init() {}
+
+    private func decodeRulesResponse<T: Decodable & RulesJSONEnvelope>(_ type: T.Type, output: String) throws -> T {
+        guard let data = output.data(using: .utf8) else {
+            throw RulesJSONError.invalidResponse("output is not valid UTF-8")
+        }
+        do {
+            let response = try JSONDecoder().decode(type, from: data)
+            guard response.schemaVersion == Self.rulesJSONSchemaVersion else {
+                throw RulesJSONError.unsupportedSchema(response.schemaVersion)
+            }
+            return response
+        } catch let error as RulesJSONError {
+            throw error
+        } catch {
+            throw RulesJSONError.invalidResponse(error.localizedDescription)
+        }
+    }
+
+    private func ruleMessage(_ action: String, rule: SwiftRule) -> String {
+        "\(action) classification rule \(rule.id): pattern=\"\(rule.pattern)\", kind=\"\(rule.kind)\", value=\"\(rule.value)\""
+    }
+
+    private func ruleMatchesMessage(_ matches: [SwiftRuleMatch]) -> String {
+        guard !matches.isEmpty else { return "No matching classification rules." }
+        return matches.map { match in
+            "match rule \(match.id): pattern=\"\(match.pattern)\" kind=\"\(match.kind)\" value=\"\(match.value)\""
+        }.joined(separator: "\n")
+    }
 
     public func locateBinary(customPath: String) -> URL? {
         let override = customPath.isEmpty ? nil : URL(fileURLWithPath: customPath)
@@ -230,18 +327,14 @@ public final class CLIClient: Sendable {
 
     public func listRules(config: ConfigStore) async throws -> [SwiftRule] {
         let (out, _) = try await runIngestCommand(args: ["rules", "--json", "list"], config: config)
-        let decoder = JSONDecoder()
-        return try decoder.decode([SwiftRule].self, from: out.data(using: .utf8) ?? Data())
+        return try decodeRulesResponse(RulesListResponse.self, output: out).rules
     }
 
     public func addRule(pattern: String, kind: String, value: String, config: ConfigStore) async -> (success: Bool, message: String) {
         do {
-            let (out, err) = try await runIngestCommand(args: ["rules", "add", pattern, kind, value], config: config)
-            if out.contains("Added") {
-                return (true, out.trimmingCharacters(in: .whitespacesAndNewlines))
-            } else {
-                return (false, err.isEmpty ? out : err)
-            }
+            let (out, _) = try await runIngestCommand(args: ["rules", "--json", "add", pattern, kind, value], config: config)
+            let response = try decodeRulesResponse(RuleResponse.self, output: out)
+            return (true, ruleMessage("Added", rule: response.rule))
         } catch {
             return (false, error.localizedDescription)
         }
@@ -249,12 +342,12 @@ public final class CLIClient: Sendable {
 
     public func deleteRule(id: Int64, config: ConfigStore) async -> (success: Bool, message: String) {
         do {
-            let (out, err) = try await runIngestCommand(args: ["rules", "delete", "\(id)"], config: config)
-            if out.contains("Deleted") {
-                return (true, out.trimmingCharacters(in: .whitespacesAndNewlines))
-            } else {
-                return (false, err.isEmpty ? out : err)
+            let (out, _) = try await runIngestCommand(args: ["rules", "--json", "delete", "\(id)"], config: config)
+            let response = try decodeRulesResponse(RuleDeleteResponse.self, output: out)
+            guard response.deleted else {
+                return (false, "symingest did not delete classification rule \(response.id)")
             }
+            return (true, "Deleted classification rule \(response.id).")
         } catch {
             return (false, error.localizedDescription)
         }
@@ -262,12 +355,9 @@ public final class CLIClient: Sendable {
 
     public func updateRule(id: Int64, pattern: String, kind: String, value: String, config: ConfigStore) async -> (success: Bool, message: String) {
         do {
-            let (out, err) = try await runIngestCommand(args: ["rules", "update", "\(id)", pattern, kind, value], config: config)
-            if out.contains("Updated") {
-                return (true, out.trimmingCharacters(in: .whitespacesAndNewlines))
-            } else {
-                return (false, err.isEmpty ? out : err)
-            }
+            let (out, _) = try await runIngestCommand(args: ["rules", "--json", "update", "\(id)", pattern, kind, value], config: config)
+            let response = try decodeRulesResponse(RuleResponse.self, output: out)
+            return (true, ruleMessage("Updated", rule: response.rule))
         } catch {
             return (false, error.localizedDescription)
         }
@@ -275,9 +365,9 @@ public final class CLIClient: Sendable {
 
     public func testRules(text: String, config: ConfigStore) async -> (success: Bool, message: String) {
         do {
-            let (out, err) = try await runIngestCommand(args: ["rules", "test", text], config: config)
-            let message = (err.isEmpty ? out : err).trimmingCharacters(in: .whitespacesAndNewlines)
-            return (err.isEmpty, message)
+            let (out, _) = try await runIngestCommand(args: ["rules", "--json", "test", text], config: config)
+            let response = try decodeRulesResponse(RuleTestResponse.self, output: out)
+            return (true, ruleMatchesMessage(response.matches))
         } catch {
             return (false, error.localizedDescription)
         }

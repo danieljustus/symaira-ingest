@@ -685,8 +685,8 @@ func TestRunRules_ListJSON(t *testing.T) {
 		t.Fatalf("run(rules list -json): %v", err)
 	}
 	out := strings.TrimSpace(sb.String())
-	if out != "[]" {
-		t.Errorf("expected '[]', got %q", out)
+	if !strings.Contains(out, `"schema_version": 1`) || !strings.Contains(out, `"rules": []`) {
+		t.Errorf("expected versioned empty rules envelope, got %q", out)
 	}
 }
 
@@ -697,8 +697,8 @@ func TestRunRules_TestJSON_NoMatch(t *testing.T) {
 		t.Fatalf("run(rules test -json): %v", err)
 	}
 	out := strings.TrimSpace(sb.String())
-	if out != "[]" {
-		t.Errorf("expected '[]', got %q", out)
+	if !strings.Contains(out, `"schema_version": 1`) || !strings.Contains(out, `"matches": []`) {
+		t.Errorf("expected versioned empty matches envelope, got %q", out)
 	}
 }
 
@@ -1330,8 +1330,8 @@ func TestRunRules_List_JSON_Empty(t *testing.T) {
 		t.Fatalf("rules list -json: %v", err)
 	}
 	out := strings.TrimSpace(sb.String())
-	if out != "[]" {
-		t.Errorf("expected '[]', got %q", out)
+	if !strings.Contains(out, `"schema_version": 1`) || !strings.Contains(out, `"rules": []`) {
+		t.Errorf("expected versioned empty rules envelope, got %q", out)
 	}
 }
 
