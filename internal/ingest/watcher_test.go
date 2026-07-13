@@ -116,18 +116,16 @@ func TestWatcher_MovesStableFileToProcessing(t *testing.T) {
 	}
 
 	processedPath := filepath.Join(processing, "doc.txt")
+	var jobs []*store.Job
 	waitFor(t, time.Second, func() bool {
-		_, err := os.Stat(processedPath)
-		return err == nil
+		var err error
+		jobs, err = s.ListJobs(ctx, 0)
+		return err == nil && len(jobs) == 1
 	})
 	if _, err := os.Stat(source); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("source should have moved out of inbox, stat err=%v", err)
 	}
 
-	jobs, err := s.ListJobs(ctx, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if len(jobs) != 1 || jobs[0].SourcePath != processedPath {
 		t.Fatalf("expected queued processing path %s, got %+v", processedPath, jobs)
 	}
