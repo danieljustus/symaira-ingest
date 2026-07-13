@@ -27,6 +27,8 @@ go install github.com/danieljustus/symaira-ingest/cmd/symingest@latest
 - Go 1.26.4+
 - `tesseract` (for OCR)
 - `pdftoppm` (for PDF rendering)
+- Poppler `pdfinfo`, `pdfseparate` and `pdfunite` (for PDF split/merge)
+- `qpdf` (optional; required for PDF page rotation)
 - `sips` on macOS for direct HEIC/HEIF OCR when Paperless has no archived PDF rendition
 
 ## Usage
@@ -75,6 +77,16 @@ symingest reocr /path/to/archived-original.pdf --json
 ```
 
 `reocr` reads the archived original, validates its SHA-256 against the document store, and updates the existing Markdown note in place. Machine-owned frontmatter is refreshed, while user-added frontmatter fields and the note path are preserved. The command returns a non-zero exit status with an explicit error when the original is missing, unregistered, or has changed. The same operation is available through the MCP tool `reocr` with either `document_id` or the registered archived `source` path.
+
+**Repair PDF page structure:**
+
+```bash
+symingest split --at 2,4 --output-dir ./parts scan.pdf
+symingest merge --output merged.pdf ./parts/part-001.pdf ./parts/part-002.pdf
+symingest rotate --degrees 90 --pages 1,3 --output rotated.pdf scan.pdf
+```
+
+`split` and `merge` use Poppler and never modify their inputs. `rotate` uses qpdf and is unavailable with an explicit error when qpdf is not installed. Add `--ingest` to any operation to pass the generated PDFs through the normal OCR/classification pipeline; originals remain untouched. The MCP tools `split_pdf`, `merge_pdf`, and `rotate_pdf` expose the same operations to agents.
 
 **Extract structured data from a file:**
 
