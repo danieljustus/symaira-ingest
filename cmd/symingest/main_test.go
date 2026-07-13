@@ -478,7 +478,7 @@ exit 0
 	if report.Status != doctorOK || report.Failures != 0 || report.Warnings != 0 {
 		t.Fatalf("doctor report = %+v", report)
 	}
-	for _, name := range []string{"tool.optional.textutil", "tool.optional.pandoc", "tool.optional.libreoffice", "tool.optional.soffice"} {
+	for _, name := range []string{"tool.optional.textutil", "tool.optional.pandoc", "tool.optional.libreoffice", "tool.optional.soffice", "tool.optional.pdfinfo", "tool.optional.pdfseparate", "tool.optional.pdfunite", "tool.optional.qpdf"} {
 		if !doctorReportHasCheck(report, name) {
 			t.Fatalf("doctor report missing optional converter check %q: %+v", name, report.Checks)
 		}

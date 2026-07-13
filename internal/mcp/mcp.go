@@ -18,6 +18,7 @@ import (
 	"github.com/danieljustus/symaira-ingest/internal/extract"
 	"github.com/danieljustus/symaira-ingest/internal/ingest"
 	"github.com/danieljustus/symaira-ingest/internal/paperlessimport"
+	"github.com/danieljustus/symaira-ingest/internal/pdfops"
 	"github.com/danieljustus/symaira-ingest/internal/store"
 	"github.com/danieljustus/symaira-ingest/internal/writer"
 )
@@ -581,6 +582,8 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 			return string(data), nil
 		},
 	})
+
+	registerPDFTools(server, st, engine, defaultVault, defaultArchive, pdfops.DefaultTools())
 }
 
 // StopAllWatchers cancels all active watchers and closes their resources.
