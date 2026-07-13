@@ -69,7 +69,14 @@ Total Due: $284.50
 [Archived Original](file:///.../archive/39f4280386fd5df04e0e06d7d7fa1c5a2aaaa54b643e92ae9c859c0c6f1117d6.txt)
 ```
 
-The same operation is available through the MCP tool `reocr` with either `document_id` or the registered archived `source` path.
+**Re-run OCR for an already-ingested document:**
+
+```bash
+symingest reocr --document-id 123 --lang deu+eng
+symingest reocr /path/to/archived-original.pdf --json
+```
+
+`reocr` reads the archived original, validates its SHA-256 against the document store, and updates the existing Markdown note in place. Machine-owned frontmatter is refreshed, while user-added frontmatter fields and the note path are preserved. The command returns a non-zero exit status with an explicit error when the original is missing, unregistered, or has changed. The same operation is available through the MCP tool `reocr` with either `document_id` or the registered archived `source` path.
 
 **Repair PDF page structure:**
 
