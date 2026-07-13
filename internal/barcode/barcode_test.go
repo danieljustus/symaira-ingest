@@ -55,7 +55,11 @@ func TestSeparateMissingDecoderFallsBackWithWarning(t *testing.T) {
 	if err := os.WriteFile(input, []byte("%PDF-1.4\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	result, err := (Options{SeparatorPrefix: "PATCHT", ZBarImg: filepath.Join(dir, "missing")}).Separate(context.Background(), input, filepath.Join(dir, "documents"))
+	result, err := (Options{
+		SeparatorPrefix: "PATCHT",
+		PDFToPPM:        writeExecutable(t, dir, "pdftoppm", "exit 0\n"),
+		ZBarImg:         filepath.Join(dir, "missing"),
+	}).Separate(context.Background(), input, filepath.Join(dir, "documents"))
 	if err != nil {
 		t.Fatal(err)
 	}
