@@ -3,6 +3,7 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,7 +18,9 @@ import (
 
 	"github.com/danieljustus/symaira-ingest/internal/extract"
 	"github.com/danieljustus/symaira-ingest/internal/ingest"
+	"github.com/danieljustus/symaira-ingest/internal/ocr"
 	"github.com/danieljustus/symaira-ingest/internal/paperlessimport"
+	"github.com/danieljustus/symaira-ingest/internal/pdfops"
 	"github.com/danieljustus/symaira-ingest/internal/store"
 	"github.com/danieljustus/symaira-ingest/internal/writer"
 )
@@ -183,6 +186,117 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 			})
 			if mErr != nil {
 				return nil, fmt.Errorf("marshal ingest result: %w", mErr)
+			}
+			return string(data), nil
+		},
+	})
+
+	server.RegisterTool(&mcpserver.Tool{
+		Name:        "reocr",
+		Description: "Re-run OCR and structured extraction for an already-ingested document, updating its existing Markdown note while preserving user-owned frontmatter fields.",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"document_id": {"type": "integer", "description": "Existing symingest document ID"},
+				"source": {"type": "string", "description": "Archived original path registered for an existing document"},
+				"vault_path": {"type": "string", "description": "Optional vault directory override"},
+				"lang": {"type": "string", "description": "Optional Tesseract language override, e.g. deu+eng"}
+			},
+			"anyOf": [
+				{"required": ["document_id"]},
+				{"required": ["source"]}
+			]
+		}`),
+		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
+			var args struct {
+				DocumentID *int64 `json:"document_id"`
+				Source     string `json:"source"`
+				VaultPath  string `json:"vault_path"`
+				Lang       string `json:"lang"`
+			}
+			if err := json.Unmarshal(input, &args); err != nil {
+				return nil, fmt.Errorf("invalid arguments: %w", err)
+			}
+			if (args.DocumentID == nil) == (strings.TrimSpace(args.Source) == "") {
+				return nil, fmt.Errorf("exactly one of document_id or source is required")
+			}
+			if args.DocumentID != nil && *args.DocumentID <= 0 {
+				return nil, fmt.Errorf("document_id must be positive")
+			}
+
+			vault, _, err := resolveVaultArchive(args.VaultPath, "", defaultVault, defaultArchive)
+			if err != nil {
+				return nil, err
+			}
+
+			var doc *store.Document
+			var source string
+			if args.DocumentID != nil {
+				doc, err = st.ByID(ctx, *args.DocumentID)
+				if errors.Is(err, sql.ErrNoRows) {
+					return nil, fmt.Errorf("document %d does not exist", *args.DocumentID)
+				}
+				if err != nil {
+					return nil, fmt.Errorf("look up document %d: %w", *args.DocumentID, err)
+				}
+			} else {
+				rawSource := strings.TrimSpace(args.Source)
+				source, err = filepath.Abs(rawSource)
+				if err != nil {
+					return nil, fmt.Errorf("invalid source path: %w", err)
+				}
+				doc, err = st.ByArchivePath(ctx, source)
+				if errors.Is(err, sql.ErrNoRows) && filepath.Clean(rawSource) != source {
+					source = filepath.Clean(rawSource)
+					doc, err = st.ByArchivePath(ctx, source)
+				}
+				if errors.Is(err, sql.ErrNoRows) {
+					return nil, fmt.Errorf("archived source path is not registered: %s", source)
+				}
+				if err != nil {
+					return nil, fmt.Errorf("look up archived source: %w", err)
+				}
+			}
+			if doc.ArchivePath == nil || *doc.ArchivePath == "" {
+				return nil, fmt.Errorf("document %d has no recorded archived source", doc.ID)
+			}
+			if source == "" {
+				source = *doc.ArchivePath
+			}
+
+			reocrEngine := engine
+			if strings.TrimSpace(args.Lang) != "" {
+				reocrEngine = ocr.DefaultRunner(strings.TrimSpace(args.Lang))
+			}
+			pipeline := &ingest.Pipeline{
+				Engine:     reocrEngine,
+				Store:      st,
+				Writer:     &writer.NoteWriter{Vault: vault},
+				ArchiveDir: defaultArchive,
+			}
+			result, err := pipeline.Reprocess(ctx, doc.ID, source, nil)
+			if err != nil {
+				return nil, err
+			}
+			status := "completed"
+			outputPath := ""
+			if result.AlreadyRunning {
+				status = "already_running"
+				if doc.VaultPath != nil {
+					outputPath = *doc.VaultPath
+				}
+			} else if result.Result != nil {
+				outputPath = result.Result.VaultPath
+			}
+			data, err := json.Marshal(map[string]any{
+				"schema_version": 1,
+				"status":         status,
+				"document_id":    doc.ID,
+				"job_id":         result.Job.ID,
+				"output_path":    outputPath,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("marshal reocr result: %w", err)
 			}
 			return string(data), nil
 		},
@@ -581,6 +695,8 @@ func Register(server *mcpserver.Server, st *store.Store, engine extract.Engine, 
 			return string(data), nil
 		},
 	})
+
+	registerPDFTools(server, st, engine, defaultVault, defaultArchive, pdfops.DefaultTools())
 }
 
 // StopAllWatchers cancels all active watchers and closes their resources.
