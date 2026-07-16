@@ -1018,11 +1018,14 @@ func TestMailPoller_PollLoopErrorLogging(t *testing.T) {
 	poller.Close()
 
 	output := logBuf.String()
-	if !strings.Contains(output, "initial poll error") {
-		t.Errorf("expected log to contain 'initial poll error', got: %s", output)
+	if !strings.Contains(output, "initial poll failed") {
+		t.Errorf("expected log to contain 'initial poll failed', got: %s", output)
 	}
-	if !strings.Contains(output, "poll error") {
-		t.Errorf("expected log to contain 'poll error', got: %s", output)
+	if !strings.Contains(output, "poll failed") {
+		t.Errorf("expected log to contain 'poll failed', got: %s", output)
+	}
+	if strings.Contains(output, "connection refused") {
+		t.Errorf("log must not contain the raw poll error, got: %s", output)
 	}
 }
 
