@@ -27,6 +27,7 @@ type imapClient interface {
 	Login(username, password string) error
 	Select(folder string) error
 	Search(criteria *imap.SearchCriteria) ([]uint32, error)
+	FetchEnvelopes(seqs []uint32) ([]*imapMessage, error)
 	Fetch(seqs []uint32) ([]*imapMessage, error)
 	StoreSeen(seq uint32) error
 	Move(seq uint32, dest string) error
@@ -62,6 +63,42 @@ func (c *realIMAPClient) Search(criteria *imap.SearchCriteria) ([]uint32, error)
 		return nil, err
 	}
 	return searchData.AllSeqNums(), nil
+}
+
+func (c *realIMAPClient) FetchEnvelopes(seqs []uint32) ([]*imapMessage, error) {
+	if len(seqs) == 0 {
+		return nil, nil
+	}
+	seqSet := imap.SeqSetNum(seqs...)
+	fetchOptions := &imap.FetchOptions{
+		Envelope: true,
+	}
+	fetchCmd := c.Client.Fetch(seqSet, fetchOptions)
+	defer fetchCmd.Close()
+
+	var results []*imapMessage
+	for {
+		msg := fetchCmd.Next()
+		if msg == nil {
+			break
+		}
+		msgBuf, err := msg.Collect()
+		if err != nil {
+			log.Printf("[MailPoller] Failed to collect envelope: %v", err)
+			continue
+		}
+		var env *imapEnvelope
+		if msgBuf.Envelope != nil {
+			env = &imapEnvelope{
+				MessageID: msgBuf.Envelope.MessageID,
+			}
+		}
+		results = append(results, &imapMessage{
+			SeqNum:   msgBuf.SeqNum,
+			Envelope: env,
+		})
+	}
+	return results, fetchCmd.Close()
 }
 
 func (c *realIMAPClient) Fetch(seqs []uint32) ([]*imapMessage, error) {
@@ -266,10 +303,34 @@ func (m *MailPoller) pollAccount(ctx context.Context, acc config.IMAPAccount) er
 	}
 
 	if len(seqs) == 0 {
-		return nil // No new messages
+		return nil
 	}
 
-	messages, err := client.Fetch(seqs)
+	envelopes, err := client.FetchEnvelopes(seqs)
+	if err != nil {
+		return fmt.Errorf("fetch envelopes: %w", err)
+	}
+
+	var newSeqs []uint32
+	for _, env := range envelopes {
+		if env.Envelope == nil || env.Envelope.MessageID == "" {
+			newSeqs = append(newSeqs, env.SeqNum)
+			continue
+		}
+		has, err := m.store.HasMailMessage(ctx, env.Envelope.MessageID)
+		if err != nil {
+			return fmt.Errorf("check idempotency: %w", err)
+		}
+		if !has {
+			newSeqs = append(newSeqs, env.SeqNum)
+		}
+	}
+
+	if len(newSeqs) == 0 {
+		return nil
+	}
+
+	messages, err := client.Fetch(newSeqs)
 	if err != nil {
 		return fmt.Errorf("fetch: %w", err)
 	}

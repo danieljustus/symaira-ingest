@@ -24,6 +24,8 @@ type fakeIMAPClient struct {
 	selectErr    error
 	searchRes    []uint32
 	searchErr    error
+	fetchEnvelopesRes []*imapMessage
+	fetchEnvelopesErr error
 	fetchRes     []*imapMessage
 	fetchErr     error
 	storeSeenErr error
@@ -51,6 +53,10 @@ func (f *fakeIMAPClient) Select(folder string) error {
 
 func (f *fakeIMAPClient) Search(criteria *imap.SearchCriteria) ([]uint32, error) {
 	return f.searchRes, f.searchErr
+}
+
+func (f *fakeIMAPClient) FetchEnvelopes(seqs []uint32) ([]*imapMessage, error) {
+	return f.fetchEnvelopesRes, f.fetchEnvelopesErr
 }
 
 func (f *fakeIMAPClient) Fetch(seqs []uint32) ([]*imapMessage, error) {
@@ -131,6 +137,14 @@ func TestMailPoller_Success(t *testing.T) {
 
 	fakeClient := &fakeIMAPClient{
 		searchRes: []uint32{42},
+		fetchEnvelopesRes: []*imapMessage{
+			{
+				SeqNum: 42,
+				Envelope: &imapEnvelope{
+					MessageID: "test-msg-id-123@example.com",
+				},
+			},
+		},
 		fetchRes: []*imapMessage{
 			{
 				SeqNum: 42,
@@ -236,6 +250,14 @@ func TestMailPoller_Idempotency(t *testing.T) {
 
 	fakeClient := &fakeIMAPClient{
 		searchRes: []uint32{42},
+		fetchEnvelopesRes: []*imapMessage{
+			{
+				SeqNum: 42,
+				Envelope: &imapEnvelope{
+					MessageID: "dup@example.com",
+				},
+			},
+		},
 		fetchRes: []*imapMessage{
 			{
 				SeqNum: 42,
@@ -252,16 +274,13 @@ func TestMailPoller_Idempotency(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	// Poll once
 	err = poller.pollAccount(ctx, acc)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Reset mock counters
 	fakeClient.storedSeenSeqs = nil
 
-	// Poll second time
 	err = poller.pollAccount(ctx, acc)
 	if err != nil {
 		t.Fatal(err)
@@ -396,6 +415,14 @@ func TestMailPoller_MoveAction(t *testing.T) {
 
 	fakeClient := &fakeIMAPClient{
 		searchRes: []uint32{99},
+		fetchEnvelopesRes: []*imapMessage{
+			{
+				SeqNum: 99,
+				Envelope: &imapEnvelope{
+					MessageID: "move-test@example.com",
+				},
+			},
+		},
 		fetchRes: []*imapMessage{
 			{
 				SeqNum: 99,
@@ -633,7 +660,15 @@ func TestMailPoller_FetchFailure(t *testing.T) {
 
 	fakeClient := &fakeIMAPClient{
 		searchRes: []uint32{1},
-		fetchErr:  errors.New("fetch failed"),
+		fetchEnvelopesRes: []*imapMessage{
+			{
+				SeqNum: 1,
+				Envelope: &imapEnvelope{
+					MessageID: "fetch-err@example.com",
+				},
+			},
+		},
+		fetchErr: errors.New("fetch failed"),
 	}
 	poller.dialIMAP = func(ctx context.Context, addr, host string) (imapClient, error) {
 		return fakeClient, nil
@@ -1239,7 +1274,15 @@ func TestMailPoller_PollAccount_ProcessMessageError(t *testing.T) {
 
 	fakeClient := &fakeIMAPClient{
 		searchRes: []uint32{1},
-		fetchRes:  []*imapMessage{msgWithEmptyBody},
+		fetchEnvelopesRes: []*imapMessage{
+			{
+				SeqNum: 1,
+				Envelope: &imapEnvelope{
+					MessageID: "empty-body@example.com",
+				},
+			},
+		},
+		fetchRes: []*imapMessage{msgWithEmptyBody},
 	}
 	poller.dialIMAP = func(ctx context.Context, addr, host string) (imapClient, error) {
 		return fakeClient, nil
@@ -1330,5 +1373,83 @@ func TestMailPoller_ProcessMessage_SaveFileError(t *testing.T) {
 	}
 	if has {
 		t.Error("expected message NOT to be tracked after save failure")
+	}
+}
+
+func TestMailPoller_RePollNoBodyFetch(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	processingDir := filepath.Join(dir, "processing")
+	_ = os.MkdirAll(processingDir, 0700)
+
+	acc := config.IMAPAccount{
+		Username:       "test@example.com",
+		PasswordSecret: "myplaintextpw",
+		Host:           "imap.example.com",
+		Port:           993,
+		Action:         "mark_seen",
+	}
+
+	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{
+		ProcessingDir: processingDir,
+	})
+
+ envelopes := []*imapMessage{
+		{
+			SeqNum: 1,
+			Envelope: &imapEnvelope{
+				MessageID: "repoll@example.com",
+			},
+		},
+	}
+	fullMessages := []*imapMessage{
+		{
+			SeqNum: 1,
+			Envelope: &imapEnvelope{
+				MessageID: "repoll@example.com",
+			},
+			Body: createFakeEmail("repoll@example.com", "sender@example.com", "invoice.txt", "Data"),
+		},
+	}
+
+	fakeClient := &fakeIMAPClient{
+		searchRes:         []uint32{1},
+		fetchEnvelopesRes: envelopes,
+		fetchRes:          fullMessages,
+	}
+
+	poller.dialIMAP = func(ctx context.Context, addr, host string) (imapClient, error) {
+		return fakeClient, nil
+	}
+
+	ctx := context.Background()
+
+	err = poller.pollAccount(ctx, acc)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	has, err := s.HasMailMessage(ctx, "repoll@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has {
+		t.Fatal("expected message to be tracked after first poll")
+	}
+
+	fakeClient.fetchRes = nil
+
+	err = poller.pollAccount(ctx, acc)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if fakeClient.fetchRes != nil {
+		t.Error("expected Fetch to NOT be called on re-poll of already-processed message")
 	}
 }
