@@ -166,7 +166,7 @@ move_to         = "Processed"                   # required when action = "move"
 archive_mail    = false                         # also ingest the .eml message body itself
 ```
 
-Each matching attachment is ingested through the normal pipeline (OCR, extraction, classification) exactly like a file dropped into the watched inbox, and appears in `symingest jobs` with the same retry semantics as filesystem-sourced jobs. Messages are tracked by Message-ID, so a mailbox is never re-ingested on the next poll. `password_secret` supports the same secret backends as other credentials in symingest (`symvault://`, `env://`, `keychain://`, or a plaintext fallback) — see `internal/secret` for resolution order. Connection or authentication failures for an account are recorded as failed jobs, retryable via `symingest retry`, and surfaced by `symingest doctor`.
+Each matching attachment is ingested through the normal pipeline (OCR, extraction, classification) exactly like a file dropped into the watched inbox, and appears in `symingest jobs` with the same retry semantics as filesystem-sourced jobs. Messages are tracked by Message-ID, so a mailbox is never re-ingested on the next poll. `password_secret` supports the same secret backends as other credentials in symingest (`symvault://`, `env://`, `keychain://`, or a plaintext fallback) — see `internal/secret` for resolution order. Connection or authentication failures for an account are surfaced by `symingest doctor` and logged on each poll attempt.
 
 **Manage classification rules:**
 

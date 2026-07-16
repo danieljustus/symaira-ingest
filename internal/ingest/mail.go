@@ -348,8 +348,7 @@ func (m *MailPoller) processMessage(ctx context.Context, acc config.IMAPAccount,
 				continue
 			}
 			if err := m.saveStream(outPath, p.Body); err != nil {
-				log.Printf("[MailPoller] Failed to save attachment: %v", err)
-				continue
+				return fmt.Errorf("save attachment %s: %w", filename, err)
 			}
 			attachments = append(attachments, outPath)
 		}
@@ -360,7 +359,7 @@ func (m *MailPoller) processMessage(ctx context.Context, acc config.IMAPAccount,
 	} else {
 		for _, attPath := range attachments {
 			if err := m.enqueueFile(ctx, attPath, msgID, correspondent); err != nil {
-				log.Printf("[MailPoller] Failed to enqueue attachment %s: %v", attPath, err)
+				return fmt.Errorf("enqueue attachment %s: %w", attPath, err)
 			}
 		}
 	}

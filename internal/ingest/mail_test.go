@@ -1112,14 +1112,14 @@ func TestMailPoller_ProcessMessage_EmptyAttachmentFilename(t *testing.T) {
 	acc := config.IMAPAccount{Action: "mark_seen"}
 
 	err = poller.processMessage(context.Background(), acc, fakeClient, msg)
-	if err != nil {
-		t.Fatalf("expected no error, got: %v", err)
-	}
 
-	// The file should be saved with the default name "attachment.bin".
 	expectedFile := filepath.Join(processingDir, "empty-fn@example.com-attachment.bin")
 	if _, err := os.Stat(expectedFile); os.IsNotExist(err) {
 		t.Errorf("expected file %s to exist (empty filename defaults to attachment.bin)", expectedFile)
+	}
+
+	if err != nil && !strings.Contains(err.Error(), "enqueue attachment") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -1173,13 +1173,28 @@ func TestMailPoller_ProcessMessage_EnqueueFileError(t *testing.T) {
 	defer log.SetOutput(os.Stderr)
 
 	err = poller.processMessage(context.Background(), acc, fakeClient, msg)
-	if err != nil {
-		t.Fatalf("expected no error (enqueueFile errors are logged), got: %v", err)
+	if err == nil {
+		t.Fatal("expected error from enqueue failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "enqueue attachment") {
+		t.Errorf("expected error to contain 'enqueue attachment', got: %v", err)
 	}
 
-	output := logBuf.String()
-	if !strings.Contains(output, "Failed to enqueue attachment") {
-		t.Errorf("expected log to contain 'Failed to enqueue attachment', got: %s", output)
+	// Verify IMAP action was NOT applied (no StoreSeen/Move calls)
+	if fakeClient.storedSeenSeqs != nil {
+		t.Error("expected no StoreSeen call after enqueue failure")
+	}
+	if fakeClient.movedSeqs != nil {
+		t.Error("expected no Move call after enqueue failure")
+	}
+
+	// Verify message was NOT tracked
+	has, err := s.HasMailMessage(context.Background(), "enqueue-err@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if has {
+		t.Error("expected message NOT to be tracked after enqueue failure")
 	}
 }
 
@@ -1236,5 +1251,78 @@ func TestMailPoller_PollAccount_ProcessMessageError(t *testing.T) {
 	output := logBuf.String()
 	if !strings.Contains(output, "Failed to process message") {
 		t.Errorf("expected log to contain 'Failed to process message', got: %s", output)
+	}
+}
+
+func TestMailPoller_ProcessMessage_SaveFileError(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	processingDir := filepath.Join(dir, "processing")
+	if err := os.MkdirAll(processingDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	poller, err := NewMailPoller(s, nil, MailPollerOptions{ProcessingDir: processingDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a file in the processing dir to trigger O_EXCL conflict
+	conflictPath := filepath.Join(processingDir, "save-err@example.com-data.bin")
+	if err := os.WriteFile(conflictPath, []byte("existing"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	var emailBuf bytes.Buffer
+	emailBuf.WriteString("MIME-Version: 1.0\r\n")
+	emailBuf.WriteString("Message-ID: <save-err@example.com>\r\n")
+	emailBuf.WriteString("From: sender@example.com\r\n")
+	emailBuf.WriteString("Content-Type: multipart/mixed; boundary=boundary\r\n\r\n")
+	emailBuf.WriteString("--boundary\r\n")
+	emailBuf.WriteString("Content-Type: text/plain; charset=utf-8\r\n\r\n")
+	emailBuf.WriteString("Body text.\r\n")
+	emailBuf.WriteString("--boundary\r\n")
+	emailBuf.WriteString("Content-Type: application/octet-stream; name=\"data.bin\"\r\n")
+	emailBuf.WriteString("Content-Disposition: attachment; filename=\"data.bin\"\r\n\r\n")
+	emailBuf.WriteString("some data\r\n")
+	emailBuf.WriteString("--boundary--\r\n")
+
+	msg := &imapMessage{
+		SeqNum: 1,
+		Envelope: &imapEnvelope{
+			MessageID: "save-err@example.com",
+		},
+		Body: emailBuf.Bytes(),
+	}
+
+	fakeClient := &fakeIMAPClient{}
+	acc := config.IMAPAccount{}
+
+	err = poller.processMessage(context.Background(), acc, fakeClient, msg)
+	if err == nil {
+		t.Fatal("expected error from save failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "save attachment") {
+		t.Errorf("expected error to contain 'save attachment', got: %v", err)
+	}
+
+	if fakeClient.storedSeenSeqs != nil {
+		t.Error("expected no StoreSeen call after save failure")
+	}
+	if fakeClient.movedSeqs != nil {
+		t.Error("expected no Move call after save failure")
+	}
+
+	has, err := s.HasMailMessage(context.Background(), "save-err@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if has {
+		t.Error("expected message NOT to be tracked after save failure")
 	}
 }
