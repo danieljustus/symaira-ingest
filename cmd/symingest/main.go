@@ -2162,7 +2162,8 @@ func runWatch(args []string) error {
 	if len(cfg.raw.IMAPAccounts) > 0 {
 		pollInterval, err := time.ParseDuration(cfg.raw.IMAPPollInterval)
 		if err != nil {
-			pollInterval = 5 * time.Minute
+			return exitcodes.Wrapf(nil, exitcodes.ExitConfig, exitcodes.KindConfig,
+				"imap_poll_interval: invalid duration %q", cfg.raw.IMAPPollInterval)
 		}
 		mailPoller, err = ingest.NewMailPoller(st, cfg.raw.IMAPAccounts, ingest.MailPollerOptions{
 			Interval:      pollInterval,

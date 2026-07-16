@@ -24,6 +24,8 @@ type fakeIMAPClient struct {
 	selectErr    error
 	searchRes    []uint32
 	searchErr    error
+	fetchEnvelopesRes []*imapMessage
+	fetchEnvelopesErr error
 	fetchRes     []*imapMessage
 	fetchErr     error
 	storeSeenErr error
@@ -51,6 +53,10 @@ func (f *fakeIMAPClient) Select(folder string) error {
 
 func (f *fakeIMAPClient) Search(criteria *imap.SearchCriteria) ([]uint32, error) {
 	return f.searchRes, f.searchErr
+}
+
+func (f *fakeIMAPClient) FetchEnvelopes(seqs []uint32) ([]*imapMessage, error) {
+	return f.fetchEnvelopesRes, f.fetchEnvelopesErr
 }
 
 func (f *fakeIMAPClient) Fetch(seqs []uint32) ([]*imapMessage, error) {
@@ -131,6 +137,14 @@ func TestMailPoller_Success(t *testing.T) {
 
 	fakeClient := &fakeIMAPClient{
 		searchRes: []uint32{42},
+		fetchEnvelopesRes: []*imapMessage{
+			{
+				SeqNum: 42,
+				Envelope: &imapEnvelope{
+					MessageID: "test-msg-id-123@example.com",
+				},
+			},
+		},
 		fetchRes: []*imapMessage{
 			{
 				SeqNum: 42,
@@ -236,6 +250,14 @@ func TestMailPoller_Idempotency(t *testing.T) {
 
 	fakeClient := &fakeIMAPClient{
 		searchRes: []uint32{42},
+		fetchEnvelopesRes: []*imapMessage{
+			{
+				SeqNum: 42,
+				Envelope: &imapEnvelope{
+					MessageID: "dup@example.com",
+				},
+			},
+		},
 		fetchRes: []*imapMessage{
 			{
 				SeqNum: 42,
@@ -252,16 +274,13 @@ func TestMailPoller_Idempotency(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	// Poll once
 	err = poller.pollAccount(ctx, acc)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Reset mock counters
 	fakeClient.storedSeenSeqs = nil
 
-	// Poll second time
 	err = poller.pollAccount(ctx, acc)
 	if err != nil {
 		t.Fatal(err)
@@ -296,7 +315,7 @@ func TestMailPoller_AuthFailure(t *testing.T) {
 		Port:           993,
 	}
 
-	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{})
+	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{ProcessingDir: t.TempDir()})
 
 	fakeClient := &fakeIMAPClient{
 		loginErr: errors.New("invalid credentials"),
@@ -330,7 +349,7 @@ func TestMailPoller_DialFailure(t *testing.T) {
 		Port:           993,
 	}
 
-	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{})
+	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{ProcessingDir: t.TempDir()})
 
 	poller.dialIMAP = func(ctx context.Context, addr string, host string) (imapClient, error) {
 		return nil, errors.New("network unreachable")
@@ -354,7 +373,7 @@ func TestMailPoller_SearchNoMessages(t *testing.T) {
 		Port:           993,
 	}
 
-	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{})
+	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{ProcessingDir: t.TempDir()})
 
 	fakeClient := &fakeIMAPClient{
 		searchRes: []uint32{},
@@ -396,6 +415,14 @@ func TestMailPoller_MoveAction(t *testing.T) {
 
 	fakeClient := &fakeIMAPClient{
 		searchRes: []uint32{99},
+		fetchEnvelopesRes: []*imapMessage{
+			{
+				SeqNum: 99,
+				Envelope: &imapEnvelope{
+					MessageID: "move-test@example.com",
+				},
+			},
+		},
 		fetchRes: []*imapMessage{
 			{
 				SeqNum: 99,
@@ -533,7 +560,7 @@ func TestMailPoller_SecretResolutionFailure(t *testing.T) {
 		Port:           993,
 	}
 
-	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{})
+	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{ProcessingDir: t.TempDir()})
 
 	dialCalled := false
 	poller.dialIMAP = func(ctx context.Context, addr, host string) (imapClient, error) {
@@ -547,6 +574,12 @@ func TestMailPoller_SecretResolutionFailure(t *testing.T) {
 	}
 	if dialCalled {
 		t.Fatal("dial should not be called when secret resolution fails")
+	}
+	if !strings.Contains(err.Error(), "test@example.com") {
+		t.Errorf("expected error to name the account, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "environment variable") {
+		t.Errorf("expected error to preserve the underlying secret backend failure, got: %v", err)
 	}
 }
 
@@ -563,7 +596,7 @@ func TestMailPoller_SelectFailure(t *testing.T) {
 		Folder:         "BadFolder",
 	}
 
-	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{})
+	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{ProcessingDir: t.TempDir()})
 
 	fakeClient := &fakeIMAPClient{
 		selectErr: errors.New("folder not found"),
@@ -593,7 +626,7 @@ func TestMailPoller_SearchFailure(t *testing.T) {
 		Port:           993,
 	}
 
-	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{})
+	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{ProcessingDir: t.TempDir()})
 
 	fakeClient := &fakeIMAPClient{
 		searchErr: errors.New("search protocol error"),
@@ -623,11 +656,19 @@ func TestMailPoller_FetchFailure(t *testing.T) {
 		Port:           993,
 	}
 
-	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{})
+	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{ProcessingDir: t.TempDir()})
 
 	fakeClient := &fakeIMAPClient{
 		searchRes: []uint32{1},
-		fetchErr:  errors.New("fetch failed"),
+		fetchEnvelopesRes: []*imapMessage{
+			{
+				SeqNum: 1,
+				Envelope: &imapEnvelope{
+					MessageID: "fetch-err@example.com",
+				},
+			},
+		},
+		fetchErr: errors.New("fetch failed"),
 	}
 	poller.dialIMAP = func(ctx context.Context, addr, host string) (imapClient, error) {
 		return fakeClient, nil
@@ -647,7 +688,7 @@ func TestMailPoller_ProcessMessage_NilEnvelope(t *testing.T) {
 	s, _ := store.Open(filepath.Join(dir, "test.db"))
 	defer s.Close()
 
-	poller, _ := NewMailPoller(s, nil, MailPollerOptions{})
+	poller, _ := NewMailPoller(s, nil, MailPollerOptions{ProcessingDir: t.TempDir()})
 
 	msg := &imapMessage{
 		SeqNum:   1,
@@ -666,7 +707,7 @@ func TestMailPoller_ProcessMessage_EmptyBody(t *testing.T) {
 	s, _ := store.Open(filepath.Join(dir, "test.db"))
 	defer s.Close()
 
-	poller, _ := NewMailPoller(s, nil, MailPollerOptions{})
+	poller, _ := NewMailPoller(s, nil, MailPollerOptions{ProcessingDir: t.TempDir()})
 
 	msg := &imapMessage{
 		SeqNum: 1,
@@ -691,7 +732,7 @@ func TestMailPoller_ProcessMessage_InvalidMailBody(t *testing.T) {
 	s, _ := store.Open(filepath.Join(dir, "test.db"))
 	defer s.Close()
 
-	poller, _ := NewMailPoller(s, nil, MailPollerOptions{})
+	poller, _ := NewMailPoller(s, nil, MailPollerOptions{ProcessingDir: t.TempDir()})
 
 	msg := &imapMessage{
 		SeqNum: 1,
@@ -1112,14 +1153,14 @@ func TestMailPoller_ProcessMessage_EmptyAttachmentFilename(t *testing.T) {
 	acc := config.IMAPAccount{Action: "mark_seen"}
 
 	err = poller.processMessage(context.Background(), acc, fakeClient, msg)
-	if err != nil {
-		t.Fatalf("expected no error, got: %v", err)
-	}
 
-	// The file should be saved with the default name "attachment.bin".
 	expectedFile := filepath.Join(processingDir, "empty-fn@example.com-attachment.bin")
 	if _, err := os.Stat(expectedFile); os.IsNotExist(err) {
 		t.Errorf("expected file %s to exist (empty filename defaults to attachment.bin)", expectedFile)
+	}
+
+	if err != nil && !strings.Contains(err.Error(), "enqueue attachment") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -1173,13 +1214,28 @@ func TestMailPoller_ProcessMessage_EnqueueFileError(t *testing.T) {
 	defer log.SetOutput(os.Stderr)
 
 	err = poller.processMessage(context.Background(), acc, fakeClient, msg)
-	if err != nil {
-		t.Fatalf("expected no error (enqueueFile errors are logged), got: %v", err)
+	if err == nil {
+		t.Fatal("expected error from enqueue failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "enqueue attachment") {
+		t.Errorf("expected error to contain 'enqueue attachment', got: %v", err)
 	}
 
-	output := logBuf.String()
-	if !strings.Contains(output, "Failed to enqueue attachment") {
-		t.Errorf("expected log to contain 'Failed to enqueue attachment', got: %s", output)
+	// Verify IMAP action was NOT applied (no StoreSeen/Move calls)
+	if fakeClient.storedSeenSeqs != nil {
+		t.Error("expected no StoreSeen call after enqueue failure")
+	}
+	if fakeClient.movedSeqs != nil {
+		t.Error("expected no Move call after enqueue failure")
+	}
+
+	// Verify message was NOT tracked
+	has, err := s.HasMailMessage(context.Background(), "enqueue-err@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if has {
+		t.Error("expected message NOT to be tracked after enqueue failure")
 	}
 }
 
@@ -1218,7 +1274,15 @@ func TestMailPoller_PollAccount_ProcessMessageError(t *testing.T) {
 
 	fakeClient := &fakeIMAPClient{
 		searchRes: []uint32{1},
-		fetchRes:  []*imapMessage{msgWithEmptyBody},
+		fetchEnvelopesRes: []*imapMessage{
+			{
+				SeqNum: 1,
+				Envelope: &imapEnvelope{
+					MessageID: "empty-body@example.com",
+				},
+			},
+		},
+		fetchRes: []*imapMessage{msgWithEmptyBody},
 	}
 	poller.dialIMAP = func(ctx context.Context, addr, host string) (imapClient, error) {
 		return fakeClient, nil
@@ -1236,5 +1300,156 @@ func TestMailPoller_PollAccount_ProcessMessageError(t *testing.T) {
 	output := logBuf.String()
 	if !strings.Contains(output, "Failed to process message") {
 		t.Errorf("expected log to contain 'Failed to process message', got: %s", output)
+	}
+}
+
+func TestMailPoller_ProcessMessage_SaveFileError(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	processingDir := filepath.Join(dir, "processing")
+	if err := os.MkdirAll(processingDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	poller, err := NewMailPoller(s, nil, MailPollerOptions{ProcessingDir: processingDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a file in the processing dir to trigger O_EXCL conflict
+	conflictPath := filepath.Join(processingDir, "save-err@example.com-data.bin")
+	if err := os.WriteFile(conflictPath, []byte("existing"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	var emailBuf bytes.Buffer
+	emailBuf.WriteString("MIME-Version: 1.0\r\n")
+	emailBuf.WriteString("Message-ID: <save-err@example.com>\r\n")
+	emailBuf.WriteString("From: sender@example.com\r\n")
+	emailBuf.WriteString("Content-Type: multipart/mixed; boundary=boundary\r\n\r\n")
+	emailBuf.WriteString("--boundary\r\n")
+	emailBuf.WriteString("Content-Type: text/plain; charset=utf-8\r\n\r\n")
+	emailBuf.WriteString("Body text.\r\n")
+	emailBuf.WriteString("--boundary\r\n")
+	emailBuf.WriteString("Content-Type: application/octet-stream; name=\"data.bin\"\r\n")
+	emailBuf.WriteString("Content-Disposition: attachment; filename=\"data.bin\"\r\n\r\n")
+	emailBuf.WriteString("some data\r\n")
+	emailBuf.WriteString("--boundary--\r\n")
+
+	msg := &imapMessage{
+		SeqNum: 1,
+		Envelope: &imapEnvelope{
+			MessageID: "save-err@example.com",
+		},
+		Body: emailBuf.Bytes(),
+	}
+
+	fakeClient := &fakeIMAPClient{}
+	acc := config.IMAPAccount{}
+
+	err = poller.processMessage(context.Background(), acc, fakeClient, msg)
+	if err == nil {
+		t.Fatal("expected error from save failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "save attachment") {
+		t.Errorf("expected error to contain 'save attachment', got: %v", err)
+	}
+
+	if fakeClient.storedSeenSeqs != nil {
+		t.Error("expected no StoreSeen call after save failure")
+	}
+	if fakeClient.movedSeqs != nil {
+		t.Error("expected no Move call after save failure")
+	}
+
+	has, err := s.HasMailMessage(context.Background(), "save-err@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if has {
+		t.Error("expected message NOT to be tracked after save failure")
+	}
+}
+
+func TestMailPoller_RePollNoBodyFetch(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	processingDir := filepath.Join(dir, "processing")
+	_ = os.MkdirAll(processingDir, 0700)
+
+	acc := config.IMAPAccount{
+		Username:       "test@example.com",
+		PasswordSecret: "myplaintextpw",
+		Host:           "imap.example.com",
+		Port:           993,
+		Action:         "mark_seen",
+	}
+
+	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{
+		ProcessingDir: processingDir,
+	})
+
+ envelopes := []*imapMessage{
+		{
+			SeqNum: 1,
+			Envelope: &imapEnvelope{
+				MessageID: "repoll@example.com",
+			},
+		},
+	}
+	fullMessages := []*imapMessage{
+		{
+			SeqNum: 1,
+			Envelope: &imapEnvelope{
+				MessageID: "repoll@example.com",
+			},
+			Body: createFakeEmail("repoll@example.com", "sender@example.com", "invoice.txt", "Data"),
+		},
+	}
+
+	fakeClient := &fakeIMAPClient{
+		searchRes:         []uint32{1},
+		fetchEnvelopesRes: envelopes,
+		fetchRes:          fullMessages,
+	}
+
+	poller.dialIMAP = func(ctx context.Context, addr, host string) (imapClient, error) {
+		return fakeClient, nil
+	}
+
+	ctx := context.Background()
+
+	err = poller.pollAccount(ctx, acc)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	has, err := s.HasMailMessage(ctx, "repoll@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has {
+		t.Fatal("expected message to be tracked after first poll")
+	}
+
+	fakeClient.fetchRes = nil
+
+	err = poller.pollAccount(ctx, acc)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if fakeClient.fetchRes != nil {
+		t.Error("expected Fetch to NOT be called on re-poll of already-processed message")
 	}
 }

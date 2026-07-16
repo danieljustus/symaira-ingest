@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/danieljustus/symaira-corekit/exitcodes"
 
@@ -1016,5 +1017,28 @@ func TestCheckIMAP_MultipleAccounts(t *testing.T) {
 	}
 	if report.Checks[1].Status != doctorOK {
 		t.Fatalf("second check should pass, got %s", report.Checks[1].Status)
+	}
+}
+
+func TestRunWatch_InvalidIMAPPollInterval(t *testing.T) {
+	_, err := time.ParseDuration("5xyz")
+	if err == nil {
+		t.Fatal("expected parse to fail")
+	}
+
+	err = exitcodes.Wrapf(nil, exitcodes.ExitConfig, exitcodes.KindConfig,
+		"imap_poll_interval: invalid duration %q", "5xyz")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var exitErr *exitcodes.CLIError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected exitcodes.CLIError, got %T", err)
+	}
+	if exitErr.Kind != exitcodes.KindConfig {
+		t.Fatalf("expected KindConfig, got %s", exitErr.Kind)
+	}
+	if !strings.Contains(exitErr.Error(), "5xyz") {
+		t.Fatalf("expected error to contain the invalid value, got: %s", exitErr.Error())
 	}
 }

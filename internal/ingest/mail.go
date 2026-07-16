@@ -27,6 +27,7 @@ type imapClient interface {
 	Login(username, password string) error
 	Select(folder string) error
 	Search(criteria *imap.SearchCriteria) ([]uint32, error)
+	FetchEnvelopes(seqs []uint32) ([]*imapMessage, error)
 	Fetch(seqs []uint32) ([]*imapMessage, error)
 	StoreSeen(seq uint32) error
 	Move(seq uint32, dest string) error
@@ -62,6 +63,42 @@ func (c *realIMAPClient) Search(criteria *imap.SearchCriteria) ([]uint32, error)
 		return nil, err
 	}
 	return searchData.AllSeqNums(), nil
+}
+
+func (c *realIMAPClient) FetchEnvelopes(seqs []uint32) ([]*imapMessage, error) {
+	if len(seqs) == 0 {
+		return nil, nil
+	}
+	seqSet := imap.SeqSetNum(seqs...)
+	fetchOptions := &imap.FetchOptions{
+		Envelope: true,
+	}
+	fetchCmd := c.Client.Fetch(seqSet, fetchOptions)
+	defer fetchCmd.Close()
+
+	var results []*imapMessage
+	for {
+		msg := fetchCmd.Next()
+		if msg == nil {
+			break
+		}
+		msgBuf, err := msg.Collect()
+		if err != nil {
+			log.Printf("[MailPoller] Failed to collect envelope: %v", err)
+			continue
+		}
+		var env *imapEnvelope
+		if msgBuf.Envelope != nil {
+			env = &imapEnvelope{
+				MessageID: msgBuf.Envelope.MessageID,
+			}
+		}
+		results = append(results, &imapMessage{
+			SeqNum:   msgBuf.SeqNum,
+			Envelope: env,
+		})
+	}
+	return results, fetchCmd.Close()
 }
 
 func (c *realIMAPClient) Fetch(seqs []uint32) ([]*imapMessage, error) {
@@ -233,7 +270,7 @@ func (m *MailPoller) pollLoop(ctx context.Context, acc config.IMAPAccount, index
 func (m *MailPoller) pollAccount(ctx context.Context, acc config.IMAPAccount) error {
 	pwd, err := secret.Resolve(ctx, acc.PasswordSecret)
 	if err != nil {
-		return fmt.Errorf("resolve password failed")
+		return fmt.Errorf("resolve password_secret for %s: %w", acc.Username, err)
 	}
 
 	addr := fmt.Sprintf("%s:%d", acc.Host, acc.Port)
@@ -266,10 +303,34 @@ func (m *MailPoller) pollAccount(ctx context.Context, acc config.IMAPAccount) er
 	}
 
 	if len(seqs) == 0 {
-		return nil // No new messages
+		return nil
 	}
 
-	messages, err := client.Fetch(seqs)
+	envelopes, err := client.FetchEnvelopes(seqs)
+	if err != nil {
+		return fmt.Errorf("fetch envelopes: %w", err)
+	}
+
+	var newSeqs []uint32
+	for _, env := range envelopes {
+		if env.Envelope == nil || env.Envelope.MessageID == "" {
+			newSeqs = append(newSeqs, env.SeqNum)
+			continue
+		}
+		has, err := m.store.HasMailMessage(ctx, env.Envelope.MessageID)
+		if err != nil {
+			return fmt.Errorf("check idempotency: %w", err)
+		}
+		if !has {
+			newSeqs = append(newSeqs, env.SeqNum)
+		}
+	}
+
+	if len(newSeqs) == 0 {
+		return nil
+	}
+
+	messages, err := client.Fetch(newSeqs)
 	if err != nil {
 		return fmt.Errorf("fetch: %w", err)
 	}
@@ -332,16 +393,23 @@ func (m *MailPoller) processMessage(ctx context.Context, acc config.IMAPAccount,
 
 		switch h := p.Header.(type) {
 		case *mail.AttachmentHeader:
+			if m.processingDir == "" {
+				return fmt.Errorf("processing_dir is required for mail attachment ingestion")
+			}
 			filename, _ := h.Filename()
-			if filename == "" {
+			filename = filepath.Base(filename)
+			if filename == "" || filename == "." || filename == ".." {
 				filename = "attachment.bin"
 			}
 
 			// Save attachment
 			outPath := filepath.Join(m.processingDir, fmt.Sprintf("%s-%s", strings.ReplaceAll(msgID, "/", "_"), filename))
-			if err := m.saveStream(outPath, p.Body); err != nil {
-				log.Printf("[MailPoller] Failed to save attachment: %v", err)
+			if !isPathWithin(outPath, m.processingDir) {
+				log.Printf("[MailPoller] Attachment path %q escapes processing directory, skipping", outPath)
 				continue
+			}
+			if err := m.saveStream(outPath, p.Body); err != nil {
+				return fmt.Errorf("save attachment %s: %w", filename, err)
 			}
 			attachments = append(attachments, outPath)
 		}
@@ -352,7 +420,7 @@ func (m *MailPoller) processMessage(ctx context.Context, acc config.IMAPAccount,
 	} else {
 		for _, attPath := range attachments {
 			if err := m.enqueueFile(ctx, attPath, msgID, correspondent); err != nil {
-				log.Printf("[MailPoller] Failed to enqueue attachment %s: %v", attPath, err)
+				return fmt.Errorf("enqueue attachment %s: %w", attPath, err)
 			}
 		}
 	}
