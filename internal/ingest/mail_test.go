@@ -296,7 +296,7 @@ func TestMailPoller_AuthFailure(t *testing.T) {
 		Port:           993,
 	}
 
-	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{})
+	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{ProcessingDir: t.TempDir()})
 
 	fakeClient := &fakeIMAPClient{
 		loginErr: errors.New("invalid credentials"),
@@ -330,7 +330,7 @@ func TestMailPoller_DialFailure(t *testing.T) {
 		Port:           993,
 	}
 
-	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{})
+	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{ProcessingDir: t.TempDir()})
 
 	poller.dialIMAP = func(ctx context.Context, addr string, host string) (imapClient, error) {
 		return nil, errors.New("network unreachable")
@@ -354,7 +354,7 @@ func TestMailPoller_SearchNoMessages(t *testing.T) {
 		Port:           993,
 	}
 
-	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{})
+	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{ProcessingDir: t.TempDir()})
 
 	fakeClient := &fakeIMAPClient{
 		searchRes: []uint32{},
@@ -533,7 +533,7 @@ func TestMailPoller_SecretResolutionFailure(t *testing.T) {
 		Port:           993,
 	}
 
-	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{})
+	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{ProcessingDir: t.TempDir()})
 
 	dialCalled := false
 	poller.dialIMAP = func(ctx context.Context, addr, host string) (imapClient, error) {
@@ -563,7 +563,7 @@ func TestMailPoller_SelectFailure(t *testing.T) {
 		Folder:         "BadFolder",
 	}
 
-	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{})
+	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{ProcessingDir: t.TempDir()})
 
 	fakeClient := &fakeIMAPClient{
 		selectErr: errors.New("folder not found"),
@@ -593,7 +593,7 @@ func TestMailPoller_SearchFailure(t *testing.T) {
 		Port:           993,
 	}
 
-	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{})
+	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{ProcessingDir: t.TempDir()})
 
 	fakeClient := &fakeIMAPClient{
 		searchErr: errors.New("search protocol error"),
@@ -623,7 +623,7 @@ func TestMailPoller_FetchFailure(t *testing.T) {
 		Port:           993,
 	}
 
-	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{})
+	poller, _ := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{ProcessingDir: t.TempDir()})
 
 	fakeClient := &fakeIMAPClient{
 		searchRes: []uint32{1},
@@ -647,7 +647,7 @@ func TestMailPoller_ProcessMessage_NilEnvelope(t *testing.T) {
 	s, _ := store.Open(filepath.Join(dir, "test.db"))
 	defer s.Close()
 
-	poller, _ := NewMailPoller(s, nil, MailPollerOptions{})
+	poller, _ := NewMailPoller(s, nil, MailPollerOptions{ProcessingDir: t.TempDir()})
 
 	msg := &imapMessage{
 		SeqNum:   1,
@@ -666,7 +666,7 @@ func TestMailPoller_ProcessMessage_EmptyBody(t *testing.T) {
 	s, _ := store.Open(filepath.Join(dir, "test.db"))
 	defer s.Close()
 
-	poller, _ := NewMailPoller(s, nil, MailPollerOptions{})
+	poller, _ := NewMailPoller(s, nil, MailPollerOptions{ProcessingDir: t.TempDir()})
 
 	msg := &imapMessage{
 		SeqNum: 1,
@@ -691,7 +691,7 @@ func TestMailPoller_ProcessMessage_InvalidMailBody(t *testing.T) {
 	s, _ := store.Open(filepath.Join(dir, "test.db"))
 	defer s.Close()
 
-	poller, _ := NewMailPoller(s, nil, MailPollerOptions{})
+	poller, _ := NewMailPoller(s, nil, MailPollerOptions{ProcessingDir: t.TempDir()})
 
 	msg := &imapMessage{
 		SeqNum: 1,

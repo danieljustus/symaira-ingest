@@ -332,13 +332,21 @@ func (m *MailPoller) processMessage(ctx context.Context, acc config.IMAPAccount,
 
 		switch h := p.Header.(type) {
 		case *mail.AttachmentHeader:
+			if m.processingDir == "" {
+				return fmt.Errorf("processing_dir is required for mail attachment ingestion")
+			}
 			filename, _ := h.Filename()
-			if filename == "" {
+			filename = filepath.Base(filename)
+			if filename == "" || filename == "." || filename == ".." {
 				filename = "attachment.bin"
 			}
 
 			// Save attachment
 			outPath := filepath.Join(m.processingDir, fmt.Sprintf("%s-%s", strings.ReplaceAll(msgID, "/", "_"), filename))
+			if !isPathWithin(outPath, m.processingDir) {
+				log.Printf("[MailPoller] Attachment path %q escapes processing directory, skipping", outPath)
+				continue
+			}
 			if err := m.saveStream(outPath, p.Body); err != nil {
 				log.Printf("[MailPoller] Failed to save attachment: %v", err)
 				continue
