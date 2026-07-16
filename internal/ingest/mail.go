@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -246,13 +248,34 @@ func (m *MailPoller) Close() error {
 	return nil
 }
 
+// mailPollLogReason reduces a poll error to a credential-free reason string
+// for logging. Poll errors can wrap secret-backend details (vault paths,
+// keychain items, env names), IMAP auth responses and TLS errors; the raw
+// error text must never reach the logs. The returned value is always a
+// static classification, never derived from the error message.
+func mailPollLogReason(err error) string {
+	var netErr net.Error
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "shutting down"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline exceeded"
+	case errors.As(err, &netErr) && netErr.Timeout():
+		return "network timeout"
+	case errors.As(err, &netErr):
+		return "network error"
+	default:
+		return "authentication or configuration error"
+	}
+}
+
 func (m *MailPoller) pollLoop(ctx context.Context, acc config.IMAPAccount, index int) {
 	ticker := time.NewTicker(m.interval)
 	defer ticker.Stop()
 
 	// Initial poll
 	if err := m.pollAccount(ctx, acc); err != nil {
-		log.Printf("[MailPoller] Account %d (%s) initial poll error: %v", index, acc.Username, err)
+		log.Printf("[MailPoller] Account %d (%s) initial poll failed: %s (run 'symingest doctor' for details)", index, acc.Username, mailPollLogReason(err))
 	}
 
 	for {
@@ -261,7 +284,7 @@ func (m *MailPoller) pollLoop(ctx context.Context, acc config.IMAPAccount, index
 			return
 		case <-ticker.C:
 			if err := m.pollAccount(ctx, acc); err != nil {
-				log.Printf("[MailPoller] Account %d (%s) poll error: %v", index, acc.Username, err)
+				log.Printf("[MailPoller] Account %d (%s) poll failed: %s (run 'symingest doctor' for details)", index, acc.Username, mailPollLogReason(err))
 			}
 		}
 	}
