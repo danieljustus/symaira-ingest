@@ -1453,3 +1453,28 @@ func TestMailPoller_RePollNoBodyFetch(t *testing.T) {
 		t.Error("expected Fetch to NOT be called on re-poll of already-processed message")
 	}
 }
+
+func TestMailPollLogReason(t *testing.T) {
+	secretLeak := fmt.Errorf("resolve password_secret for user@example.com: %w",
+		errors.New("keychain item symvault://imap/invoices not found"))
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"canceled", context.Canceled, "shutting down"},
+		{"deadline", context.DeadlineExceeded, "deadline exceeded"},
+		{"generic wraps secret detail", secretLeak, "authentication or configuration error"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mailPollLogReason(tt.err)
+			if got != tt.want {
+				t.Errorf("mailPollLogReason() = %q, want %q", got, tt.want)
+			}
+			if strings.Contains(got, "symvault") || strings.Contains(got, "keychain") {
+				t.Errorf("mailPollLogReason() leaked secret detail: %q", got)
+			}
+		})
+	}
+}
