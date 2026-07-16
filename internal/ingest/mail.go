@@ -284,7 +284,7 @@ func (m *MailPoller) pollLoop(ctx context.Context, acc config.IMAPAccount, index
 			return
 		case <-ticker.C:
 			if err := m.pollAccount(ctx, acc); err != nil {
-				log.Printf("[MailPoller] Account %d (%s) poll error: %v", index, acc.Username, err)
+				log.Printf("[MailPoller] Account %d (%s) poll failed: %s (run 'symingest doctor' for details)", index, acc.Username, mailPollLogReason(err))
 			}
 		}
 	}
