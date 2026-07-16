@@ -548,6 +548,12 @@ func TestMailPoller_SecretResolutionFailure(t *testing.T) {
 	if dialCalled {
 		t.Fatal("dial should not be called when secret resolution fails")
 	}
+	if !strings.Contains(err.Error(), "test@example.com") {
+		t.Errorf("expected error to name the account, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "environment variable") {
+		t.Errorf("expected error to preserve the underlying secret backend failure, got: %v", err)
+	}
 }
 
 func TestMailPoller_SelectFailure(t *testing.T) {
