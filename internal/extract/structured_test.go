@@ -168,3 +168,125 @@ func assertContains(t *testing.T, got, want string) {
 		t.Fatalf("text %q does not contain %q", got, want)
 	}
 }
+
+func TestDecodeMailTransfer_Base64(t *testing.T) {
+	input := "SGVsbG8gV29ybGQ=" // "Hello World" in base64
+	result, err := decodeMailTransfer(strings.NewReader(input), "base64")
+	if err != nil {
+		t.Fatalf("decodeMailTransfer base64: %v", err)
+	}
+	if string(result) != "Hello World" {
+		t.Errorf("decoded = %q, want Hello World", string(result))
+	}
+}
+
+func TestDecodeMailTransfer_QuotedPrintable(t *testing.T) {
+	input := "Hello=20World=0D=0A"
+	result, err := decodeMailTransfer(strings.NewReader(input), "quoted-printable")
+	if err != nil {
+		t.Fatalf("decodeMailTransfer quoted-printable: %v", err)
+	}
+	if string(result) != "Hello World\r\n" {
+		t.Errorf("decoded = %q, want Hello World\\r\\n", string(result))
+	}
+}
+
+func TestDecodeMailTransfer_DefaultPassthrough(t *testing.T) {
+	input := "plain text"
+	result, err := decodeMailTransfer(strings.NewReader(input), "7bit")
+	if err != nil {
+		t.Fatalf("decodeMailTransfer 7bit: %v", err)
+	}
+	if string(result) != "plain text" {
+		t.Errorf("decoded = %q, want plain text", string(result))
+	}
+}
+
+func TestDecodeMailTransfer_CaseInsensitiveEncoding(t *testing.T) {
+	input := "SGVsbG8="
+	result, err := decodeMailTransfer(strings.NewReader(input), " Base64 ")
+	if err != nil {
+		t.Fatalf("decodeMailTransfer: %v", err)
+	}
+	if string(result) != "Hello" {
+		t.Errorf("decoded = %q, want Hello", string(result))
+	}
+}
+
+func TestCtxErr_Cancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if ctxErr(ctx) == nil {
+		t.Fatal("expected error for cancelled context")
+	}
+}
+
+func TestCtxErr_Nil(t *testing.T) {
+	if ctxErr(nil) != nil {
+		t.Fatal("expected nil for nil context")
+	}
+}
+
+func TestCtxErr_NilDeadline(t *testing.T) {
+	if ctxErr(context.Background()) != nil {
+		t.Fatal("expected nil for background context")
+	}
+}
+
+func TestZipFind_Found(t *testing.T) {
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "test.zip")
+	f, err := os.Create(zipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	w, _ := zw.Create("target.txt")
+	w.Write([]byte("hello"))
+	zw.Close()
+	f.Close()
+
+	rf, err := zip.OpenReader(zipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rf.Close()
+
+	found := zipFind(&rf.Reader, "target.txt")
+	if found == nil {
+		t.Fatal("expected to find target.txt")
+	}
+	if found.Name != "target.txt" {
+		t.Errorf("Name = %q, want target.txt", found.Name)
+	}
+}
+
+func TestZipFind_NotFound(t *testing.T) {
+	emptyReader := &zip.Reader{}
+	found := zipFind(emptyReader, "nonexistent.txt")
+	if found != nil {
+		t.Fatal("expected nil for nonexistent file")
+	}
+}
+
+func TestReadTextKind_Markdown(t *testing.T) {
+	path := writeTempFile(t, "test.md", "# Title\n\nBody text")
+	res, err := ReadTextKind(context.Background(), path, KindMarkdown)
+	if err != nil {
+		t.Fatalf("ReadTextKind markdown: %v", err)
+	}
+	if res.Text != "# Title\n\nBody text" {
+		t.Errorf("text = %q", res.Text)
+	}
+}
+
+func TestReadTextKind_CSV(t *testing.T) {
+	path := writeTempFile(t, "test.csv", "a,b,c\n1,2,3")
+	res, err := ReadTextKind(context.Background(), path, KindCSV)
+	if err != nil {
+		t.Fatalf("ReadTextKind csv: %v", err)
+	}
+	if !strings.Contains(res.Text, "a,b,c") {
+		t.Errorf("text = %q, expected CSV content", res.Text)
+	}
+}
