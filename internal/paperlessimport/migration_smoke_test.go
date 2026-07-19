@@ -125,6 +125,15 @@ func TestMigrationSmoke_PaperlessToSearchableVault(t *testing.T) {
 	// migrated content, when symseek is available. symseek stores its
 	// index under $HOME, so the test runs it against an isolated HOME to
 	// avoid touching (or depending on) the real local search index.
+	//
+	// Integration test: full pipeline, expected ~6s when symseek is on
+	// PATH and its embedding backend is available. The real `symseek
+	// index` call embeds the generated note, which dominates the test's
+	// runtime; that cost is what this smoke test exists to exercise end
+	// to end, so it is not split into faster mocked units. Where symseek
+	// or its embedding backend is unavailable, the steps below skip and
+	// the test completes in well under a second (as it does without
+	// symseek on PATH).
 	symseekPath, err := exec.LookPath("symseek")
 	if err != nil {
 		t.Skip("symseek not found on PATH; skipping search verification")
