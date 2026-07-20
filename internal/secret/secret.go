@@ -27,6 +27,14 @@ var (
 	lookPathFn    = exec.LookPath
 )
 
+// IsPlaintext reports whether s would resolve via the plaintext fallback,
+// i.e. it does not use any of the symvault://, env:// or keychain:// schemes.
+func IsPlaintext(s string) bool {
+	return !strings.HasPrefix(s, "env://") &&
+		!strings.HasPrefix(s, "symvault://") &&
+		!strings.HasPrefix(s, "keychain://")
+}
+
 // Resolve takes a secret configuration string and resolves it.
 // It supports symvault://, env://, keychain:// prefixes. If no prefix
 // is matched, it returns the string as a plaintext secret.

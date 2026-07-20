@@ -1457,6 +1457,101 @@ func TestMailPoller_RePollNoBodyFetch(t *testing.T) {
 	}
 }
 
+func TestMailPoller_Start_WarnsOnPlaintextPasswordSecret(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	acc := config.IMAPAccount{
+		Username:       "user@example.com",
+		PasswordSecret: "hunter2",
+		Host:           "imap.example.com",
+		Port:           993,
+	}
+
+	poller, err := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{
+		Interval: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	poller.dialIMAP = func(ctx context.Context, addr, host string) (imapClient, error) {
+		return nil, errors.New("connection refused")
+	}
+
+	var logBuf bytes.Buffer
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(os.Stderr)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := poller.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	poller.Close()
+
+	output := logBuf.String()
+	if !strings.Contains(output, "plaintext config") {
+		t.Errorf("expected log to warn about plaintext password_secret, got: %s", output)
+	}
+	if strings.Contains(output, "hunter2") {
+		t.Errorf("log must not contain the plaintext secret value, got: %s", output)
+	}
+}
+
+func TestMailPoller_Start_NoWarningForResolvedSecret(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	os.Setenv("TEST_MAILPOLLER_START_NO_WARN", "value")
+	defer os.Unsetenv("TEST_MAILPOLLER_START_NO_WARN")
+
+	acc := config.IMAPAccount{
+		Username:       "user@example.com",
+		PasswordSecret: "env://TEST_MAILPOLLER_START_NO_WARN",
+		Host:           "imap.example.com",
+		Port:           993,
+	}
+
+	poller, err := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{
+		Interval: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	poller.dialIMAP = func(ctx context.Context, addr, host string) (imapClient, error) {
+		return nil, errors.New("connection refused")
+	}
+
+	var logBuf bytes.Buffer
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(os.Stderr)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := poller.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	poller.Close()
+
+	if strings.Contains(logBuf.String(), "plaintext config") {
+		t.Errorf("did not expect a plaintext warning for an env:// secret, got: %s", logBuf.String())
+	}
+}
+
 func TestMailPollLogReason(t *testing.T) {
 	secretLeak := fmt.Errorf("resolve password_secret for user@example.com: %w",
 		errors.New("keychain item symvault://imap/invoices not found"))

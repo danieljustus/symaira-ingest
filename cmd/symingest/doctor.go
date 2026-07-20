@@ -81,6 +81,10 @@ func checkIMAP(ctx context.Context, report *doctorReport, accounts []config.IMAP
 	for i, acc := range accounts {
 		name := fmt.Sprintf("imap.account.%d", i)
 
+		if secret.IsPlaintext(acc.PasswordSecret) {
+			report.add(name+".password_secret", doctorWarn, fmt.Sprintf("password for %s is stored in plaintext config; use keychain:// or symvault:// instead", acc.Username))
+		}
+
 		pwd, err := secret.Resolve(ctx, acc.PasswordSecret)
 		if err != nil {
 			report.add(name, doctorFail, fmt.Sprintf("cannot resolve password for %s: %v", acc.Username, err))
