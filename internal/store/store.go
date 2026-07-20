@@ -432,6 +432,43 @@ func (s *Store) GetMailPollStatus(ctx context.Context, accountID string) (*MailP
 	return &st, nil
 }
 
+// MailPollCursor tracks the last IMAP UID processed for one account+folder,
+// so a poll can resume with `UID SEARCH UID <last+1>:*` instead of
+// rescanning the whole folder. UIDValidity guards against a server assigning
+// a fresh UID sequence (e.g. after a folder rebuild), which invalidates any
+// previously recorded LastUID.
+type MailPollCursor struct {
+	AccountID   string
+	Folder      string
+	UIDValidity uint32
+	LastUID     uint32
+}
+
+// GetMailPollCursor returns the last recorded poll cursor for an account, or
+// nil if the account has never been polled.
+func (s *Store) GetMailPollCursor(ctx context.Context, accountID string) (*MailPollCursor, error) {
+	var c MailPollCursor
+	err := s.db.QueryRowContext(ctx,
+		"SELECT account_id, folder, uid_validity, last_uid FROM mail_poll_cursor WHERE account_id = ?", accountID,
+	).Scan(&c.AccountID, &c.Folder, &c.UIDValidity, &c.LastUID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// SetMailPollCursor upserts the poll cursor for an account.
+func (s *Store) SetMailPollCursor(ctx context.Context, accountID, folder string, uidValidity, lastUID uint32) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO mail_poll_cursor (account_id, folder, uid_validity, last_uid) VALUES (?, ?, ?, ?)
+		 ON CONFLICT(account_id) DO UPDATE SET folder = excluded.folder, uid_validity = excluded.uid_validity, last_uid = excluded.last_uid`,
+		accountID, folder, uidValidity, lastUID)
+	return err
+}
+
 // UpdateJobStatus updates the status of a job.
 
 // EnqueueSkippedJob enqueues a job records with a status of 'skipped'.

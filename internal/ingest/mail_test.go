@@ -20,24 +20,26 @@ import (
 )
 
 type fakeIMAPClient struct {
-	loginErr     error
-	selectErr    error
-	searchRes    []uint32
-	searchErr    error
+	loginErr          error
+	selectErr         error
+	selectStatus      *mailboxStatus
+	searchRes         []uint32
+	searchErr         error
 	fetchEnvelopesRes []*imapMessage
 	fetchEnvelopesErr error
-	fetchRes     []*imapMessage
-	fetchErr     error
-	storeSeenErr error
-	moveErr      error
-	closeErr     error
+	fetchRes          []*imapMessage
+	fetchErr          error
+	storeSeenErr      error
+	moveErr           error
+	closeErr          error
 
-	loginUsername  string
-	loginPassword  string
-	selectedFolder string
-	storedSeenSeqs []uint32
-	movedSeqs      map[uint32]string
-	closed         bool
+	loginUsername      string
+	loginPassword      string
+	selectedFolder     string
+	lastSearchCriteria *imap.SearchCriteria
+	storedSeenSeqs     []uint32
+	movedSeqs          map[uint32]string
+	closed             bool
 }
 
 func (f *fakeIMAPClient) Login(username, password string) error {
@@ -46,20 +48,38 @@ func (f *fakeIMAPClient) Login(username, password string) error {
 	return f.loginErr
 }
 
-func (f *fakeIMAPClient) Select(folder string) error {
+func (f *fakeIMAPClient) Select(folder string) (*mailboxStatus, error) {
 	f.selectedFolder = folder
-	return f.selectErr
+	if f.selectErr != nil {
+		return nil, f.selectErr
+	}
+	if f.selectStatus != nil {
+		return f.selectStatus, nil
+	}
+	return &mailboxStatus{}, nil
 }
 
-func (f *fakeIMAPClient) Search(criteria *imap.SearchCriteria) ([]uint32, error) {
-	return f.searchRes, f.searchErr
+func seqsToUIDs(seqs []uint32) []imap.UID {
+	if seqs == nil {
+		return nil
+	}
+	uids := make([]imap.UID, len(seqs))
+	for i, s := range seqs {
+		uids[i] = imap.UID(s)
+	}
+	return uids
 }
 
-func (f *fakeIMAPClient) FetchEnvelopes(seqs []uint32) ([]*imapMessage, error) {
+func (f *fakeIMAPClient) SearchUID(criteria *imap.SearchCriteria) ([]imap.UID, error) {
+	f.lastSearchCriteria = criteria
+	return seqsToUIDs(f.searchRes), f.searchErr
+}
+
+func (f *fakeIMAPClient) FetchEnvelopesUID(uids []imap.UID) ([]*imapMessage, error) {
 	return f.fetchEnvelopesRes, f.fetchEnvelopesErr
 }
 
-func (f *fakeIMAPClient) Fetch(seqs []uint32) ([]*imapMessage, error) {
+func (f *fakeIMAPClient) FetchUID(uids []imap.UID) ([]*imapMessage, error) {
 	return f.fetchRes, f.fetchErr
 }
 
@@ -1242,6 +1262,163 @@ func TestMailPoller_ProcessMessage_EnqueueFileError(t *testing.T) {
 	}
 }
 
+func TestMailPoller_PollAccount_UIDCursor_FirstPollScansFromOne(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	acc := config.IMAPAccount{
+		Username:       "test@example.com",
+		PasswordSecret: "myplaintextpw",
+		Host:           "imap.example.com",
+		Port:           993,
+	}
+	accountID := config.AccountID(acc)
+
+	poller, err := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fakeClient := &fakeIMAPClient{
+		selectStatus: &mailboxStatus{UIDValidity: 100, UIDNext: 50},
+		searchRes:    []uint32{},
+	}
+	poller.dialIMAP = func(ctx context.Context, addr, host string) (imapClient, error) {
+		return fakeClient, nil
+	}
+
+	if err := poller.pollAccount(context.Background(), acc); err != nil {
+		t.Fatalf("pollAccount: %v", err)
+	}
+
+	if fakeClient.lastSearchCriteria == nil || len(fakeClient.lastSearchCriteria.UID) != 1 {
+		t.Fatalf("expected a single UID range in the search criteria, got %+v", fakeClient.lastSearchCriteria)
+	}
+	gotRange := fakeClient.lastSearchCriteria.UID[0]
+	if len(gotRange) != 1 || gotRange[0].Start != 1 {
+		t.Errorf("expected first poll to search from UID 1, got range %+v", gotRange)
+	}
+
+	cursor, err := s.GetMailPollCursor(context.Background(), accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cursor == nil {
+		t.Fatal("expected a poll cursor to be recorded")
+	}
+	if cursor.UIDValidity != 100 || cursor.LastUID != 49 {
+		t.Errorf("expected cursor {UIDValidity:100 LastUID:49}, got %+v", cursor)
+	}
+}
+
+func TestMailPoller_PollAccount_UIDCursor_ResumesFromLastUID(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	acc := config.IMAPAccount{
+		Username:       "test@example.com",
+		PasswordSecret: "myplaintextpw",
+		Host:           "imap.example.com",
+		Port:           993,
+	}
+	accountID := config.AccountID(acc)
+
+	if err := s.SetMailPollCursor(context.Background(), accountID, "INBOX", 100, 49); err != nil {
+		t.Fatal(err)
+	}
+
+	poller, err := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fakeClient := &fakeIMAPClient{
+		selectStatus: &mailboxStatus{UIDValidity: 100, UIDNext: 55},
+		searchRes:    []uint32{},
+	}
+	poller.dialIMAP = func(ctx context.Context, addr, host string) (imapClient, error) {
+		return fakeClient, nil
+	}
+
+	if err := poller.pollAccount(context.Background(), acc); err != nil {
+		t.Fatalf("pollAccount: %v", err)
+	}
+
+	gotRange := fakeClient.lastSearchCriteria.UID[0]
+	if len(gotRange) != 1 || gotRange[0].Start != 50 {
+		t.Errorf("expected resumed poll to search from UID 50 (last cursor + 1), got range %+v", gotRange)
+	}
+
+	cursor, err := s.GetMailPollCursor(context.Background(), accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cursor.LastUID != 54 {
+		t.Errorf("expected cursor LastUID=54 after this poll, got %+v", cursor)
+	}
+}
+
+func TestMailPoller_PollAccount_UIDCursor_UIDValidityChangeTriggersRescan(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	acc := config.IMAPAccount{
+		Username:       "test@example.com",
+		PasswordSecret: "myplaintextpw",
+		Host:           "imap.example.com",
+		Port:           993,
+	}
+	accountID := config.AccountID(acc)
+
+	// A prior poll recorded a cursor under an old UIDVALIDITY.
+	if err := s.SetMailPollCursor(context.Background(), accountID, "INBOX", 100, 49); err != nil {
+		t.Fatal(err)
+	}
+
+	poller, err := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The server now reports a different UIDVALIDITY (e.g. folder rebuild).
+	fakeClient := &fakeIMAPClient{
+		selectStatus: &mailboxStatus{UIDValidity: 200, UIDNext: 10},
+		searchRes:    []uint32{},
+	}
+	poller.dialIMAP = func(ctx context.Context, addr, host string) (imapClient, error) {
+		return fakeClient, nil
+	}
+
+	if err := poller.pollAccount(context.Background(), acc); err != nil {
+		t.Fatalf("pollAccount: %v", err)
+	}
+
+	gotRange := fakeClient.lastSearchCriteria.UID[0]
+	if len(gotRange) != 1 || gotRange[0].Start != 1 {
+		t.Errorf("expected a UIDVALIDITY change to trigger a rescan from UID 1, got range %+v", gotRange)
+	}
+
+	cursor, err := s.GetMailPollCursor(context.Background(), accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cursor.UIDValidity != 200 || cursor.LastUID != 9 {
+		t.Errorf("expected cursor {UIDValidity:200 LastUID:9} after rescan, got %+v", cursor)
+	}
+}
+
 func TestMailPoller_PollAccount_ProcessMessageError(t *testing.T) {
 	dir := t.TempDir()
 	s, err := store.Open(filepath.Join(dir, "test.db"))
@@ -1402,7 +1579,7 @@ func TestMailPoller_RePollNoBodyFetch(t *testing.T) {
 		ProcessingDir: processingDir,
 	})
 
- envelopes := []*imapMessage{
+	envelopes := []*imapMessage{
 		{
 			SeqNum: 1,
 			Envelope: &imapEnvelope{

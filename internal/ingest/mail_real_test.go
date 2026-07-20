@@ -49,12 +49,12 @@ func testCA(t *testing.T) (*x509.Certificate, *ecdsa.PrivateKey) {
 	}
 
 	caTemplate := &x509.Certificate{
-		SerialNumber: caSerial,
-		Subject:      pkix.Name{CommonName: "Test CA"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(24 * time.Hour),
-		KeyUsage:     x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		IsCA:         true,
+		SerialNumber:          caSerial,
+		Subject:               pkix.Name{CommonName: "Test CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		IsCA:                  true,
 		BasicConstraintsValid: true,
 	}
 
@@ -232,7 +232,7 @@ func TestRealIMAPClient_Select(t *testing.T) {
 		t.Fatalf("Login: %v", err)
 	}
 
-	if err := client.Select("INBOX"); err != nil {
+	if _, err := client.Select("INBOX"); err != nil {
 		t.Fatalf("Select failed: %v", err)
 	}
 
@@ -249,31 +249,35 @@ func TestRealIMAPClient_Search(t *testing.T) {
 	if err := client.Login("testuser", "testpass"); err != nil {
 		t.Fatalf("Login: %v", err)
 	}
-	if err := client.Select("INBOX"); err != nil {
+	status, err := client.Select("INBOX")
+	if err != nil {
 		t.Fatalf("Select: %v", err)
+	}
+	if status.UIDNext == 0 {
+		t.Errorf("expected a non-zero UIDNext for a mailbox with messages, got %d", status.UIDNext)
 	}
 
 	// Search all messages.
-	seqs, err := client.Search(&imap.SearchCriteria{})
+	uids, err := client.SearchUID(&imap.SearchCriteria{})
 	if err != nil {
-		t.Fatalf("Search failed: %v", err)
+		t.Fatalf("SearchUID failed: %v", err)
 	}
-	if len(seqs) != 2 {
-		t.Fatalf("expected 2 messages, got %d", len(seqs))
+	if len(uids) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(uids))
 	}
 
 	// Search with keyword filter.
-	seqs, err = client.Search(&imap.SearchCriteria{
+	uids, err = client.SearchUID(&imap.SearchCriteria{
 		Header: []imap.SearchCriteriaHeaderField{{
 			Key:   "Subject",
 			Value: "Invoice",
 		}},
 	})
 	if err != nil {
-		t.Fatalf("Search with filter failed: %v", err)
+		t.Fatalf("SearchUID with filter failed: %v", err)
 	}
-	if len(seqs) != 1 {
-		t.Fatalf("expected 1 message for Subject=Invoice, got %d", len(seqs))
+	if len(uids) != 1 {
+		t.Fatalf("expected 1 message for Subject=Invoice, got %d", len(uids))
 	}
 
 	c.Logout().Wait()
@@ -289,14 +293,14 @@ func TestRealIMAPClient_Fetch(t *testing.T) {
 	if err := client.Login("testuser", "testpass"); err != nil {
 		t.Fatalf("Login: %v", err)
 	}
-	if err := client.Select("INBOX"); err != nil {
+	if _, err := client.Select("INBOX"); err != nil {
 		t.Fatalf("Select: %v", err)
 	}
 
 	// Fetch both messages.
-	msgs, err := client.Fetch([]uint32{1, 2})
+	msgs, err := client.FetchUID([]imap.UID{1, 2})
 	if err != nil {
-		t.Fatalf("Fetch failed: %v", err)
+		t.Fatalf("FetchUID failed: %v", err)
 	}
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
@@ -326,10 +330,10 @@ func TestRealIMAPClient_Fetch(t *testing.T) {
 		t.Errorf("expected both messages, found1=%v found2=%v", found1, found2)
 	}
 
-	// Fetch empty sequence set should return nil.
-	msgs, err = client.Fetch([]uint32{})
+	// Fetch empty UID set should return nil.
+	msgs, err = client.FetchUID([]imap.UID{})
 	if err != nil {
-		t.Fatalf("Fetch empty failed: %v", err)
+		t.Fatalf("FetchUID empty failed: %v", err)
 	}
 	if msgs != nil {
 		t.Fatalf("expected nil for empty fetch, got %v", msgs)
@@ -348,7 +352,7 @@ func TestRealIMAPClient_StoreSeen(t *testing.T) {
 	if err := client.Login("testuser", "testpass"); err != nil {
 		t.Fatalf("Login: %v", err)
 	}
-	if err := client.Select("INBOX"); err != nil {
+	if _, err := client.Select("INBOX"); err != nil {
 		t.Fatalf("Select: %v", err)
 	}
 
@@ -358,17 +362,17 @@ func TestRealIMAPClient_StoreSeen(t *testing.T) {
 	}
 
 	// Verify the \Seen flag was set by searching for unseen messages.
-	seqs, err := client.Search(&imap.SearchCriteria{
+	uids, err := client.SearchUID(&imap.SearchCriteria{
 		NotFlag: []imap.Flag{imap.FlagSeen},
 	})
 	if err != nil {
-		t.Fatalf("Search for unseen failed: %v", err)
+		t.Fatalf("SearchUID for unseen failed: %v", err)
 	}
-	if len(seqs) != 1 {
-		t.Fatalf("expected 1 unseen message, got %d", len(seqs))
+	if len(uids) != 1 {
+		t.Fatalf("expected 1 unseen message, got %d", len(uids))
 	}
-	if seqs[0] != 2 {
-		t.Errorf("expected unseen message seq 2, got %d", seqs[0])
+	if uids[0] != 2 {
+		t.Errorf("expected unseen message UID 2, got %d", uids[0])
 	}
 
 	c.Logout().Wait()
@@ -390,7 +394,7 @@ func TestRealIMAPClient_Move(t *testing.T) {
 		t.Fatalf("Create Archive: %v", err)
 	}
 
-	if err := client.Select("INBOX"); err != nil {
+	if _, err := client.Select("INBOX"); err != nil {
 		t.Fatalf("Select: %v", err)
 	}
 
@@ -400,24 +404,24 @@ func TestRealIMAPClient_Move(t *testing.T) {
 	}
 
 	// Verify INBOX now has 1 message.
-	seqs, err := client.Search(&imap.SearchCriteria{})
+	uids, err := client.SearchUID(&imap.SearchCriteria{})
 	if err != nil {
-		t.Fatalf("Search INBOX failed: %v", err)
+		t.Fatalf("SearchUID INBOX failed: %v", err)
 	}
-	if len(seqs) != 1 {
-		t.Fatalf("expected 1 message in INBOX after move, got %d", len(seqs))
+	if len(uids) != 1 {
+		t.Fatalf("expected 1 message in INBOX after move, got %d", len(uids))
 	}
 
 	// Select Archive and verify message is there.
-	if err := client.Select("Archive"); err != nil {
+	if _, err := client.Select("Archive"); err != nil {
 		t.Fatalf("Select Archive: %v", err)
 	}
-	seqs, err = client.Search(&imap.SearchCriteria{})
+	uids, err = client.SearchUID(&imap.SearchCriteria{})
 	if err != nil {
-		t.Fatalf("Search Archive failed: %v", err)
+		t.Fatalf("SearchUID Archive failed: %v", err)
 	}
-	if len(seqs) != 1 {
-		t.Fatalf("expected 1 message in Archive after move, got %d", len(seqs))
+	if len(uids) != 1 {
+		t.Fatalf("expected 1 message in Archive after move, got %d", len(uids))
 	}
 
 	c.Logout().Wait()
@@ -433,7 +437,7 @@ func TestRealIMAPClient_Close(t *testing.T) {
 	if err := client.Login("testuser", "testpass"); err != nil {
 		t.Fatalf("Login: %v", err)
 	}
-	if err := client.Select("INBOX"); err != nil {
+	if _, err := client.Select("INBOX"); err != nil {
 		t.Fatalf("Select: %v", err)
 	}
 
@@ -450,26 +454,26 @@ func TestRealIMAPClient_EndToEnd(t *testing.T) {
 	c := dialTestClient(t, addr, rootCAs)
 	client := &realIMAPClient{c}
 
-	// Full flow: Login → Select → Search → Fetch → StoreSeen → Close.
+	// Full flow: Login → Select → SearchUID → FetchUID → StoreSeen → Close.
 	if err := client.Login("testuser", "testpass"); err != nil {
 		t.Fatalf("Login: %v", err)
 	}
 
-	if err := client.Select("INBOX"); err != nil {
+	if _, err := client.Select("INBOX"); err != nil {
 		t.Fatalf("Select: %v", err)
 	}
 
-	seqs, err := client.Search(&imap.SearchCriteria{})
+	uids, err := client.SearchUID(&imap.SearchCriteria{})
 	if err != nil {
-		t.Fatalf("Search: %v", err)
+		t.Fatalf("SearchUID: %v", err)
 	}
-	if len(seqs) != 2 {
-		t.Fatalf("expected 2 messages, got %d", len(seqs))
+	if len(uids) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(uids))
 	}
 
-	msgs, err := client.Fetch(seqs)
+	msgs, err := client.FetchUID(uids)
 	if err != nil {
-		t.Fatalf("Fetch: %v", err)
+		t.Fatalf("FetchUID: %v", err)
 	}
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 fetched messages, got %d", len(msgs))
@@ -483,11 +487,11 @@ func TestRealIMAPClient_EndToEnd(t *testing.T) {
 	}
 
 	// Verify no unseen messages remain.
-	unseen, err := client.Search(&imap.SearchCriteria{
+	unseen, err := client.SearchUID(&imap.SearchCriteria{
 		NotFlag: []imap.Flag{imap.FlagSeen},
 	})
 	if err != nil {
-		t.Fatalf("Search unseen: %v", err)
+		t.Fatalf("SearchUID unseen: %v", err)
 	}
 	if len(unseen) != 0 {
 		t.Errorf("expected 0 unseen messages, got %d", len(unseen))
@@ -517,7 +521,7 @@ func TestDefaultDialIMAP(t *testing.T) {
 	if err := ic.Login("testuser", "testpass"); err != nil {
 		t.Fatalf("Login: %v", err)
 	}
-	if err := ic.Select("INBOX"); err != nil {
+	if _, err := ic.Select("INBOX"); err != nil {
 		t.Fatalf("Select: %v", err)
 	}
 
