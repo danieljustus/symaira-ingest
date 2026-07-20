@@ -115,6 +115,45 @@ func TestRun_ServiceInstallDryRunDoesNotEmbedSecrets(t *testing.T) {
 	}
 }
 
+func TestRun_ImportPaperless_TokenResolvesEnvScheme(t *testing.T) {
+	t.Setenv("TEST_IMPORT_PAPERLESS_TOKEN", "resolved-secret-token")
+
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		switch r.URL.Path {
+		case "/api/documents/":
+			json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []any{}, "next": nil})
+		default:
+			json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []any{}, "next": nil})
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	var sb strings.Builder
+	oldStdout := stdout
+	stdout = &sb
+	defer func() { stdout = oldStdout }()
+
+	err := run([]string{
+		"import", "paperless",
+		"-db", filepath.Join(dir, "test.db"),
+		"-base-url", srv.URL,
+		"-token", "env://TEST_IMPORT_PAPERLESS_TOKEN",
+		"-plan",
+	})
+	if err != nil {
+		t.Fatalf("run(import paperless -plan): %v", err)
+	}
+	if gotAuth != "Token resolved-secret-token" {
+		t.Fatalf("expected resolved token in Authorization header, got %q", gotAuth)
+	}
+	if strings.Contains(sb.String(), "resolved-secret-token") {
+		t.Fatalf("output leaked the resolved token: %s", sb.String())
+	}
+}
+
 func TestRun_ImportPaperlessDeepRequiresVerify(t *testing.T) {
 	err := run([]string{"import", "paperless", "-base-url", "https://paperless.example", "-token", "test-token", "-deep"})
 	if err == nil || exitcodes.ExitCodeFromError(err) != exitcodes.ExitData {

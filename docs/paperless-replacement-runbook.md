@@ -35,6 +35,10 @@ Configuration inputs (flag, environment variable, or `~/.config/symingest/config
 > Never commit or paste a real token, private base URL, or private document
 > name into scripts, tickets, or logs. The examples below use placeholders.
 
+`--token` also accepts a secret reference instead of a raw value:
+`keychain://service/account` (macOS Keychain) or `symvault://ref` (symvault),
+resolved the same way IMAP `password_secret` values are.
+
 Export the connection once for the session:
 
 ```bash

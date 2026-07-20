@@ -202,7 +202,8 @@ symingest import paperless --base-url https://paperless.example.com --token <api
 ```text
 Flags:
   --base-url string   Paperless-ngx instance URL (or PAPERLESS_URL env)
-  --token string      API token (or PAPERLESS_TOKEN env)
+  --token string      API token, or PAPERLESS_TOKEN env; also accepts
+                      keychain://service/account or symvault://ref
   --since string      Only import documents whose Paperless created date is on
                       or after this date (YYYY-MM-DD)
   --limit int         Import at most N documents (newest first); 0 means no limit
