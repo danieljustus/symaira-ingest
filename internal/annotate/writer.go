@@ -1,11 +1,14 @@
 package annotate
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/danieljustus/symaira-corekit/fsutil"
 )
 
 // SidecarDirName is the directory name under the vault for extraction sidecars.
@@ -26,43 +29,20 @@ func WriteSidecar(vault, docSHA256 string, extractions []Extraction) error {
 
 	path := filepath.Join(dir, docSHA256+".jsonl")
 
-	// Write to a temp file then rename for atomicity
-	tmpFile, err := os.CreateTemp(dir, "sidecar-tmp-*.jsonl")
-	if err != nil {
-		return fmt.Errorf("create temp sidecar: %w", err)
-	}
-	tmpName := tmpFile.Name()
-	defer func() {
-		if tmpFile != nil {
-			tmpFile.Close()
-		}
-		os.Remove(tmpName)
-	}()
-
+	var buf bytes.Buffer
 	for _, e := range extractions {
 		line, err := json.Marshal(e)
 		if err != nil {
 			return fmt.Errorf("marshal extraction: %w", err)
 		}
 		line = append(line, '\n')
-		if _, err := tmpFile.Write(line); err != nil {
+		if _, err := buf.Write(line); err != nil {
 			return fmt.Errorf("write extraction: %w", err)
 		}
 	}
 
-	if err := tmpFile.Sync(); err != nil {
-		return fmt.Errorf("sync sidecar: %w", err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		return fmt.Errorf("close sidecar: %w", err)
-	}
-	tmpFile = nil
-
-	if err := os.Chmod(tmpName, 0o600); err != nil {
-		return fmt.Errorf("chmod sidecar: %w", err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("rename sidecar: %w", err)
+	if err := fsutil.AtomicWriteFile(path, buf.Bytes(), 0o600); err != nil {
+		return fmt.Errorf("write sidecar: %w", err)
 	}
 
 	return nil

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/danieljustus/symaira-corekit/fsutil"
 	"github.com/danieljustus/symaira-ingest/internal/writer"
 )
 
@@ -287,37 +288,10 @@ func writeNoteWithFrontmatter(vaultPath string, note any, body string) error {
 		sb.WriteByte('\n')
 	}
 
-	return atomicWriteFile(vaultPath, []byte(sb.String()))
+	return fsutil.AtomicWriteFile(vaultPath, []byte(sb.String()), 0o600)
 }
 
 func sha256Hex(data []byte) string {
 	h := sha256.Sum256(data)
 	return hex.EncodeToString(h[:])
-}
-
-// atomicWriteFile writes data to path atomically via a temp file.
-func atomicWriteFile(path string, data []byte) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, ".symingest-notion-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer func() {
-		tmp.Close()
-		os.Remove(tmpName)
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
 }
