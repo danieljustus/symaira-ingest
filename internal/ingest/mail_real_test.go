@@ -342,6 +342,65 @@ func TestRealIMAPClient_Fetch(t *testing.T) {
 	c.Logout().Wait()
 }
 
+func TestRealIMAPClient_FetchEnvelopesUID(t *testing.T) {
+	addr, rootCAs, cleanup := testIMAPServer(t)
+	defer cleanup()
+
+	c := dialTestClient(t, addr, rootCAs)
+	client := &realIMAPClient{c}
+
+	if err := client.Login("testuser", "testpass"); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if _, err := client.Select("INBOX"); err != nil {
+		t.Fatalf("Select: %v", err)
+	}
+
+	// Fetch both envelopes.
+	msgs, err := client.FetchEnvelopesUID([]imap.UID{1, 2})
+	if err != nil {
+		t.Fatalf("FetchEnvelopesUID failed: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	}
+
+	// Verify envelope content.
+	found1, found2 := false, false
+	for _, msg := range msgs {
+		if msg.Envelope == nil {
+			t.Error("expected non-nil envelope")
+			continue
+		}
+		switch msg.Envelope.MessageID {
+		case "msg-1@example.com":
+			found1 = true
+			if len(msg.Body) != 0 {
+				t.Error("expected empty body for msg-1 envelope fetch")
+			}
+		case "msg-2@example.com":
+			found2 = true
+			if len(msg.Body) != 0 {
+				t.Error("expected empty body for msg-2 envelope fetch")
+			}
+		}
+	}
+	if !found1 || !found2 {
+		t.Errorf("expected both envelopes, found1=%v found2=%v", found1, found2)
+	}
+
+	// Fetch empty UID set should return nil.
+	msgs, err = client.FetchEnvelopesUID([]imap.UID{})
+	if err != nil {
+		t.Fatalf("FetchEnvelopesUID empty failed: %v", err)
+	}
+	if msgs != nil {
+		t.Fatalf("expected nil for empty fetch, got %v", msgs)
+	}
+
+	c.Logout().Wait()
+}
+
 func TestRealIMAPClient_StoreSeen(t *testing.T) {
 	addr, rootCAs, cleanup := testIMAPServer(t)
 	defer cleanup()

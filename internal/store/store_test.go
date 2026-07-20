@@ -754,3 +754,60 @@ func TestPaperlessImportStateByID_NotFound(t *testing.T) {
 		t.Errorf("state = %+v, want nil for non-existent ID", state)
 	}
 }
+
+func TestStore_MailPollCursor(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+
+	// 1. Get cursor for non-existent account should return nil, nil
+	c, err := s.GetMailPollCursor(ctx, "account-1")
+	if err != nil {
+		t.Fatalf("GetMailPollCursor empty: %v", err)
+	}
+	if c != nil {
+		t.Fatalf("expected nil cursor, got %+v", c)
+	}
+
+	// 2. Set cursor
+	err = s.SetMailPollCursor(ctx, "account-1", "INBOX", 12345, 100)
+	if err != nil {
+		t.Fatalf("SetMailPollCursor: %v", err)
+	}
+
+	// 3. Get cursor and verify
+	c, err = s.GetMailPollCursor(ctx, "account-1")
+	if err != nil {
+		t.Fatalf("GetMailPollCursor: %v", err)
+	}
+	if c == nil {
+		t.Fatal("expected non-nil cursor")
+	}
+	if c.AccountID != "account-1" || c.Folder != "INBOX" || c.UIDValidity != 12345 || c.LastUID != 100 {
+		t.Errorf("GetMailPollCursor returned unexpected values: %+v", c)
+	}
+
+	// 4. Update cursor (tests upsert/ON CONFLICT conflict path)
+	err = s.SetMailPollCursor(ctx, "account-1", "Archive", 12345, 105)
+	if err != nil {
+		t.Fatalf("SetMailPollCursor update: %v", err)
+	}
+
+	// 5. Get cursor and verify updated values
+	c, err = s.GetMailPollCursor(ctx, "account-1")
+	if err != nil {
+		t.Fatalf("GetMailPollCursor updated: %v", err)
+	}
+	if c == nil {
+		t.Fatal("expected non-nil cursor")
+	}
+	if c.AccountID != "account-1" || c.Folder != "Archive" || c.UIDValidity != 12345 || c.LastUID != 105 {
+		t.Errorf("GetMailPollCursor updated returned unexpected values: %+v", c)
+	}
+}
+
