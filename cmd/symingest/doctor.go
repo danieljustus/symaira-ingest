@@ -120,6 +120,36 @@ func checkIMAP(ctx context.Context, report *doctorReport, accounts []config.IMAP
 	}
 }
 
+// checkMailPollStatus surfaces the last recorded poll outcome per IMAP
+// account, so a stalled background poller is visible without reading the
+// LaunchAgent log. This is best-effort: a store that cannot be opened yields
+// no additional checks rather than failing doctor outright (checkWritableDB
+// already reports a hard failure for that case).
+func checkMailPollStatus(ctx context.Context, report *doctorReport, dbPath string, accounts []config.IMAPAccount) {
+	if dbPath == "" {
+		return
+	}
+	st, err := store.Open(dbPath)
+	if err != nil {
+		return
+	}
+	defer st.Close()
+
+	for i, acc := range accounts {
+		name := fmt.Sprintf("imap.account.%d.last_poll", i)
+		s, err := st.GetMailPollStatus(ctx, config.AccountID(acc))
+		if err != nil || s == nil {
+			report.add(name, doctorOK, "never polled")
+			continue
+		}
+		if s.Status == "ok" {
+			report.add(name, doctorOK, fmt.Sprintf("%s ok", s.LastPolledAt.Format(time.RFC3339)))
+		} else {
+			report.add(name, doctorWarn, fmt.Sprintf("%s failed: %s", s.LastPolledAt.Format(time.RFC3339), s.LastError))
+		}
+	}
+}
+
 func (r *doctorReport) add(name string, status doctorStatus, message string) {
 	r.Checks = append(r.Checks, doctorCheck{Name: name, Status: status, Message: message})
 	switch status {
@@ -229,6 +259,7 @@ func runDoctorChecks(ctx context.Context, cfg *resolvedConfig, includePaperless 
 	checkOptionalCommand(report, "tool.optional.qpdf", "qpdf")
 	if len(cfg.raw.IMAPAccounts) > 0 {
 		checkIMAP(ctx, report, cfg.raw.IMAPAccounts)
+		checkMailPollStatus(ctx, report, cfg.db, cfg.raw.IMAPAccounts)
 	}
 	if includePaperless {
 		checkPaperless(ctx, report, baseURL, token)

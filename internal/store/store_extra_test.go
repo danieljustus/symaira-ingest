@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestValidateClassificationRule_AllBranches(t *testing.T) {
@@ -290,6 +291,67 @@ func TestSetProvenance_And_HasMailMessage_And_TrackMailMessage(t *testing.T) {
 	// TrackMailMessage idempotency (INSERT OR IGNORE)
 	if err := s.TrackMailMessage(ctx, "msg-789", "inbox"); err != nil {
 		t.Fatalf("TrackMailMessage idempotent: %v", err)
+	}
+}
+
+func TestRecordAndGetMailPollStatus(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+
+	// GetMailPollStatus — nil for an account never polled.
+	got, err := s.GetMailPollStatus(ctx, "user@imap.example.com:993/INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Errorf("expected nil status for unpolled account, got %+v", got)
+	}
+
+	firstPoll := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
+	if err := s.RecordMailPollStatus(ctx, "user@imap.example.com:993/INBOX", firstPoll, "ok", ""); err != nil {
+		t.Fatalf("RecordMailPollStatus: %v", err)
+	}
+
+	got, err = s.GetMailPollStatus(ctx, "user@imap.example.com:993/INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("expected a status after recording a poll")
+	}
+	if got.Status != "ok" || got.LastError != "" || !got.LastPolledAt.Equal(firstPoll) {
+		t.Errorf("unexpected status after first record: %+v", got)
+	}
+
+	// A second poll upserts the row rather than accumulating history.
+	secondPoll := firstPoll.Add(5 * time.Minute)
+	if err := s.RecordMailPollStatus(ctx, "user@imap.example.com:993/INBOX", secondPoll, "error", "network timeout"); err != nil {
+		t.Fatalf("RecordMailPollStatus (update): %v", err)
+	}
+
+	got, err = s.GetMailPollStatus(ctx, "user@imap.example.com:993/INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("expected a status after the second record")
+	}
+	if got.Status != "error" || got.LastError != "network timeout" || !got.LastPolledAt.Equal(secondPoll) {
+		t.Errorf("expected upserted status, got %+v", got)
+	}
+
+	// A different account's status is independent.
+	otherGot, err := s.GetMailPollStatus(ctx, "other@imap.example.com:993/INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if otherGot != nil {
+		t.Errorf("expected nil status for a different account, got %+v", otherGot)
 	}
 }
 

@@ -27,13 +27,22 @@ import (
 
 type imapClient interface {
 	Login(username, password string) error
-	Select(folder string) error
-	Search(criteria *imap.SearchCriteria) ([]uint32, error)
-	FetchEnvelopes(seqs []uint32) ([]*imapMessage, error)
-	Fetch(seqs []uint32) ([]*imapMessage, error)
+	Select(folder string) (*mailboxStatus, error)
+	SearchUID(criteria *imap.SearchCriteria) ([]imap.UID, error)
+	FetchEnvelopesUID(uids []imap.UID) ([]*imapMessage, error)
+	FetchUID(uids []imap.UID) ([]*imapMessage, error)
 	StoreSeen(seq uint32) error
 	Move(seq uint32, dest string) error
 	Close() error
+}
+
+// mailboxStatus is the subset of a SELECT response needed to decide whether
+// the next poll can resume from a stored UID cursor (UIDValidity unchanged)
+// or must rescan from UID 1 (first poll, or the server assigned a new UID
+// sequence).
+type mailboxStatus struct {
+	UIDValidity uint32
+	UIDNext     uint32
 }
 
 type imapEnvelope struct {
@@ -42,6 +51,7 @@ type imapEnvelope struct {
 
 type imapMessage struct {
 	SeqNum   uint32
+	UID      imap.UID
 	Envelope *imapEnvelope
 	Body     []byte
 }
@@ -54,28 +64,31 @@ func (c *realIMAPClient) Login(username, password string) error {
 	return c.Client.Login(username, password).Wait()
 }
 
-func (c *realIMAPClient) Select(folder string) error {
-	_, err := c.Client.Select(folder, nil).Wait()
-	return err
-}
-
-func (c *realIMAPClient) Search(criteria *imap.SearchCriteria) ([]uint32, error) {
-	searchData, err := c.Client.Search(criteria, nil).Wait()
+func (c *realIMAPClient) Select(folder string) (*mailboxStatus, error) {
+	data, err := c.Client.Select(folder, nil).Wait()
 	if err != nil {
 		return nil, err
 	}
-	return searchData.AllSeqNums(), nil
+	return &mailboxStatus{UIDValidity: data.UIDValidity, UIDNext: uint32(data.UIDNext)}, nil
 }
 
-func (c *realIMAPClient) FetchEnvelopes(seqs []uint32) ([]*imapMessage, error) {
-	if len(seqs) == 0 {
+func (c *realIMAPClient) SearchUID(criteria *imap.SearchCriteria) ([]imap.UID, error) {
+	searchData, err := c.Client.UIDSearch(criteria, nil).Wait()
+	if err != nil {
+		return nil, err
+	}
+	return searchData.AllUIDs(), nil
+}
+
+func (c *realIMAPClient) FetchEnvelopesUID(uids []imap.UID) ([]*imapMessage, error) {
+	if len(uids) == 0 {
 		return nil, nil
 	}
-	seqSet := imap.SeqSetNum(seqs...)
+	uidSet := imap.UIDSetNum(uids...)
 	fetchOptions := &imap.FetchOptions{
 		Envelope: true,
 	}
-	fetchCmd := c.Client.Fetch(seqSet, fetchOptions)
+	fetchCmd := c.Client.Fetch(uidSet, fetchOptions)
 	defer fetchCmd.Close()
 
 	var results []*imapMessage
@@ -97,24 +110,25 @@ func (c *realIMAPClient) FetchEnvelopes(seqs []uint32) ([]*imapMessage, error) {
 		}
 		results = append(results, &imapMessage{
 			SeqNum:   msgBuf.SeqNum,
+			UID:      msgBuf.UID,
 			Envelope: env,
 		})
 	}
 	return results, fetchCmd.Close()
 }
 
-func (c *realIMAPClient) Fetch(seqs []uint32) ([]*imapMessage, error) {
-	if len(seqs) == 0 {
+func (c *realIMAPClient) FetchUID(uids []imap.UID) ([]*imapMessage, error) {
+	if len(uids) == 0 {
 		return nil, nil
 	}
-	seqSet := imap.SeqSetNum(seqs...)
+	uidSet := imap.UIDSetNum(uids...)
 	fetchOptions := &imap.FetchOptions{
 		Envelope: true,
 		BodySection: []*imap.FetchItemBodySection{
 			{Peek: true},
 		},
 	}
-	fetchCmd := c.Client.Fetch(seqSet, fetchOptions)
+	fetchCmd := c.Client.Fetch(uidSet, fetchOptions)
 	defer fetchCmd.Close()
 
 	var results []*imapMessage
@@ -143,6 +157,7 @@ func (c *realIMAPClient) Fetch(seqs []uint32) ([]*imapMessage, error) {
 		}
 		results = append(results, &imapMessage{
 			SeqNum:   msgBuf.SeqNum,
+			UID:      msgBuf.UID,
 			Envelope: env,
 			Body:     body,
 		})
@@ -277,7 +292,7 @@ func (m *MailPoller) pollLoop(ctx context.Context, acc config.IMAPAccount, index
 	defer ticker.Stop()
 
 	// Initial poll
-	if err := m.pollAccount(ctx, acc); err != nil {
+	if err := m.pollAccountAndRecord(ctx, acc); err != nil {
 		log.Printf("[MailPoller] Account %d (%s) initial poll failed: %s (run 'symingest doctor' for details)", index, acc.Username, mailPollLogReason(err))
 	}
 
@@ -286,11 +301,28 @@ func (m *MailPoller) pollLoop(ctx context.Context, acc config.IMAPAccount, index
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := m.pollAccount(ctx, acc); err != nil {
+			if err := m.pollAccountAndRecord(ctx, acc); err != nil {
 				log.Printf("[MailPoller] Account %d (%s) poll failed: %s (run 'symingest doctor' for details)", index, acc.Username, mailPollLogReason(err))
 			}
 		}
 	}
+}
+
+// pollAccountAndRecord runs pollAccount and persists the outcome so
+// `symingest mail list` and `symingest doctor` can surface the last poll
+// status without relying on log files.
+func (m *MailPoller) pollAccountAndRecord(ctx context.Context, acc config.IMAPAccount) error {
+	err := m.pollAccount(ctx, acc)
+	status := "ok"
+	lastError := ""
+	if err != nil {
+		status = "error"
+		lastError = mailPollLogReason(err)
+	}
+	if recErr := m.store.RecordMailPollStatus(ctx, config.AccountID(acc), time.Now(), status, lastError); recErr != nil {
+		log.Printf("[MailPoller] failed to record poll status for %s: %v", acc.Username, recErr)
+	}
+	return err
 }
 
 func (m *MailPoller) pollAccount(ctx context.Context, acc config.IMAPAccount) error {
@@ -314,57 +346,78 @@ func (m *MailPoller) pollAccount(ctx context.Context, acc config.IMAPAccount) er
 	if folder == "" {
 		folder = "INBOX"
 	}
-	if err := client.Select(folder); err != nil {
+	status, err := client.Select(folder)
+	if err != nil {
 		return fmt.Errorf("select folder %q: %w", folder, err)
 	}
 
-	searchCriteria := &imap.SearchCriteria{}
+	// Resume from the last processed UID when the mailbox's UID sequence is
+	// still the one we last saw; otherwise (first poll, or the server
+	// assigned a new UID sequence) scan from the beginning.
+	accountID := config.AccountID(acc)
+	cursor, err := m.store.GetMailPollCursor(ctx, accountID)
+	if err != nil {
+		return fmt.Errorf("load poll cursor: %w", err)
+	}
+	startUID := uint32(1)
+	if cursor != nil && cursor.UIDValidity == status.UIDValidity {
+		startUID = cursor.LastUID + 1
+	}
+
+	searchCriteria := &imap.SearchCriteria{
+		UID: []imap.UIDSet{{imap.UIDRange{Start: imap.UID(startUID), Stop: 0}}},
+	}
 	if acc.Action == "mark_seen" {
 		searchCriteria.NotFlag = []imap.Flag{imap.FlagSeen}
 	}
 
-	seqs, err := client.Search(searchCriteria)
+	uids, err := client.SearchUID(searchCriteria)
 	if err != nil {
-		return fmt.Errorf("search: %w", err)
+		return fmt.Errorf("uid search: %w", err)
 	}
 
-	if len(seqs) == 0 {
-		return nil
-	}
-
-	envelopes, err := client.FetchEnvelopes(seqs)
-	if err != nil {
-		return fmt.Errorf("fetch envelopes: %w", err)
-	}
-
-	var newSeqs []uint32
-	for _, env := range envelopes {
-		if env.Envelope == nil || env.Envelope.MessageID == "" {
-			newSeqs = append(newSeqs, env.SeqNum)
-			continue
-		}
-		has, err := m.store.HasMailMessage(ctx, env.Envelope.MessageID)
+	if len(uids) > 0 {
+		envelopes, err := client.FetchEnvelopesUID(uids)
 		if err != nil {
-			return fmt.Errorf("check idempotency: %w", err)
+			return fmt.Errorf("fetch envelopes: %w", err)
 		}
-		if !has {
-			newSeqs = append(newSeqs, env.SeqNum)
+
+		var newUIDs []imap.UID
+		for _, env := range envelopes {
+			if env.Envelope == nil || env.Envelope.MessageID == "" {
+				newUIDs = append(newUIDs, env.UID)
+				continue
+			}
+			has, err := m.store.HasMailMessage(ctx, env.Envelope.MessageID)
+			if err != nil {
+				return fmt.Errorf("check idempotency: %w", err)
+			}
+			if !has {
+				newUIDs = append(newUIDs, env.UID)
+			}
+		}
+
+		if len(newUIDs) > 0 {
+			messages, err := client.FetchUID(newUIDs)
+			if err != nil {
+				return fmt.Errorf("fetch: %w", err)
+			}
+			for _, msg := range messages {
+				if err := m.processMessage(ctx, acc, client, msg); err != nil {
+					log.Printf("[MailPoller] Failed to process message %v: %v", msg.SeqNum, err)
+				}
+			}
 		}
 	}
 
-	if len(newSeqs) == 0 {
-		return nil
+	// UIDNext is always one past the highest UID the server currently knows
+	// about, so it is a safe resume point even for a poll that found nothing.
+	newLastUID := uint32(0)
+	if status.UIDNext > 0 {
+		newLastUID = status.UIDNext - 1
 	}
-
-	messages, err := client.Fetch(newSeqs)
-	if err != nil {
-		return fmt.Errorf("fetch: %w", err)
-	}
-
-	for _, msg := range messages {
-		if err := m.processMessage(ctx, acc, client, msg); err != nil {
-			log.Printf("[MailPoller] Failed to process message %v: %v", msg.SeqNum, err)
-		}
+	if err := m.store.SetMailPollCursor(ctx, accountID, folder, status.UIDValidity, newLastUID); err != nil {
+		return fmt.Errorf("save poll cursor: %w", err)
 	}
 
 	return nil

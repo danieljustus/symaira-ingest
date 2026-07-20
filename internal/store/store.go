@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -392,6 +393,79 @@ func (s *Store) HasMailMessage(ctx context.Context, messageID string) (bool, err
 // TrackMailMessage records that a message_id has been processed.
 func (s *Store) TrackMailMessage(ctx context.Context, messageID, sourceMailbox string) error {
 	_, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO mail_messages (message_id, source_mailbox) VALUES (?, ?)", messageID, sourceMailbox)
+	return err
+}
+
+// MailPollStatus is the last recorded outcome of polling one IMAP account.
+type MailPollStatus struct {
+	AccountID    string    `json:"account_id"`
+	LastPolledAt time.Time `json:"last_polled_at"`
+	Status       string    `json:"status"` // "ok" or "error"
+	LastError    string    `json:"last_error,omitempty"`
+}
+
+// RecordMailPollStatus upserts the outcome of the most recent poll attempt
+// for an IMAP account, identified by its stable config.AccountID.
+func (s *Store) RecordMailPollStatus(ctx context.Context, accountID string, polledAt time.Time, status, lastError string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO mail_poll_status (account_id, last_polled_at, status, last_error) VALUES (?, ?, ?, ?)
+		 ON CONFLICT(account_id) DO UPDATE SET last_polled_at = excluded.last_polled_at, status = excluded.status, last_error = excluded.last_error`,
+		accountID, polledAt, status, lastError)
+	return err
+}
+
+// GetMailPollStatus returns the last recorded poll status for an account, or
+// nil if the account has never been polled.
+func (s *Store) GetMailPollStatus(ctx context.Context, accountID string) (*MailPollStatus, error) {
+	var st MailPollStatus
+	var lastError sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		"SELECT account_id, last_polled_at, status, last_error FROM mail_poll_status WHERE account_id = ?", accountID,
+	).Scan(&st.AccountID, &st.LastPolledAt, &st.Status, &lastError)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	st.LastError = lastError.String
+	return &st, nil
+}
+
+// MailPollCursor tracks the last IMAP UID processed for one account+folder,
+// so a poll can resume with `UID SEARCH UID <last+1>:*` instead of
+// rescanning the whole folder. UIDValidity guards against a server assigning
+// a fresh UID sequence (e.g. after a folder rebuild), which invalidates any
+// previously recorded LastUID.
+type MailPollCursor struct {
+	AccountID   string
+	Folder      string
+	UIDValidity uint32
+	LastUID     uint32
+}
+
+// GetMailPollCursor returns the last recorded poll cursor for an account, or
+// nil if the account has never been polled.
+func (s *Store) GetMailPollCursor(ctx context.Context, accountID string) (*MailPollCursor, error) {
+	var c MailPollCursor
+	err := s.db.QueryRowContext(ctx,
+		"SELECT account_id, folder, uid_validity, last_uid FROM mail_poll_cursor WHERE account_id = ?", accountID,
+	).Scan(&c.AccountID, &c.Folder, &c.UIDValidity, &c.LastUID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// SetMailPollCursor upserts the poll cursor for an account.
+func (s *Store) SetMailPollCursor(ctx context.Context, accountID, folder string, uidValidity, lastUID uint32) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO mail_poll_cursor (account_id, folder, uid_validity, last_uid) VALUES (?, ?, ?, ?)
+		 ON CONFLICT(account_id) DO UPDATE SET folder = excluded.folder, uid_validity = excluded.uid_validity, last_uid = excluded.last_uid`,
+		accountID, folder, uidValidity, lastUID)
 	return err
 }
 

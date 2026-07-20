@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/danieljustus/symaira-ingest/internal/config"
 )
@@ -304,7 +305,7 @@ func TestPrintMailList_EmptyAccounts(t *testing.T) {
 		Path:     "/tmp/config.toml",
 		Accounts: []config.IMAPAccount{},
 	}
-	err := printMailList(doc, false)
+	err := printMailList(doc, false, nil)
 	if err != nil {
 		t.Fatalf("printMailList: %v", err)
 	}
@@ -330,7 +331,7 @@ func TestPrintMailList_WithAccounts(t *testing.T) {
 			{Host: "imap.example.com", Port: 993, Username: "user", Folder: "INBOX"},
 		},
 	}
-	err := printMailList(doc, false)
+	err := printMailList(doc, false, nil)
 	if err != nil {
 		t.Fatalf("printMailList: %v", err)
 	}
@@ -342,6 +343,38 @@ func TestPrintMailList_WithAccounts(t *testing.T) {
 	if !strings.Contains(out, "user@imap.example.com") {
 		t.Errorf("expected account ID in output, got: %s", out)
 	}
+	if !strings.Contains(out, "last poll: never") {
+		t.Errorf("expected 'last poll: never' for an account with no recorded poll, got: %s", out)
+	}
+}
+
+func TestPrintMailList_WithPollStatus(t *testing.T) {
+	old := stdout
+	defer func() { stdout = old }()
+	r, w, _ := os.Pipe()
+	stdout = w
+
+	acc := config.IMAPAccount{Host: "imap.example.com", Port: 993, Username: "user", Folder: "INBOX"}
+	doc := &config.MailConfigDocument{
+		Path:     "/tmp/config.toml",
+		Accounts: []config.IMAPAccount{acc},
+	}
+	polledAt := time.Date(2026, 7, 20, 10, 0, 0, 0, time.UTC)
+	pollStatus := map[string]mailPollStatus{
+		config.AccountID(acc): {LastPolledAt: polledAt, Status: "error", LastError: "network timeout"},
+	}
+	err := printMailList(doc, false, pollStatus)
+	if err != nil {
+		t.Fatalf("printMailList: %v", err)
+	}
+	w.Close()
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	out := buf.String()
+	if !strings.Contains(out, "last poll: "+polledAt.Format(time.RFC3339)+" failed (network timeout)") {
+		t.Errorf("expected last poll failure line, got: %s", out)
+	}
 }
 
 func TestPrintMailList_JSON(t *testing.T) {
@@ -349,9 +382,39 @@ func TestPrintMailList_JSON(t *testing.T) {
 		Path:     "/tmp/config.toml",
 		Accounts: []config.IMAPAccount{},
 	}
-	err := printMailList(doc, true)
+	err := printMailList(doc, true, nil)
 	if err != nil {
 		t.Fatalf("printMailList --json: %v", err)
+	}
+}
+
+func TestPrintMailList_JSON_IncludesPollStatus(t *testing.T) {
+	var sb strings.Builder
+	old := stdout
+	stdout = &sb
+	defer func() { stdout = old }()
+
+	acc := config.IMAPAccount{Host: "imap.example.com", Port: 993, Username: "user", Folder: "INBOX"}
+	doc := &config.MailConfigDocument{
+		Path:     "/tmp/config.toml",
+		Accounts: []config.IMAPAccount{acc},
+	}
+	polledAt := time.Date(2026, 7, 20, 10, 0, 0, 0, time.UTC)
+	pollStatus := map[string]mailPollStatus{
+		config.AccountID(acc): {LastPolledAt: polledAt, Status: "ok"},
+	}
+	if err := printMailList(doc, true, pollStatus); err != nil {
+		t.Fatalf("printMailList --json: %v", err)
+	}
+	var decoded struct {
+		PollStatus map[string]mailPollStatus `json:"poll_status"`
+	}
+	if err := json.Unmarshal([]byte(sb.String()), &decoded); err != nil {
+		t.Fatalf("decode JSON: %v\n%s", err, sb.String())
+	}
+	got, ok := decoded.PollStatus[config.AccountID(acc)]
+	if !ok || got.Status != "ok" {
+		t.Fatalf("expected poll_status entry for %s, got: %+v", config.AccountID(acc), decoded.PollStatus)
 	}
 }
 
