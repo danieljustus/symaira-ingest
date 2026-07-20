@@ -230,6 +230,9 @@ func (m *MailPoller) Start(ctx context.Context) error {
 	m.cancel = cancel
 
 	for i, acc := range m.accounts {
+		if secret.IsPlaintext(acc.PasswordSecret) {
+			log.Printf("[MailPoller] Account %d (%s) stores its password in plaintext config; use keychain:// or symvault:// instead (run 'symingest doctor' for details)", i, acc.Username)
+		}
 		m.wg.Add(1)
 		go func(account config.IMAPAccount, index int) {
 			defer m.wg.Done()

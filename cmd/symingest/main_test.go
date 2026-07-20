@@ -115,6 +115,45 @@ func TestRun_ServiceInstallDryRunDoesNotEmbedSecrets(t *testing.T) {
 	}
 }
 
+func TestRun_ImportPaperless_TokenResolvesEnvScheme(t *testing.T) {
+	t.Setenv("TEST_IMPORT_PAPERLESS_TOKEN", "resolved-secret-token")
+
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		switch r.URL.Path {
+		case "/api/documents/":
+			json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []any{}, "next": nil})
+		default:
+			json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []any{}, "next": nil})
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	var sb strings.Builder
+	oldStdout := stdout
+	stdout = &sb
+	defer func() { stdout = oldStdout }()
+
+	err := run([]string{
+		"import", "paperless",
+		"-db", filepath.Join(dir, "test.db"),
+		"-base-url", srv.URL,
+		"-token", "env://TEST_IMPORT_PAPERLESS_TOKEN",
+		"-plan",
+	})
+	if err != nil {
+		t.Fatalf("run(import paperless -plan): %v", err)
+	}
+	if gotAuth != "Token resolved-secret-token" {
+		t.Fatalf("expected resolved token in Authorization header, got %q", gotAuth)
+	}
+	if strings.Contains(sb.String(), "resolved-secret-token") {
+		t.Fatalf("output leaked the resolved token: %s", sb.String())
+	}
+}
+
 func TestRun_ImportPaperlessDeepRequiresVerify(t *testing.T) {
 	err := run([]string{"import", "paperless", "-base-url", "https://paperless.example", "-token", "test-token", "-deep"})
 	if err == nil || exitcodes.ExitCodeFromError(err) != exitcodes.ExitData {
@@ -846,6 +885,64 @@ func TestCheckIMAP_SecretResolutionFailure(t *testing.T) {
 	}
 }
 
+func TestCheckIMAP_WarnsOnPlaintextPasswordSecret(t *testing.T) {
+	origDial := doctorDialIMAP
+	defer func() { doctorDialIMAP = origDial }()
+
+	fake := &doctorFakeIMAPClient{}
+	doctorDialIMAP = func(addr, host string) (doctorIMAPClient, error) {
+		return fake, nil
+	}
+
+	report := &doctorReport{Status: doctorOK}
+	accounts := []config.IMAPAccount{{
+		Username:       "user@example.com",
+		PasswordSecret: "hunter2",
+		Host:           "imap.example.com",
+		Port:           993,
+	}}
+	checkIMAP(context.Background(), report, accounts)
+
+	if report.Warnings != 1 {
+		t.Fatalf("expected 1 warning, got %d", report.Warnings)
+	}
+	if report.Checks[0].Status != doctorWarn {
+		t.Fatalf("expected first check to warn, got %s", report.Checks[0].Status)
+	}
+	if !strings.Contains(report.Checks[0].Message, "plaintext") {
+		t.Fatalf("expected warning message to mention plaintext, got: %s", report.Checks[0].Message)
+	}
+	if strings.Contains(report.Checks[0].Message, "hunter2") {
+		t.Fatalf("warning message must not leak the plaintext secret, got: %s", report.Checks[0].Message)
+	}
+}
+
+func TestCheckIMAP_NoWarningForResolvedSecret(t *testing.T) {
+	origDial := doctorDialIMAP
+	defer func() { doctorDialIMAP = origDial }()
+
+	fake := &doctorFakeIMAPClient{}
+	doctorDialIMAP = func(addr, host string) (doctorIMAPClient, error) {
+		return fake, nil
+	}
+
+	os.Setenv("TEST_CHECKIMAP_NO_WARN", "value")
+	defer os.Unsetenv("TEST_CHECKIMAP_NO_WARN")
+
+	report := &doctorReport{Status: doctorOK}
+	accounts := []config.IMAPAccount{{
+		Username:       "user@example.com",
+		PasswordSecret: "env://TEST_CHECKIMAP_NO_WARN",
+		Host:           "imap.example.com",
+		Port:           993,
+	}}
+	checkIMAP(context.Background(), report, accounts)
+
+	if report.Warnings != 0 {
+		t.Fatalf("expected 0 warnings, got %d", report.Warnings)
+	}
+}
+
 func TestCheckIMAP_DialFailure(t *testing.T) {
 	origDial := doctorDialIMAP
 	defer func() { doctorDialIMAP = origDial }()
@@ -866,8 +963,8 @@ func TestCheckIMAP_DialFailure(t *testing.T) {
 	if report.Failures != 1 {
 		t.Fatalf("expected 1 failure, got %d", report.Failures)
 	}
-	if !strings.Contains(report.Checks[0].Message, "cannot connect") {
-		t.Fatalf("unexpected message: %s", report.Checks[0].Message)
+	if !strings.Contains(report.Checks[1].Message, "cannot connect") {
+		t.Fatalf("unexpected message: %s", report.Checks[1].Message)
 	}
 }
 
@@ -895,8 +992,8 @@ func TestCheckIMAP_LoginFailure(t *testing.T) {
 	if !fake.loggedOut {
 		t.Fatal("expected client to be logged out after login failure")
 	}
-	if !strings.Contains(report.Checks[0].Message, "login failed") {
-		t.Fatalf("unexpected message: %s", report.Checks[0].Message)
+	if !strings.Contains(report.Checks[1].Message, "login failed") {
+		t.Fatalf("unexpected message: %s", report.Checks[1].Message)
 	}
 }
 
@@ -925,8 +1022,8 @@ func TestCheckIMAP_FolderSelectionFailure(t *testing.T) {
 	if !fake.loggedOut {
 		t.Fatal("expected client to be logged out after select failure")
 	}
-	if !strings.Contains(report.Checks[0].Message, "cannot select folder") {
-		t.Fatalf("unexpected message: %s", report.Checks[0].Message)
+	if !strings.Contains(report.Checks[1].Message, "cannot select folder") {
+		t.Fatalf("unexpected message: %s", report.Checks[1].Message)
 	}
 }
 
@@ -951,8 +1048,8 @@ func TestCheckIMAP_Success(t *testing.T) {
 	if report.Failures != 0 {
 		t.Fatalf("expected 0 failures, got %d", report.Failures)
 	}
-	if report.Checks[0].Status != doctorOK {
-		t.Fatalf("expected ok status, got %s", report.Checks[0].Status)
+	if report.Checks[1].Status != doctorOK {
+		t.Fatalf("expected ok status, got %s", report.Checks[1].Status)
 	}
 	if !fake.loggedOut {
 		t.Fatal("expected client to be logged out")
@@ -1009,14 +1106,20 @@ func TestCheckIMAP_MultipleAccounts(t *testing.T) {
 	if report.Failures != 1 {
 		t.Fatalf("expected 1 failure, got %d", report.Failures)
 	}
-	if len(report.Checks) != 2 {
-		t.Fatalf("expected 2 checks, got %d", len(report.Checks))
+	if len(report.Checks) != 4 {
+		t.Fatalf("expected 4 checks, got %d", len(report.Checks))
 	}
-	if report.Checks[0].Status != doctorFail {
-		t.Fatalf("first check should fail, got %s", report.Checks[0].Status)
+	if report.Checks[0].Status != doctorWarn {
+		t.Fatalf("first check should warn about plaintext secret, got %s", report.Checks[0].Status)
 	}
-	if report.Checks[1].Status != doctorOK {
-		t.Fatalf("second check should pass, got %s", report.Checks[1].Status)
+	if report.Checks[1].Status != doctorFail {
+		t.Fatalf("second check should fail, got %s", report.Checks[1].Status)
+	}
+	if report.Checks[2].Status != doctorWarn {
+		t.Fatalf("third check should warn about plaintext secret, got %s", report.Checks[2].Status)
+	}
+	if report.Checks[3].Status != doctorOK {
+		t.Fatalf("fourth check should pass, got %s", report.Checks[3].Status)
 	}
 }
 

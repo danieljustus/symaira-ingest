@@ -17,6 +17,7 @@ import (
 	"github.com/danieljustus/symaira-ingest/internal/ingest"
 	"github.com/danieljustus/symaira-ingest/internal/ocr"
 	"github.com/danieljustus/symaira-ingest/internal/paperlessimport"
+	"github.com/danieljustus/symaira-ingest/internal/secret"
 	"github.com/danieljustus/symaira-ingest/internal/store"
 	"github.com/danieljustus/symaira-ingest/internal/writer"
 )
@@ -24,7 +25,7 @@ import (
 func runImport(args []string) error {
 	fs := flag.NewFlagSet("import paperless", flag.ContinueOnError)
 	baseURL := fs.String("base-url", "", "Paperless-ngx instance URL (or PAPERLESS_URL env)")
-	token := fs.String("token", "", "API token (or PAPERLESS_TOKEN env)")
+	token := fs.String("token", "", "API token, or PAPERLESS_TOKEN env; also accepts keychain://service/account or symvault://ref")
 	sinceStr := fs.String("since", "", "Only import documents whose Paperless created date is on or after this date (YYYY-MM-DD)")
 	limit := fs.Int("limit", 0, "Import at most N documents (newest first); 0 means no limit")
 	idsStr := fs.String("ids", "", "Import only these Paperless document IDs (comma-separated); takes precedence over --since and --limit")
@@ -196,6 +197,15 @@ func runImport(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if *token != "" {
+		resolvedToken, err := secret.Resolve(ctx, *token)
+		if err != nil {
+			return exitcodes.Wrap(err, exitcodes.ExitConfig, exitcodes.KindConfig,
+				"failed to resolve --token")
+		}
+		*token = resolvedToken
+	}
 
 	var st *store.Store
 	{

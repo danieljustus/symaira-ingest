@@ -78,6 +78,27 @@ func TestResolve(t *testing.T) {
 	})
 }
 
+func TestIsPlaintext(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"plaintext", "just-a-string", true},
+		{"env", "env://SOME_VAR", false},
+		{"symvault", "symvault://my.ref", false},
+		{"keychain", "keychain://service/account", false},
+		{"empty", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsPlaintext(tt.in); got != tt.want {
+				t.Errorf("IsPlaintext(%q) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestResolve_DelegationAndErrors(t *testing.T) {
 	origSym := symvaultGetFn
 	origKey := keychainGetFn
