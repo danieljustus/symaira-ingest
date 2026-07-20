@@ -1457,6 +1457,61 @@ func TestMailPoller_RePollNoBodyFetch(t *testing.T) {
 	}
 }
 
+func TestMailPoller_PollAccountAndRecord_RecordsSuccessAndFailure(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	acc := config.IMAPAccount{
+		Username:       "user@example.com",
+		PasswordSecret: "plaintext-pw",
+		Host:           "imap.example.com",
+		Port:           993,
+	}
+	accountID := config.AccountID(acc)
+
+	poller, err := NewMailPoller(s, []config.IMAPAccount{acc}, MailPollerOptions{Interval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Failure: dial fails.
+	poller.dialIMAP = func(ctx context.Context, addr, host string) (imapClient, error) {
+		return nil, errors.New("connection refused")
+	}
+	if err := poller.pollAccountAndRecord(context.Background(), acc); err == nil {
+		t.Fatal("expected pollAccountAndRecord to surface the dial error")
+	}
+	got, err := s.GetMailPollStatus(context.Background(), accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Status != "error" || got.LastError == "" {
+		t.Fatalf("expected a recorded error status, got %+v", got)
+	}
+	if strings.Contains(got.LastError, "connection refused") {
+		t.Errorf("recorded error must not leak the raw poll error, got: %s", got.LastError)
+	}
+
+	// Success: dial and login succeed.
+	poller.dialIMAP = func(ctx context.Context, addr, host string) (imapClient, error) {
+		return &fakeIMAPClient{}, nil
+	}
+	if err := poller.pollAccountAndRecord(context.Background(), acc); err != nil {
+		t.Fatalf("expected success, got: %v", err)
+	}
+	got, err = s.GetMailPollStatus(context.Background(), accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Status != "ok" || got.LastError != "" {
+		t.Fatalf("expected a recorded ok status, got %+v", got)
+	}
+}
+
 func TestMailPoller_Start_WarnsOnPlaintextPasswordSecret(t *testing.T) {
 	dir := t.TempDir()
 	s, err := store.Open(filepath.Join(dir, "test.db"))

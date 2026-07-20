@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -8,9 +9,11 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/danieljustus/symaira-corekit/exitcodes"
 	"github.com/danieljustus/symaira-ingest/internal/config"
+	"github.com/danieljustus/symaira-ingest/internal/store"
 )
 
 const mailJSONSchemaVersion = config.MailJSONSchemaVersion
@@ -18,17 +21,56 @@ const mailJSONSchemaVersion = config.MailJSONSchemaVersion
 const mailWriteReloadSemantics = "Changes are written atomically and take effect on the next symingest watch restart; an already-running watcher is not hot-reloaded."
 
 type mailJSONResponse struct {
-	SchemaVersion   int                      `json:"schema_version"`
-	Operation       string                   `json:"operation"`
-	ConfigPath      string                   `json:"config_path"`
-	Accounts        []config.MailAccountView `json:"accounts"`
-	Account         *config.MailAccountView  `json:"account,omitempty"`
-	Deleted         bool                     `json:"deleted,omitempty"`
-	Valid           bool                     `json:"valid,omitempty"`
-	Errors          []string                 `json:"errors,omitempty"`
-	Warnings        []string                 `json:"warnings,omitempty"`
-	ReloadRequired  bool                     `json:"reload_required"`
-	ReloadSemantics string                   `json:"reload_semantics,omitempty"`
+	SchemaVersion   int                       `json:"schema_version"`
+	Operation       string                    `json:"operation"`
+	ConfigPath      string                    `json:"config_path"`
+	Accounts        []config.MailAccountView  `json:"accounts"`
+	Account         *config.MailAccountView   `json:"account,omitempty"`
+	Deleted         bool                      `json:"deleted,omitempty"`
+	Valid           bool                      `json:"valid,omitempty"`
+	Errors          []string                  `json:"errors,omitempty"`
+	Warnings        []string                  `json:"warnings,omitempty"`
+	ReloadRequired  bool                      `json:"reload_required"`
+	ReloadSemantics string                    `json:"reload_semantics,omitempty"`
+	PollStatus      map[string]mailPollStatus `json:"poll_status,omitempty"`
+}
+
+// mailPollStatus is the JSON view of store.MailPollStatus, keyed by
+// config.AccountID in mailJSONResponse.PollStatus.
+type mailPollStatus struct {
+	LastPolledAt time.Time `json:"last_polled_at"`
+	Status       string    `json:"status"`
+	LastError    string    `json:"last_error,omitempty"`
+}
+
+// loadMailPollStatus reads the last recorded poll outcome for each account
+// from the document store. Errors opening the store are non-fatal: poll
+// status is best-effort diagnostic information, not required for `mail list`
+// to function.
+func loadMailPollStatus(dbPath string, accounts []config.IMAPAccount) map[string]mailPollStatus {
+	if dbPath == "" || len(accounts) == 0 {
+		return nil
+	}
+	st, err := store.Open(dbPath)
+	if err != nil {
+		return nil
+	}
+	defer st.Close()
+
+	ctx := context.Background()
+	result := make(map[string]mailPollStatus)
+	for _, acc := range accounts {
+		id := config.AccountID(acc)
+		s, err := st.GetMailPollStatus(ctx, id)
+		if err != nil || s == nil {
+			continue
+		}
+		result[id] = mailPollStatus{LastPolledAt: s.LastPolledAt, Status: s.Status, LastError: s.LastError}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 type mailInput struct {
@@ -40,6 +82,7 @@ type mailInput struct {
 func runMail(args []string) error {
 	fs := flagNewMail()
 	mailFlags := mailFlagsFor(fs)
+	ocrLang, vault, archive, db := registerSharedFlags(fs)
 	help, err := parseFlags(fs, args, "invalid mail flags")
 	if help || err != nil {
 		return err
@@ -75,7 +118,12 @@ func runMail(args []string) error {
 
 	switch action {
 	case "list":
-		return printMailList(document, *mailFlags.outputJSON)
+		cfg, cfgErr := resolveConfig(fs, ocrLang, vault, archive, db)
+		dbPath := ""
+		if cfgErr == nil {
+			dbPath = cfg.db
+		}
+		return printMailList(document, *mailFlags.outputJSON, loadMailPollStatus(dbPath, document.Accounts))
 	case "create":
 		return runMailCreate(configPath, document, *mailFlags.inputPath, *mailFlags.outputJSON)
 	case "update":
@@ -148,8 +196,8 @@ func runMailValidate(path string, outputJSON bool) error {
 	return nil
 }
 
-func printMailList(document *config.MailConfigDocument, outputJSON bool) error {
-	response := mailJSONResponse{SchemaVersion: mailJSONSchemaVersion, Operation: "list", ConfigPath: document.Path, Accounts: []config.MailAccountView{}, ReloadRequired: false}
+func printMailList(document *config.MailConfigDocument, outputJSON bool, pollStatus map[string]mailPollStatus) error {
+	response := mailJSONResponse{SchemaVersion: mailJSONSchemaVersion, Operation: "list", ConfigPath: document.Path, Accounts: []config.MailAccountView{}, ReloadRequired: false, PollStatus: pollStatus}
 	for _, account := range document.Accounts {
 		response.Accounts = append(response.Accounts, config.ViewAccount(account))
 	}
@@ -162,6 +210,15 @@ func printMailList(document *config.MailConfigDocument, outputJSON bool) error {
 	}
 	for _, account := range response.Accounts {
 		fmt.Fprintf(stdout, "%s: %s@%s:%d folder=%s password=%s\n", account.ID, account.Username, account.Host, account.Port, account.Folder, account.PasswordSecretKind)
+		if s, ok := pollStatus[account.ID]; ok {
+			if s.Status == "ok" {
+				fmt.Fprintf(stdout, "  last poll: %s ok\n", s.LastPolledAt.Format(time.RFC3339))
+			} else {
+				fmt.Fprintf(stdout, "  last poll: %s failed (%s)\n", s.LastPolledAt.Format(time.RFC3339), s.LastError)
+			}
+		} else {
+			fmt.Fprintln(stdout, "  last poll: never")
+		}
 	}
 	return nil
 }

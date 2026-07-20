@@ -277,7 +277,7 @@ func (m *MailPoller) pollLoop(ctx context.Context, acc config.IMAPAccount, index
 	defer ticker.Stop()
 
 	// Initial poll
-	if err := m.pollAccount(ctx, acc); err != nil {
+	if err := m.pollAccountAndRecord(ctx, acc); err != nil {
 		log.Printf("[MailPoller] Account %d (%s) initial poll failed: %s (run 'symingest doctor' for details)", index, acc.Username, mailPollLogReason(err))
 	}
 
@@ -286,11 +286,28 @@ func (m *MailPoller) pollLoop(ctx context.Context, acc config.IMAPAccount, index
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := m.pollAccount(ctx, acc); err != nil {
+			if err := m.pollAccountAndRecord(ctx, acc); err != nil {
 				log.Printf("[MailPoller] Account %d (%s) poll failed: %s (run 'symingest doctor' for details)", index, acc.Username, mailPollLogReason(err))
 			}
 		}
 	}
+}
+
+// pollAccountAndRecord runs pollAccount and persists the outcome so
+// `symingest mail list` and `symingest doctor` can surface the last poll
+// status without relying on log files.
+func (m *MailPoller) pollAccountAndRecord(ctx context.Context, acc config.IMAPAccount) error {
+	err := m.pollAccount(ctx, acc)
+	status := "ok"
+	lastError := ""
+	if err != nil {
+		status = "error"
+		lastError = mailPollLogReason(err)
+	}
+	if recErr := m.store.RecordMailPollStatus(ctx, config.AccountID(acc), time.Now(), status, lastError); recErr != nil {
+		log.Printf("[MailPoller] failed to record poll status for %s: %v", acc.Username, recErr)
+	}
+	return err
 }
 
 func (m *MailPoller) pollAccount(ctx context.Context, acc config.IMAPAccount) error {
