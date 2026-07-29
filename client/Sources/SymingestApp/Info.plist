@@ -4,8 +4,10 @@
 <dict>
 	<key>CFBundleIdentifier</key>
 	<string>dev.symaira.Symingest</string>
+	<key>CFBundleDisplayName</key>
+	<string>Symaira Ingest</string>
 	<key>CFBundleName</key>
-	<string>Symingest</string>
+	<string>Symaira Ingest</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

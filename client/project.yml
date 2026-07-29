@@ -35,8 +35,6 @@ targets:
         product: SymairaDaemonKit
     sources:
       - path: Sources/SymingestApp
-        excludes:
-          - "**/*.xcassets"
     entitlements:
       path: Symingest.entitlements
     settings:
@@ -47,6 +45,7 @@ targets:
         CODE_SIGN_STYLE: Manual
         ENABLE_HARDENED_RUNTIME: true
         COMBINE_HIDPI_IMAGES: true
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     postBuildScripts:
       - name: Embed symingest Engine
         script: |
