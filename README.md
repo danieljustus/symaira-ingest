@@ -29,6 +29,7 @@ go install github.com/danieljustus/symaira-ingest/cmd/symingest@latest
 - `pdftoppm` (for PDF rendering)
 - Poppler `pdfinfo`, `pdfseparate` and `pdfunite` (for PDF split/merge)
 - `qpdf` (optional; required for PDF page rotation)
+- `magika` (optional; content-type verification via google/magika; warns on extension/MIME mismatch during file type detection)
 - `sips` on macOS for direct HEIC/HEIF OCR when Paperless has no archived PDF rendition
 
 ## Usage

@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/danieljustus/symaira-ingest/internal/filetype"
 )
 
 // Kind is a normalized MIME-like type for supported sources.
@@ -45,6 +47,9 @@ type Engine interface {
 }
 
 // Detect identifies the kind of file at path using magic bytes and extension fallback.
+// When the optional magika CLI (google/magika) is installed, its result is compared
+// against the extension-based guess and mismatches are logged as warnings to stderr.
+// The magika result never overrides the detected kind.
 func Detect(path string) (Kind, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -59,56 +64,70 @@ func Detect(path string) (Kind, error) {
 	}
 	head := buf[:n]
 
+	var kind Kind
+
 	switch {
 	case len(head) >= 4 && bytes.Equal(head[:4], []byte("%PDF")):
-		return KindPDF, nil
+		kind = KindPDF
 	case len(head) >= 8 && bytes.Equal(head[:8], []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}):
-		return KindPNG, nil
+		kind = KindPNG
 	case len(head) >= 3 && bytes.Equal(head[:3], []byte{0xFF, 0xD8, 0xFF}):
-		return KindJPEG, nil
+		kind = KindJPEG
 	case len(head) >= 4 && (bytes.Equal(head[:4], []byte("II*\x00")) || bytes.Equal(head[:4], []byte("MM\x00*"))):
-		return KindTIFF, nil
+		kind = KindTIFF
 	case len(head) >= 12 && bytes.Equal(head[:4], []byte("RIFF")) && bytes.Equal(head[8:12], []byte("WEBP")):
-		return KindWebP, nil
+		kind = KindWebP
 	case len(head) >= 12 && bytes.Equal(head[4:8], []byte("ftyp")) && isHEIFBrand(string(head[8:12])):
-		return KindHEIC, nil
+		kind = KindHEIC
 	}
 
-	ext := strings.ToLower(filepath.Ext(path))
-	switch ext {
-	case ".txt", ".text":
-		return KindText, nil
-	case ".csv":
-		return KindCSV, nil
-	case ".md", ".markdown":
-		return KindMarkdown, nil
-	case ".html", ".htm":
-		return KindHTML, nil
-	case ".rtf":
-		return KindRTF, nil
-	case ".docx":
-		return KindDOCX, nil
-	case ".xlsx":
-		return KindXLSX, nil
-	case ".odt":
-		return KindODT, nil
-	case ".eml":
-		return KindEML, nil
-	case ".pdf":
-		return KindPDF, nil
-	case ".png":
-		return KindPNG, nil
-	case ".jpg", ".jpeg":
-		return KindJPEG, nil
-	case ".tiff", ".tif":
-		return KindTIFF, nil
-	case ".webp":
-		return KindWebP, nil
-	case ".heic", ".heif":
-		return KindHEIC, nil
+	if kind == "" {
+		ext := strings.ToLower(filepath.Ext(path))
+		switch ext {
+		case ".txt", ".text":
+			kind = KindText
+		case ".csv":
+			kind = KindCSV
+		case ".md", ".markdown":
+			kind = KindMarkdown
+		case ".html", ".htm":
+			kind = KindHTML
+		case ".rtf":
+			kind = KindRTF
+		case ".docx":
+			kind = KindDOCX
+		case ".xlsx":
+			kind = KindXLSX
+		case ".odt":
+			kind = KindODT
+		case ".eml":
+			kind = KindEML
+		case ".pdf":
+			kind = KindPDF
+		case ".png":
+			kind = KindPNG
+		case ".jpg", ".jpeg":
+			kind = KindJPEG
+		case ".tiff", ".tif":
+			kind = KindTIFF
+		case ".webp":
+			kind = KindWebP
+		case ".heic", ".heif":
+			kind = KindHEIC
+		}
 	}
 
-	return KindUnknown, fmt.Errorf("unsupported file type: %s", path)
+	if kind == "" {
+		return KindUnknown, fmt.Errorf("unsupported file type: %s", path)
+	}
+
+	// When magika is installed, verify the extension-based guess and log
+	// mismatches as warnings (advisory only, never overrides the detected kind).
+	filetype.VerifyAgainstGuess(path, string(kind), func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, format+"\n", args...)
+	})
+
+	return kind, nil
 }
 
 func IsExplicitlyUnsupported(kind Kind) bool {
