@@ -257,6 +257,7 @@ func runDoctorChecks(ctx context.Context, cfg *resolvedConfig, includePaperless 
 	checkOptionalCommand(report, "tool.optional.pdfseparate", "pdfseparate")
 	checkOptionalCommand(report, "tool.optional.pdfunite", "pdfunite")
 	checkOptionalCommand(report, "tool.optional.qpdf", "qpdf")
+	checkOptionalCommand(report, "tool.optional.magika", "magika")
 	if len(cfg.raw.IMAPAccounts) > 0 {
 		checkIMAP(ctx, report, cfg.raw.IMAPAccounts)
 		checkMailPollStatus(ctx, report, cfg.db, cfg.raw.IMAPAccounts)
