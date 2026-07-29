@@ -3,9 +3,24 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'LICENSE'
+      - '.github/ISSUE_TEMPLATE/**'
   pull_request:
     branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'LICENSE'
+      - '.github/ISSUE_TEMPLATE/**'
+  schedule:
+    - cron: '47 5 * * 1'  # weekly Monday 05:47 UTC — full suite incl. macOS client
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 
@@ -37,6 +52,7 @@ jobs:
 
   macos-client:
     name: macOS client build
+    if: github.event_name != 'pull_request'  # PR gate = Go CLI only; client build on main/schedule
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
