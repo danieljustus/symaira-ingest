@@ -1,15 +1,18 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/danieljustus/symaira-corekit/exitcodes"
 	"github.com/danieljustus/symaira-corekit/logkit"
+	"github.com/danieljustus/symaira-corekit/updatecheck"
 	"github.com/danieljustus/symaira-corekit/versionkit"
 
 	"github.com/danieljustus/symaira-ingest/internal/config"
@@ -17,6 +20,13 @@ import (
 )
 
 var stdout io.Writer = os.Stdout
+
+// checkForUpdateFn is the function used to check for updates.
+// It is a package-level variable to allow injection in tests.
+var checkForUpdateFn = func(ctx context.Context, currentVersion string) (*updatecheck.Release, error) {
+	checker := updatecheck.NewChecker("danieljustus", "symaira-ingest")
+	return checker.Check(ctx, currentVersion)
+}
 
 func main() {
 	logkit.InitDefault("symingest")
@@ -26,18 +36,30 @@ func main() {
 	}
 }
 
-func run(args []string) error {
+func run(args []string) (retErr error) {
 	if len(args) == 0 {
 		return printUsage()
 	}
 
+	// Fire-and-forget update check after every successful non-trivial command.
+	// Skipped for version, help, and MCP server since these are either
+	// self-referential, trivial, or long-lived.
+	defer func() {
+		if retErr == nil && !isSilentCommand(args[0]) {
+			checkForUpdateAsync(version.Version)
+		}
+	}()
+
 	switch args[0] {
 	case "--version", "-v", "version":
+		checkFlag := false
 		jsonFlag := false
 		for _, arg := range args[1:] {
 			if arg == "--json" {
 				jsonFlag = true
-				break
+			}
+			if arg == "--check" {
+				checkFlag = true
 			}
 		}
 		info := versionkit.New("symingest", version.Version, 1)
@@ -45,6 +67,20 @@ func run(args []string) error {
 			return info.Write(stdout)
 		}
 		fmt.Fprintln(stdout, info.String())
+		if checkFlag {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			release, err := checkForUpdateFn(ctx, version.Version)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "update check failed: %v\n", err)
+				return nil
+			}
+			if release != nil {
+				fmt.Fprintf(os.Stderr, "\nUpdate available: %s\nDownload: %s\n", release.TagName, release.HTMLURL)
+			} else {
+				fmt.Fprintln(os.Stderr, "Already up to date.")
+			}
+		}
 		return nil
 	case "--help", "-h", "help":
 		return printUsage()
@@ -262,4 +298,32 @@ func defaultArchivePath() (string, error) {
 			"cannot determine home directory; use --archive to specify an archive path explicitly")
 	}
 	return filepath.Join(home, ".local", "share", "symingest", "archive"), nil
+}
+
+// checkForUpdateAsync checks GitHub for a newer version of symingest.
+// It prints a notice on stderr if a newer stable release exists.
+// It is best-effort: it never blocks the caller and never fails on network
+// errors. Results are cached in-memory for 24h by the updatecheck package.
+func checkForUpdateAsync(currentVersion string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		checker := updatecheck.NewChecker("danieljustus", "symaira-ingest")
+		release, err := checker.Check(ctx, currentVersion)
+		if err != nil || release == nil {
+			return
+		}
+		fmt.Fprintf(os.Stderr, "\nUpdate available: %s\nDownload: %s\n", release.TagName, release.HTMLURL)
+	}()
+}
+
+// isSilentCommand returns true for commands where the post-execution update
+// check should be skipped: version (handled by --check explicitly), help
+// (trivial), and mcp (long-lived server).
+func isSilentCommand(cmd string) bool {
+	switch cmd {
+	case "--version", "-v", "version", "--help", "-h", "help", "mcp":
+		return true
+	}
+	return false
 }
