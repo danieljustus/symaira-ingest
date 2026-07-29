@@ -78,6 +78,9 @@ jobs:
             echo "::warning::NOTARY_API_KEY secret is not set. Skipping CLI notarization."
             exit 0
           fi
+          NOTARY_KEY=$(mktemp -t notary_cli)
+          echo -n "${NOTARY_API_KEY}" | base64 -d > "$NOTARY_KEY"
+          chmod 600 "$NOTARY_KEY"
           for ARCH in amd64 arm64; do
             for f in dist/*_darwin_"${ARCH}"/*; do
               if [ -f "$f" ] && file "$f" | grep -q "Mach-O"; then
@@ -85,14 +88,15 @@ jobs:
                 ZIP_PATH="$RUNNER_TEMP/notarize_cli_${ARCH}.zip"
                 ditto -c -k --keepParent "$f" "$ZIP_PATH"
                 xcrun notarytool submit "$ZIP_PATH" \
-                  --apple-id "${NOTARY_API_KEY_ID}" \
-                  --team-id "${NOTARY_API_ISSUER}" \
-                  --password "${NOTARY_API_KEY}" \
+                  --key "$NOTARY_KEY" \
+                  --key-id "${NOTARY_API_KEY_ID}" \
+                  --issuer "${NOTARY_API_ISSUER}" \
                   --wait
                 rm -f "$ZIP_PATH"
               fi
             done
           done
+          rm -f "$NOTARY_KEY"
 
       - name: Clean up signing material
         if: always()
@@ -251,22 +255,27 @@ jobs:
             echo "::warning::NOTARY_API_KEY secret is not set. Skipping DMG notarization."
             exit 0
           fi
+          NOTARY_KEY=$(mktemp -t notary_dmg)
+          echo -n "${NOTARY_API_KEY}" | base64 -d > "$NOTARY_KEY"
+          chmod 600 "$NOTARY_KEY"
           NOTARY_OUTPUT="$RUNNER_TEMP/notarytool-dmg-submit.json"
           if ! xcrun notarytool submit dist/Symingest.dmg \
-            --apple-id "${NOTARY_API_KEY_ID}" \
-            --team-id "${NOTARY_API_ISSUER}" \
-            --password "${NOTARY_API_KEY}" \
+            --key "$NOTARY_KEY" \
+            --key-id "${NOTARY_API_KEY_ID}" \
+            --issuer "${NOTARY_API_ISSUER}" \
             --wait \
             --output-format json | tee "$NOTARY_OUTPUT"; then
             SUBMISSION_ID=$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("id", ""))' "$NOTARY_OUTPUT" 2>/dev/null || true)
             if [ -n "$SUBMISSION_ID" ]; then
               xcrun notarytool log "$SUBMISSION_ID" \
-                --apple-id "${NOTARY_API_KEY_ID}" \
-                --team-id "${NOTARY_API_ISSUER}" \
-                --password "${NOTARY_API_KEY}" || true
+                --key "$NOTARY_KEY" \
+                --key-id "${NOTARY_API_KEY_ID}" \
+                --issuer "${NOTARY_API_ISSUER}" || true
             fi
+            rm -f "$NOTARY_KEY"
             exit 1
           fi
+          rm -f "$NOTARY_KEY"
           xcrun stapler staple dist/Symingest.dmg
           xcrun stapler validate dist/Symingest.dmg
           spctl -a -t open --context context:primary-signature -v dist/Symingest.dmg
