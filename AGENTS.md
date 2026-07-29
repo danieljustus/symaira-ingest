@@ -32,20 +32,34 @@ Standard Go layout: `cmd/<name>/main.go` → `internal/` packages.
 | Package | Purpose |
 |---------|---------|
 | `config` | CLI flag parsing, config file loading |
-| `ingest` | Core pipeline orchestration, dedup detection |
-| `extract` | Text extraction from PDFs/images (tesseract, pdftoppm) |
-| `ocr` | OCR engine abstraction |
-| `frontmatter` | YAML frontmatter generation |
-| `writer` | Markdown note writer (vault path resolution) |
-| `store` | SQLite-backed dedup store (`modernc.org/sqlite`) |
-| `mcp` | MCP server registration (`ingest_file` tool) |
+| `ingest` | Core pipeline orchestration, dedup detection, mail polling |
+| `extract` | Structured-data extraction (dates, amounts, invoice/contract/jobcenter profiles) |
+| `ocr` | OCR engine abstraction (tesseract, pdftoppm, sips) |
+| `pdfops` | PDF split/merge/rotate (Poppler, qpdf) |
+| `annotate` | Text extraction from PDFs/images and office formats |
+| `barcode` | Separator/barcode detection for PDF splitting |
+| `writer` | Markdown note + YAML frontmatter writer (vault path resolution) |
+| `store` | SQLite-backed dedup/job store (`modernc.org/sqlite`) |
+| `paperless` | Paperless-ngx API client |
+| `paperlessimport` | Paperless-ngx import, verify, migration reports |
+| `notionimport` | Notion Markdown + CSV export import |
+| `vaultreview` | Migration review reports and corrections/bulk-update |
+| `symseek` | Optional post-ingest search indexing/validation via `symseek` |
+| `secret` | Secret resolution (`symvault://`, `env://`, `keychain://`, plaintext) |
+| `mcp` | MCP server registration (multiple tools, see below) |
 | `version` | Version string embedding |
 
 ## MCP Server
 
-Exposes one tool via stdio transport:
+Exposes multiple tools via stdio transport (`internal/mcp/mcp.go`, `internal/mcp/pdf_tools.go`):
 
 - **`ingest_file`** — Ingest a single file, returns metadata (vault_path, MIME, engine, text_length)
+- **`reocr`** — Reprocess an archived original by `document_id` or source path
+- **`split_pdf` / `merge_pdf` / `rotate_pdf`** — PDF page tools, optionally re-ingesting the result
+- **`list_jobs` / `retry_job`** — Job queue inspection and retry
+- **`start_watch` / `stop_watch`** — Watcher lifecycle control
+- **`list_rules` / `add_rule` / `delete_rule`** — Classification rule management
+- **`import_paperless`** — Paperless-ngx import with the same options as the CLI
 
 **Zero stdio pollution:** All logs to `os.Stderr`. Only JSON-RPC 2.0 on `os.Stdout`.
 
