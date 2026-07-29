@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/danieljustus/symaira-corekit/exitcodes"
+	"github.com/danieljustus/symaira-corekit/updatecheck"
 
 	"github.com/danieljustus/symaira-ingest/internal/config"
 	"github.com/danieljustus/symaira-ingest/internal/paperlessimport"
@@ -45,6 +47,88 @@ func TestRun_Version(t *testing.T) {
 	gotJSON := strings.TrimSpace(sb.String())
 	if !strings.Contains(gotJSON, `"tool":"symingest"`) {
 		t.Errorf("expected JSON version output to contain tool 'symingest', got %q", gotJSON)
+	}
+}
+
+func TestRun_VersionCheck(t *testing.T) {
+	// Stub the update check function to return a newer release.
+	oldFn := checkForUpdateFn
+	defer func() { checkForUpdateFn = oldFn }()
+
+	checkForUpdateFn = func(_ context.Context, currentVersion string) (*updatecheck.Release, error) {
+		if currentVersion == "" {
+			return nil, nil
+		}
+		return &updatecheck.Release{
+			TagName: "v9.9.9",
+			HTMLURL: "https://github.com/danieljustus/symaira-ingest/releases/v9.9.9",
+		}, nil
+	}
+
+	var sb strings.Builder
+	oldStdout := stdout
+	stdout = &sb
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+	defer func() {
+		stdout = oldStdout
+		os.Stderr = oldStderr
+	}()
+
+	// Capture stderr into eb
+	errCh := make(chan string, 1)
+	go func() {
+		var b strings.Builder
+		_, _ = io.Copy(&b, r)
+		errCh <- b.String()
+	}()
+
+	if err := run([]string{"version", "--check"}); err != nil {
+		t.Fatalf("run(version --check): %v", err)
+	}
+	w.Close()
+	stderrOutput := <-errCh
+
+	if !strings.Contains(sb.String(), "symingest") {
+		t.Errorf("stdout should contain version, got %q", sb.String())
+	}
+	if !strings.Contains(stderrOutput, "Update available: v9.9.9") {
+		t.Errorf("stderr should announce update, got %q", stderrOutput)
+	}
+	if !strings.Contains(stderrOutput, "danieljustus/symaira-ingest/releases/v9.9.9") {
+		t.Errorf("stderr should contain download URL, got %q", stderrOutput)
+	}
+}
+
+func TestRun_VersionCheckUpToDate(t *testing.T) {
+	oldFn := checkForUpdateFn
+	defer func() { checkForUpdateFn = oldFn }()
+
+	checkForUpdateFn = func(_ context.Context, _ string) (*updatecheck.Release, error) {
+		return nil, nil // no update available
+	}
+
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+	defer func() { os.Stderr = oldStderr }()
+
+	errCh := make(chan string, 1)
+	go func() {
+		var b strings.Builder
+		_, _ = io.Copy(&b, r)
+		errCh <- b.String()
+	}()
+
+	if err := run([]string{"version", "--check"}); err != nil {
+		t.Fatalf("run(version --check): %v", err)
+	}
+	w.Close()
+	stderrOutput := <-errCh
+
+	if !strings.Contains(stderrOutput, "Already up to date.") {
+		t.Errorf("stderr should say 'Already up to date.', got %q", stderrOutput)
 	}
 }
 
