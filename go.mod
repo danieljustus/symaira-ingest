@@ -4,13 +4,13 @@ go 1.26.4
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/danieljustus/symaira-corekit v0.5.0
+	github.com/danieljustus/symaira-corekit v0.7.0
 	github.com/emersion/go-imap/v2 v2.0.0-beta.8
 	github.com/emersion/go-message v0.18.2
 	github.com/fsnotify/fsnotify v1.10.1
 	golang.org/x/sync v0.22.0
 	gopkg.in/yaml.v3 v3.0.1
-	modernc.org/sqlite v1.54.0
+	modernc.org/sqlite v1.55.0
 )
 
 require (
