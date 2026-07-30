@@ -301,3 +301,76 @@ jobs:
           if [ -n "${KEYCHAIN_PATH:-}" ] && [ -f "$KEYCHAIN_PATH" ]; then
             security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
           fi
+
+  update-homebrew-cask:
+    name: Update Homebrew Cask
+    runs-on: ubuntu-latest
+    needs: macos-gui-dmg
+    if: success()
+    permissions:
+      contents: read
+    steps:
+      - name: Compute DMG checksum
+        run: |
+          set -euo pipefail
+          VERSION="${{ github.ref_name }}"
+          DMG_URL="https://github.com/danieljustus/symaira-ingest/releases/download/${VERSION}/Symingest.dmg"
+          echo "Downloading $DMG_URL ..."
+          curl -fsSL -o /tmp/Symingest.dmg "$DMG_URL"
+          SHA256=$(sha256sum /tmp/Symingest.dmg | cut -d' ' -f1)
+          echo "SHA256: $SHA256"
+          echo "SHA256=$SHA256" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "VERSION_CLEAN=${VERSION#v}" >> "$GITHUB_ENV"
+
+      - name: Checkout Homebrew tap
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # pin@v7
+        with:
+          repository: danieljustus/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          path: tap
+
+      - name: Write Cask
+        run: |
+          set -euo pipefail
+          mkdir -p tap/Casks
+          cat > tap/Casks/symingest.rb << 'CASKRB'
+          cask "symingest" do
+            version "${VERSION_CLEAN}"
+            sha256 "${SHA256}"
+
+            url "https://github.com/danieljustus/symaira-ingest/releases/download/v#{version}/Symingest.dmg",
+                verified: "github.com/danieljustus/symaira-ingest/"
+            name "Symingest"
+            desc "Document ingestion + OCR pipeline for the Symaira ecosystem"
+            homepage "https://github.com/danieljustus/symaira-ingest"
+
+            depends_on macos: ">= :ventura"
+
+            app "Symingest.app"
+
+            zap trash: [
+              "~/Library/Application Support/Symingest",
+              "~/Library/Preferences/dev.symaira.symingest.plist",
+              "~/Library/Logs/Symingest",
+            ]
+          end
+          CASKRB
+
+          # Replace templated variables with actual values
+          sed -i "s/\${VERSION_CLEAN}/${VERSION_CLEAN}/g" tap/Casks/symingest.rb
+          sed -i "s/\${SHA256}/${SHA256}/g" tap/Casks/symingest.rb
+
+      - name: Commit and push Cask
+        run: |
+          set -euo pipefail
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/symingest.rb
+          if git diff --cached --quiet; then
+            echo "Cask unchanged, skipping commit."
+            exit 0
+          fi
+          git commit -m "Update symingest cask to ${VERSION}"
+          git push
