@@ -19,6 +19,13 @@ type Config struct {
 	SymseekBinary    string        `json:"symseek_binary"`
 	IMAPAccounts     []IMAPAccount `json:"imap_accounts"`
 	IMAPPollInterval string        `json:"imap_poll_interval"` // e.g. "5m"
+
+	// Ollama config for VLM-based OCR. When OllamaModel is set, the VLM
+	// engine is used for image formats (PNG, JPEG, TIFF, WebP) with
+	// Tesseract as fallback. PDF and HEIC continue through the Tesseract
+	// pipeline. When empty, only Tesseract is used — no behaviour change.
+	OllamaBaseURL string `json:"ollama_base_url"`
+	OllamaModel   string `json:"ollama_model"`
 }
 
 // IMAPAccount configures an IMAP mailbox source for ingestion.
