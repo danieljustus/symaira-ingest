@@ -4,7 +4,7 @@ go 1.26.4
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/danieljustus/symaira-corekit v0.7.0
+	github.com/danieljustus/symaira-corekit v0.8.1-0.20260731170901-2ba377c3ec01
 	github.com/emersion/go-imap/v2 v2.0.0-beta.8
 	github.com/emersion/go-message v0.18.2
 	github.com/fsnotify/fsnotify v1.10.1

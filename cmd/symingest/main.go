@@ -202,6 +202,8 @@ type resolvedConfig struct {
 	paperlessBaseURL string
 	symseekEnabled   bool
 	symseekBinary    string
+	ollamaBaseURL    string
+	ollamaModel      string
 	raw              config.Config
 }
 
@@ -278,6 +280,8 @@ func resolveConfig(fs *flag.FlagSet, ocrLang, vaultFlag, archiveFlag, dbFlag *st
 		paperlessBaseURL: cfg.PaperlessBaseURL,
 		symseekEnabled:   cfg.SymseekEnabled,
 		symseekBinary:    cfg.SymseekBinary,
+		ollamaBaseURL:    cfg.OllamaBaseURL,
+		ollamaModel:      cfg.OllamaModel,
 		raw:              *cfg,
 	}, nil
 }

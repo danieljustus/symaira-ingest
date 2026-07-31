@@ -50,7 +50,7 @@ func runIngest(args []string) error {
 	}
 	defer st.Close()
 
-	engine := ocr.DefaultRunner(cfg.ocrLang)
+	engine := ocr.NewEngine(cfg.ocrLang, cfg.ollamaBaseURL, cfg.ollamaModel)
 	pipeline := &ingest.Pipeline{
 		Engine:     engine,
 		Store:      st,

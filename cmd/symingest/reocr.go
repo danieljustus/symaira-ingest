@@ -176,7 +176,7 @@ func runReocr(args []string) error {
 	}
 
 	pipeline := &ingest.Pipeline{
-		Engine:     ocr.DefaultRunner(cfg.ocrLang),
+		Engine:     ocr.NewEngine(cfg.ocrLang, cfg.ollamaBaseURL, cfg.ollamaModel),
 		Store:      st,
 		Writer:     &writer.NoteWriter{Vault: cfg.vault},
 		ArchiveDir: cfg.archive,

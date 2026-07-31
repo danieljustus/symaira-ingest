@@ -242,7 +242,7 @@ func runImport(args []string) error {
 		return nil
 	}
 
-	engine := ocr.DefaultRunner(cfg.ocrLang)
+	engine := ocr.NewEngine(cfg.ocrLang, cfg.ollamaBaseURL, cfg.ollamaModel)
 	pipeline := &ingest.Pipeline{
 		Engine:     engine,
 		Store:      st,
