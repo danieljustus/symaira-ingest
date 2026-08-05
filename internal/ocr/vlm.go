@@ -11,12 +11,21 @@ import (
 	"github.com/danieljustus/symaira-ingest/internal/extract"
 )
 
+// ollamaClient is the minimal Ollama surface VLMRunner needs. It is an
+// interface so tests can inject a fake client; *ollamakit.Client satisfies
+// it (Generate has exactly this signature).
+type ollamaClient interface {
+	Generate(ctx context.Context, model, prompt string, opts *ollamakit.GenerateOptions, cb func(ollamakit.GenerateResponse) error) error
+}
+
 // VLMRunner implements extract.Engine using a local vision-language model
 // via Ollama. Tesseract remains the fallback when Ollama is unreachable or
 // the model is not found.
 type VLMRunner struct {
-	// Ollama is the configured Ollama client.
-	Ollama *ollamakit.Client
+	// Ollama is the configured Ollama client. It is typed as an interface
+	// so tests can inject a fake; NewVLMRunner populates it with a real
+	// *ollamakit.Client.
+	Ollama ollamaClient
 
 	// OllamaModel is the model name passed to Ollama, e.g. "paddleocr-vl:0.9b".
 	OllamaModel string
@@ -117,9 +126,16 @@ func (r *VLMRunner) extractWithVLM(ctx context.Context, path string, kind extrac
 		}, nil
 	}
 
+	// Report the configured model name as the engine so downstream can tell
+	// which model produced the result. A runner constructed without a model
+	// (e.g. directly in tests) falls back to the generic label "vlm".
+	engine := r.OllamaModel
+	if engine == "" {
+		engine = "vlm"
+	}
 	return &extract.Result{
 		Text:   strings.TrimSpace(resultText),
 		MIME:   "image/ocr",
-		Engine: "paddleocr-vl",
+		Engine: engine,
 	}, nil
 }
