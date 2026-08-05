@@ -12,8 +12,13 @@ import (
 )
 
 // TestOCRBenchmark runs the reference corpus through Tesseract and computes CER/WER.
-// It is skipped when tesseract is not on PATH.
+// It is a measurement test, not a pass/fail gate: it is skipped with -short
+// (the default inner-loop mode) and when tesseract is not on PATH. Run without
+// -short to get the benchmark output.
 func TestOCRBenchmark(t *testing.T) {
+	if testing.Short() {
+		t.Skip("benchmark skipped in -short mode; run without -short to measure")
+	}
 	if !isTesseractLikelyAvailable() {
 		t.Skip("tesseract not found on PATH — skipping benchmark")
 	}
