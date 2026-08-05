@@ -11,9 +11,7 @@ import (
 	"github.com/danieljustus/symaira-ingest/internal/extract"
 )
 
-// ollamaClient is the minimal Ollama surface VLMRunner needs. It is an
-// interface so tests can inject a fake client; *ollamakit.Client satisfies
-// it (Generate has exactly this signature).
+// ollamaClient is the minimal Ollama surface VLMRunner needs.
 type ollamaClient interface {
 	Generate(ctx context.Context, model, prompt string, opts *ollamakit.GenerateOptions, cb func(ollamakit.GenerateResponse) error) error
 }
@@ -22,9 +20,7 @@ type ollamaClient interface {
 // via Ollama. Tesseract remains the fallback when Ollama is unreachable or
 // the model is not found.
 type VLMRunner struct {
-	// Ollama is the configured Ollama client. It is typed as an interface
-	// so tests can inject a fake; NewVLMRunner populates it with a real
-	// *ollamakit.Client.
+	// Ollama is the configured Ollama client; tests can inject a fake.
 	Ollama ollamaClient
 
 	// OllamaModel is the model name passed to Ollama, e.g. "paddleocr-vl:0.9b".
@@ -53,10 +49,7 @@ func NewVLMRunner(baseURL, model, ocrLang string, fallback *Runner) *VLMRunner {
 	}
 }
 
-// NewEngine returns the appropriate OCR engine based on configuration.
-// When ollamaModel is non-empty, a VLMRunner with Tesseract fallback is
-// returned. Otherwise, the standard Tesseract Runner is returned — no
-// behaviour change for existing installations.
+// NewEngine returns the configured VLM engine or the standard Tesseract runner.
 func NewEngine(ocrLang, ollamaBaseURL, ollamaModel string) extract.Engine {
 	if ollamaModel != "" {
 		return NewVLMRunner(ollamaBaseURL, ollamaModel, ocrLang, nil)
@@ -85,10 +78,7 @@ func (r *VLMRunner) Extract(ctx context.Context, path string, kind extract.Kind)
 	case extract.KindPNG, extract.KindJPEG, extract.KindTIFF, extract.KindWebP:
 		return r.extractWithVLM(ctx, path, kind)
 	case extract.KindPDF, extract.KindHEIC:
-		// PDF multi-page and HEIC conversion remain with the Tesseract
-		// pipeline. VLMs can handle both, but the existing pdftoppm
-		// and sips pipelines are battle-tested; replacing them is a
-		// separate evaluation step.
+		// Keep the existing multi-page/conversion pipelines for these kinds.
 		return r.Fallback.Extract(ctx, path, kind)
 	default:
 		return nil, fmt.Errorf("ocr: unsupported source kind %q", kind)
@@ -126,9 +116,7 @@ func (r *VLMRunner) extractWithVLM(ctx context.Context, path string, kind extrac
 		}, nil
 	}
 
-	// Report the configured model name as the engine so downstream can tell
-	// which model produced the result. A runner constructed without a model
-	// (e.g. directly in tests) falls back to the generic label "vlm".
+	// Preserve the model name for downstream traceability.
 	engine := r.OllamaModel
 	if engine == "" {
 		engine = "vlm"
