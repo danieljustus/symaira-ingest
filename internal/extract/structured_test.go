@@ -152,8 +152,56 @@ func TestReadStructuredKind_XLSX(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertContains(t, res.Text, "sheet1.xml")
-	assertContains(t, res.Text, "Header 42")
+	assertContains(t, res.Text, "| Header | 42 |")
 	assertContains(t, res.Text, "Invoice 123")
+}
+
+func TestReadStructuredKind_XLSX_SheetTitles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "titled.xlsx")
+	writeZip(t, path, map[string]string{
+		"xl/workbook.xml":            `<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Revenue" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+		"xl/_rels/workbook.xml.rels": `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`,
+		"xl/sharedStrings.xml":       `<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>Total</t></si></sst>`,
+		"xl/worksheets/sheet1.xml":   `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row><c t="s"><v>0</v></c><c><v>42</v></c></row></sheetData></worksheet>`,
+	})
+	res, err := ReadStructuredKind(context.Background(), path, KindXLSX)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertContains(t, res.Text, "Revenue")
+	if strings.Contains(res.Text, "sheet1.xml") {
+		t.Fatalf("sheet title must come from workbook.xml, got %q", res.Text)
+	}
+	assertContains(t, res.Text, "| Total | 42 |")
+}
+
+func TestReadStructuredKind_DOCXTable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "table.docx")
+	writeZip(t, path, map[string]string{
+		"word/document.xml": `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Before table</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:r><w:t>Item</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Price</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:p><w:r><w:t>Chair</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>12,50</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:t>After table</w:t></w:r></w:p></w:body></w:document>`,
+	})
+	res, err := ReadStructuredKind(context.Background(), path, KindDOCX)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertContains(t, res.Text, "Before table")
+	assertContains(t, res.Text, "| Item | Price |")
+	assertContains(t, res.Text, "| Chair | 12,50 |")
+	assertContains(t, res.Text, "After table")
+}
+
+func TestGfmTable_HeaderAlignmentAndEscaping(t *testing.T) {
+	got := gfmTable([][]string{{"A|B", "Line1\nLine2"}, {"x", "y"}})
+	want := "| A\\|B | Line1 Line2 |\n| --- | --- |\n| x | y |\n"
+	if got != want {
+		t.Fatalf("gfmTable = %q, want %q", got, want)
+	}
+}
+
+func TestGfmTable_Empty(t *testing.T) {
+	if got := gfmTable(nil); got != "" {
+		t.Fatalf("gfmTable(nil) = %q, want empty", got)
+	}
 }
 
 func TestReadStructuredKind_EMLPlainAndHTML(t *testing.T) {

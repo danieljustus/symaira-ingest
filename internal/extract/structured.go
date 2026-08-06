@@ -205,6 +205,18 @@ func readDOCX(path string) (string, error) {
 func wordXMLToText(r io.Reader) (string, error) {
 	dec := xml.NewDecoder(r)
 	var out strings.Builder
+	var table [][]string
+	var row []string
+	var cell strings.Builder
+	inTable := false
+	inCell := false
+	flushTable := func() {
+		if len(table) == 0 {
+			return
+		}
+		out.WriteString(gfmTable(table))
+		table = nil
+	}
 	for {
 		tok, err := dec.Token()
 		if err == io.EOF {
@@ -216,16 +228,62 @@ func wordXMLToText(r io.Reader) (string, error) {
 		switch t := tok.(type) {
 		case xml.StartElement:
 			switch t.Name.Local {
+			case "tbl":
+				inTable = true
+			case "tr":
+				if inTable {
+					row = nil
+				}
+			case "tc":
+				if inTable {
+					inCell = true
+					cell.Reset()
+				}
 			case "t":
 				var text string
 				if err := dec.DecodeElement(&text, &t); err != nil {
 					return "", err
 				}
-				out.WriteString(text)
+				if inCell {
+					cell.WriteString(text)
+				} else if !inTable {
+					out.WriteString(text)
+				}
 			case "tab":
-				out.WriteByte('\t')
-			case "br", "cr", "p":
-				out.WriteByte('\n')
+				if inCell {
+					cell.WriteByte(' ')
+				} else if !inTable {
+					out.WriteByte('	')
+				}
+			case "br", "cr":
+				if inCell {
+					cell.WriteByte('\n')
+				} else if !inTable {
+					out.WriteByte('\n')
+				}
+			case "p":
+				if inCell {
+					cell.WriteByte('\n')
+				} else if !inTable {
+					out.WriteByte('\n')
+				}
+			}
+		case xml.EndElement:
+			switch t.Name.Local {
+			case "tc":
+				if inTable && inCell {
+					row = append(row, cell.String())
+					inCell = false
+				}
+			case "tr":
+				if inTable {
+					table = append(table, row)
+				}
+			case "tbl":
+				if inTable {
+					flushTable()
+					inTable = false
+				}
 			}
 		}
 	}
@@ -409,6 +467,10 @@ func readXLSX(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	sheetNames, err := workbookSheetNames(a)
+	if err != nil {
+		return "", err
+	}
 	var names []string
 	for _, f := range a.rc.File {
 		if strings.HasPrefix(f.Name, "xl/worksheets/sheet") && strings.HasSuffix(f.Name, ".xml") {
@@ -430,7 +492,11 @@ func readXLSX(path string) (string, error) {
 			if out.Len() > 0 {
 				out.WriteString("\n\n")
 			}
-			out.WriteString(filepath.Base(name))
+			title := sheetNames[filepath.Base(name)]
+			if title == "" {
+				title = filepath.Base(name)
+			}
+			out.WriteString(title)
 			out.WriteByte('\n')
 			out.WriteString(text)
 		}
@@ -465,6 +531,75 @@ func readSharedStrings(a *zipArchive) ([]string, error) {
 		}
 	}
 	return vals, nil
+}
+
+// workbookSheetNames resolves human-readable sheet titles from
+// xl/workbook.xml, using xl/_rels/workbook.xml.rels to map each sheet's
+// relationship id to its part file name. A missing workbook.xml yields an
+// empty map and callers fall back to the part file name.
+func workbookSheetNames(a *zipArchive) (map[string]string, error) {
+	names := map[string]string{}
+	data, err := a.readPart("xl/workbook.xml")
+	if err != nil {
+		return nil, err
+	}
+	if data == nil {
+		return names, nil
+	}
+	rels := map[string]string{}
+	if rdata, err := a.readPart("xl/_rels/workbook.xml.rels"); err != nil {
+		return nil, err
+	} else if rdata != nil {
+		dec := xml.NewDecoder(bytes.NewReader(rdata))
+		for {
+			tok, err := dec.Token()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return nil, fmt.Errorf("parse workbook rels: %w", err)
+			}
+			if start, ok := tok.(xml.StartElement); ok && start.Name.Local == "Relationship" {
+				var id, target string
+				for _, attr := range start.Attr {
+					switch attr.Name.Local {
+					case "Id":
+						id = attr.Value
+					case "Target":
+						target = attr.Value
+					}
+				}
+				if id != "" && target != "" {
+					rels[id] = filepath.Base(target)
+				}
+			}
+		}
+	}
+	dec := xml.NewDecoder(bytes.NewReader(data))
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("parse workbook.xml: %w", err)
+		}
+		if start, ok := tok.(xml.StartElement); ok && start.Name.Local == "sheet" {
+			var name, rid string
+			for _, attr := range start.Attr {
+				switch attr.Name.Local {
+				case "name":
+					name = attr.Value
+				case "id":
+					rid = attr.Value
+				}
+			}
+			if target, ok := rels[rid]; ok && name != "" {
+				names[target] = name
+			}
+		}
+	}
+	return names, nil
 }
 
 func sheetXMLToText(r io.Reader, shared []string) (string, error) {
@@ -503,11 +638,54 @@ func sheetXMLToText(r io.Reader, shared []string) (string, error) {
 			}
 		}
 	}
-	lines := make([]string, 0, len(rows))
-	for _, row := range rows {
-		lines = append(lines, strings.Join(row, "\t"))
+	lines := make([][]string, 0, len(rows))
+	lines = append(lines, rows...)
+	return gfmTable(lines), nil
+}
+
+// gfmTable renders rows as a GitHub-flavored Markdown table: the first row is
+// the header, followed by an alignment row, then the remaining rows. Cell
+// content is escaped so pipes and newlines cannot break the table.
+func gfmTable(rows [][]string) string {
+	if len(rows) == 0 {
+		return ""
 	}
-	return strings.Join(lines, "\n"), nil
+	width := 0
+	for _, row := range rows {
+		if len(row) > width {
+			width = len(row)
+		}
+	}
+	var out strings.Builder
+	writeRow := func(cells []string) {
+		esc := make([]string, 0, width)
+		for i := 0; i < width; i++ {
+			if i < len(cells) {
+				esc = append(esc, escapeCell(cells[i]))
+			} else {
+				esc = append(esc, "")
+			}
+		}
+		out.WriteString("| ")
+		out.WriteString(strings.Join(esc, " | "))
+		out.WriteString(" |\n")
+	}
+	writeRow(rows[0])
+	out.WriteString("| ")
+	out.WriteString(strings.Repeat("--- | ", width-1))
+	out.WriteString("--- |\n")
+	for _, row := range rows[1:] {
+		writeRow(row)
+	}
+	return out.String()
+}
+
+// escapeCell makes cell content safe for a GFM table cell: pipes are escaped
+// and newlines are replaced with spaces so the row stays on one line.
+func escapeCell(s string) string {
+	s = strings.ReplaceAll(s, "|", `\|`)
+	s = strings.ReplaceAll(s, "\n", " ")
+	return s
 }
 
 func readCell(dec *xml.Decoder, start xml.StartElement, shared []string) (string, error) {
