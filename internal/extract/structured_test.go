@@ -59,6 +59,88 @@ func TestReadStructuredKind_ODT(t *testing.T) {
 	assertContains(t, res.Text, "Second paragraph")
 }
 
+func TestReadStructuredKind_PPTX(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sample.pptx")
+	writeZip(t, path, map[string]string{
+		"ppt/slides/slide1.xml": `<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>Slide one title</a:t></a:r></a:p><a:p><a:r><a:t>Slide one body</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`,
+		"ppt/slides/slide2.xml": `<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>Slide two title</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`,
+	})
+	res, err := ReadStructuredKind(context.Background(), path, KindPPTX)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertContains(t, res.Text, "Slide one title")
+	assertContains(t, res.Text, "Slide one body")
+	assertContains(t, res.Text, "Slide two title")
+	if !strings.Contains(res.Text, "\n\n") {
+		t.Fatalf("expected a blank line between slides, got %q", res.Text)
+	}
+	if res.MIME != string(KindPPTX) || res.Engine != "pptx-native" {
+		t.Fatalf("metadata = %q/%q", res.MIME, res.Engine)
+	}
+}
+
+func TestReadStructuredKind_ODS(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sample.ods")
+	writeZip(t, path, map[string]string{
+		"content.xml": `<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"><office:body><office:spreadsheet><table:table table:name="Sheet1"><table:table-row><table:table-cell office:value-type="string"><text:p>Alpha</text:p></table:table-cell><table:table-cell office:value-type="string"><text:p>Beta</text:p></table:table-cell></table:table-row></table:table></office:spreadsheet></office:body></office:document-content>`,
+	})
+	res, err := ReadStructuredKind(context.Background(), path, KindODS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertContains(t, res.Text, "Alpha")
+	assertContains(t, res.Text, "Beta")
+	if res.MIME != string(KindODS) || res.Engine != "ods-native" {
+		t.Fatalf("metadata = %q/%q", res.MIME, res.Engine)
+	}
+}
+
+func TestReadStructuredKind_ODP(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sample.odp")
+	writeZip(t, path, map[string]string{
+		"content.xml": `<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:body><office:presentation><presentation:slide xmlns:presentation="urn:oasis:names:tc:opendocument:xmlns:presentation:1.0"><presentation:notes><text:p>Speaker notes</text:p></presentation:notes></presentation:slide></office:presentation></office:body></office:document-content>`,
+	})
+	res, err := ReadStructuredKind(context.Background(), path, KindODP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertContains(t, res.Text, "Speaker notes")
+	if res.MIME != string(KindODP) || res.Engine != "odp-native" {
+		t.Fatalf("metadata = %q/%q", res.MIME, res.Engine)
+	}
+}
+
+func TestReadStructuredKind_EPUB(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sample.epub")
+	writeZip(t, path, map[string]string{
+		"mimetype":               "application/epub+zip",
+		"META-INF/container.xml": `<container><rootfiles/></container>`,
+		"OEBPS/chapter1.xhtml":   `<html xmlns="http://www.w3.org/1999/xhtml"><body><h1>Chapter One</h1><p>First paragraph.</p></body></html>`,
+		"OEBPS/chapter2.xhtml":   `<html xmlns="http://www.w3.org/1999/xhtml"><body><h1>Chapter Two</h1></body></html>`,
+		"OEBPS/toc.ncx":          `<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap><navPoint><navLabel><text>Chapter One</text></navLabel></navPoint></navMap></ncx>`,
+	})
+	res, err := ReadStructuredKind(context.Background(), path, KindEPUB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertContains(t, res.Text, "Chapter One")
+	assertContains(t, res.Text, "First paragraph.")
+	assertContains(t, res.Text, "Chapter Two")
+	if strings.Contains(res.Text, "container") {
+		t.Fatalf("META-INF parts must be skipped, got %q", res.Text)
+	}
+	if strings.Contains(res.Text, "navMap") || strings.Contains(res.Text, "navLabel") {
+		t.Fatalf("toc.ncx must be skipped, got %q", res.Text)
+	}
+	if !strings.Contains(res.Text, "\n\n") {
+		t.Fatalf("expected a blank line between chapters, got %q", res.Text)
+	}
+	if res.MIME != string(KindEPUB) || res.Engine != "epub-native" {
+		t.Fatalf("metadata = %q/%q", res.MIME, res.Engine)
+	}
+}
+
 func TestReadStructuredKind_XLSX(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sample.xlsx")
 	writeZip(t, path, map[string]string{

@@ -41,6 +41,18 @@ func ReadStructuredKind(ctx context.Context, path string, kind Kind) (*Result, e
 	case KindODT:
 		text, err := readODT(path)
 		return structuredResult(text, kind, "odt-native", err)
+	case KindPPTX:
+		text, err := readPPTX(path)
+		return structuredResult(text, kind, "pptx-native", err)
+	case KindODS:
+		text, err := readODS(path)
+		return structuredResult(text, kind, "ods-native", err)
+	case KindODP:
+		text, err := readODP(path)
+		return structuredResult(text, kind, "odp-native", err)
+	case KindEPUB:
+		text, err := readEPUB(path)
+		return structuredResult(text, kind, "epub-native", err)
 	case KindEML:
 		text, err := readEML(path)
 		return structuredResult(text, kind, "eml-native", err)
@@ -69,6 +81,10 @@ func readHTML(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read html: %w", err)
 	}
+	return readHTMLBytes(data)
+}
+
+func readHTMLBytes(data []byte) (string, error) {
 	return htmlToText(string(data)), nil
 }
 
@@ -171,21 +187,19 @@ func rtfToText(s string) string {
 }
 
 func readDOCX(path string) (string, error) {
-	zr, err := zip.OpenReader(path)
+	a, err := openZip(path)
 	if err != nil {
 		return "", fmt.Errorf("open docx: %w", err)
 	}
-	defer zr.Close()
-	f := zipFind(&zr.Reader, "word/document.xml")
-	if f == nil {
-		return "", fmt.Errorf("docx missing word/document.xml")
-	}
-	r, err := f.Open()
+	defer closeZip(a)
+	data, err := a.readPart("word/document.xml")
 	if err != nil {
 		return "", err
 	}
-	defer r.Close()
-	return wordXMLToText(r)
+	if data == nil {
+		return "", fmt.Errorf("docx missing word/document.xml")
+	}
+	return wordXMLToText(bytes.NewReader(data))
 }
 
 func wordXMLToText(r io.Reader) (string, error) {
@@ -219,21 +233,25 @@ func wordXMLToText(r io.Reader) (string, error) {
 }
 
 func readODT(path string) (string, error) {
-	zr, err := zip.OpenReader(path)
+	return readODFContent(path, "odt")
+}
+
+// readODFContent opens an ODF package (ODT/ODS/ODP share the same shape:
+// ZIP + content.xml) and extracts its text through odfXMLToText.
+func readODFContent(path, what string) (string, error) {
+	a, err := openZip(path)
 	if err != nil {
-		return "", fmt.Errorf("open odt: %w", err)
+		return "", fmt.Errorf("open %s: %w", what, err)
 	}
-	defer zr.Close()
-	f := zipFind(&zr.Reader, "content.xml")
-	if f == nil {
-		return "", fmt.Errorf("odt missing content.xml")
-	}
-	r, err := f.Open()
+	defer closeZip(a)
+	data, err := a.readPart("content.xml")
 	if err != nil {
 		return "", err
 	}
-	defer r.Close()
-	return odfXMLToText(r)
+	if data == nil {
+		return "", fmt.Errorf("%s missing content.xml", what)
+	}
+	return odfXMLToText(bytes.NewReader(data))
 }
 
 func odfXMLToText(r io.Reader) (string, error) {
@@ -266,18 +284,133 @@ func odfXMLToText(r io.Reader) (string, error) {
 	return out.String(), nil
 }
 
+// readPPTX extracts the text of every slide (ppt/slides/slide*.xml), keeping
+// paragraphs as lines and separating slides with a blank line.
+func readPPTX(path string) (string, error) {
+	a, err := openZip(path)
+	if err != nil {
+		return "", fmt.Errorf("open pptx: %w", err)
+	}
+	defer closeZip(a)
+	var names []string
+	for _, f := range a.rc.File {
+		if strings.HasPrefix(f.Name, "ppt/slides/slide") && strings.HasSuffix(f.Name, ".xml") {
+			names = append(names, f.Name)
+		}
+	}
+	sort.Strings(names)
+	var out strings.Builder
+	for _, name := range names {
+		data, err := a.readPart(name)
+		if err != nil {
+			return "", err
+		}
+		text, parseErr := pptxXMLToText(bytes.NewReader(data))
+		if parseErr != nil {
+			return "", parseErr
+		}
+		if strings.TrimSpace(text) != "" {
+			if out.Len() > 0 {
+				out.WriteString("\n\n")
+			}
+			out.WriteString(text)
+		}
+	}
+	return out.String(), nil
+}
+
+// pptxXMLToText extracts <a:t> runs from DrawingML, one paragraph per line.
+func pptxXMLToText(r io.Reader) (string, error) {
+	dec := xml.NewDecoder(r)
+	var out strings.Builder
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("parse pptx xml: %w", err)
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			switch t.Name.Local {
+			case "p":
+				if out.Len() > 0 {
+					out.WriteByte('\n')
+				}
+			case "t":
+				var text string
+				if err := dec.DecodeElement(&text, &t); err != nil {
+					return "", err
+				}
+				out.WriteString(text)
+			}
+		}
+	}
+	return out.String(), nil
+}
+
+func readODS(path string) (string, error) {
+	return readODFContent(path, "ods")
+}
+
+func readODP(path string) (string, error) {
+	return readODFContent(path, "odp")
+}
+
+// readEPUB extracts the text of every XHTML chapter, separating chapters
+// with a blank line. The package-level navigation (toc.ncx, META-INF/) is
+// skipped so the table of contents does not duplicate chapter text.
+func readEPUB(path string) (string, error) {
+	a, err := openZip(path)
+	if err != nil {
+		return "", fmt.Errorf("open epub: %w", err)
+	}
+	defer closeZip(a)
+	var names []string
+	for _, f := range a.rc.File {
+		name := f.Name
+		if strings.HasPrefix(name, "META-INF/") || strings.HasSuffix(name, "toc.ncx") {
+			continue
+		}
+		switch strings.ToLower(filepath.Ext(name)) {
+		case ".xhtml", ".html", ".htm":
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	var out strings.Builder
+	for _, name := range names {
+		data, err := a.readPart(name)
+		if err != nil {
+			return "", err
+		}
+		text, parseErr := readHTMLBytes(data)
+		if parseErr != nil {
+			return "", parseErr
+		}
+		if strings.TrimSpace(text) != "" {
+			if out.Len() > 0 {
+				out.WriteString("\n\n")
+			}
+			out.WriteString(text)
+		}
+	}
+	return out.String(), nil
+}
+
 func readXLSX(path string) (string, error) {
-	zr, err := zip.OpenReader(path)
+	a, err := openZip(path)
 	if err != nil {
 		return "", fmt.Errorf("open xlsx: %w", err)
 	}
-	defer zr.Close()
-	shared, err := readSharedStrings(&zr.Reader)
+	defer closeZip(a)
+	shared, err := readSharedStrings(a)
 	if err != nil {
 		return "", err
 	}
 	var names []string
-	for _, f := range zr.File {
+	for _, f := range a.rc.File {
 		if strings.HasPrefix(f.Name, "xl/worksheets/sheet") && strings.HasSuffix(f.Name, ".xml") {
 			names = append(names, f.Name)
 		}
@@ -285,16 +418,11 @@ func readXLSX(path string) (string, error) {
 	sort.Strings(names)
 	var out strings.Builder
 	for _, name := range names {
-		f := zipFind(&zr.Reader, name)
-		if f == nil {
-			continue
-		}
-		r, err := f.Open()
+		data, err := a.readPart(name)
 		if err != nil {
 			return "", err
 		}
-		text, parseErr := sheetXMLToText(r, shared)
-		_ = r.Close()
+		text, parseErr := sheetXMLToText(bytes.NewReader(data), shared)
 		if parseErr != nil {
 			return "", parseErr
 		}
@@ -310,17 +438,15 @@ func readXLSX(path string) (string, error) {
 	return out.String(), nil
 }
 
-func readSharedStrings(zr *zip.Reader) ([]string, error) {
-	f := zipFind(zr, "xl/sharedStrings.xml")
-	if f == nil {
-		return nil, nil
-	}
-	r, err := f.Open()
+func readSharedStrings(a *zipArchive) ([]string, error) {
+	data, err := a.readPart("xl/sharedStrings.xml")
 	if err != nil {
 		return nil, err
 	}
-	defer r.Close()
-	dec := xml.NewDecoder(r)
+	if data == nil {
+		return nil, nil
+	}
+	dec := xml.NewDecoder(bytes.NewReader(data))
 	var vals []string
 	for {
 		tok, err := dec.Token()

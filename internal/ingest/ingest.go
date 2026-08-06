@@ -65,7 +65,7 @@ func extractText(ctx context.Context, source string, kind extract.Kind, engine e
 	switch kind {
 	case extract.KindText, extract.KindMarkdown, extract.KindCSV:
 		res, err = extract.ReadTextKind(ctx, source, kind)
-	case extract.KindHTML, extract.KindRTF, extract.KindDOCX, extract.KindXLSX, extract.KindODT, extract.KindEML:
+	case extract.KindHTML, extract.KindRTF, extract.KindDOCX, extract.KindXLSX, extract.KindPPTX, extract.KindODT, extract.KindODS, extract.KindODP, extract.KindEPUB, extract.KindEML:
 		res, err = extract.ReadStructuredKind(ctx, source, kind)
 	default:
 		if engine == nil {

@@ -28,7 +28,11 @@ func TestDetect(t *testing.T) {
 		{"rtf", []byte("{\\rtf1 hi}"), ".rtf", KindRTF},
 		{"docx", []byte("PK\x03\x04fake"), ".docx", KindDOCX},
 		{"xlsx", []byte("PK\x03\x04fake"), ".xlsx", KindXLSX},
+		{"pptx", []byte("PK\x03\x04fake"), ".pptx", KindPPTX},
 		{"odt", []byte("PK\x03\x04fake"), ".odt", KindODT},
+		{"ods", []byte("PK\x03\x04fake"), ".ods", KindODS},
+		{"odp", []byte("PK\x03\x04fake"), ".odp", KindODP},
+		{"epub", []byte("PK\x03\x04fake"), ".epub", KindEPUB},
 		{"eml", []byte("Subject: hi\n\nbody"), ".eml", KindEML},
 	}
 

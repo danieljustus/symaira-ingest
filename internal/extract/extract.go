@@ -29,7 +29,11 @@ const (
 	KindRTF      Kind = "application/rtf"
 	KindDOCX     Kind = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 	KindXLSX     Kind = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+	KindPPTX     Kind = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 	KindODT      Kind = "application/vnd.oasis.opendocument.text"
+	KindODS      Kind = "application/vnd.oasis.opendocument.spreadsheet"
+	KindODP      Kind = "application/vnd.oasis.opendocument.presentation"
+	KindEPUB     Kind = "application/epub+zip"
 	KindEML      Kind = "message/rfc822"
 	KindUnknown  Kind = ""
 )
@@ -98,8 +102,16 @@ func Detect(path string) (Kind, error) {
 			kind = KindDOCX
 		case ".xlsx":
 			kind = KindXLSX
+		case ".pptx":
+			kind = KindPPTX
 		case ".odt":
 			kind = KindODT
+		case ".ods":
+			kind = KindODS
+		case ".odp":
+			kind = KindODP
+		case ".epub":
+			kind = KindEPUB
 		case ".eml":
 			kind = KindEML
 		case ".pdf":
