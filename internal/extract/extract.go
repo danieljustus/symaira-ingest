@@ -63,9 +63,14 @@ type Engine interface {
 }
 
 // Detect identifies the kind of file at path using magic bytes and extension fallback.
-// When the optional magika CLI (google/magika) is installed, its result is compared
-// against the extension-based guess and mismatches are logged as warnings to stderr.
-// The magika result never overrides the detected kind.
+// Container formats (ZIP-family and OLE) are resolved from the package's own
+// identity — the mimetype part, the OPC officeDocument relationship, or the
+// mandated OLE stream names — before the extension is consulted, so renamed
+// or extension-less packages are classified by content. An unrecognized
+// container yields KindUnknown without an error, letting the caller fall
+// back. When the optional magika CLI (google/magika) is installed, its result
+// is compared against the detected kind and mismatches are logged as warnings
+// to stderr. The magika result never overrides the detected kind.
 func Detect(path string) (Kind, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -98,6 +103,18 @@ func Detect(path string) (Kind, error) {
 	}
 
 	if kind == "" {
+		// Containers are resolved from the package's own identity; the
+		// extension is never trusted for a file whose content claims to be
+		// a container.
+		switch {
+		case bytes.HasPrefix(head, zipSignature):
+			kind = detectZIPContainer(path)
+		case bytes.HasPrefix(head, oleSignature):
+			kind = detectOLEContainer(f, head)
+		}
+	}
+
+	if kind == "" && !isContainerSignature(head) {
 		ext := strings.ToLower(filepath.Ext(path))
 		switch ext {
 		case ".txt", ".text":
@@ -142,6 +159,12 @@ func Detect(path string) (Kind, error) {
 	}
 
 	if kind == "" {
+		// A signature-carrying container that could not be resolved is
+		// reported as unknown without an error; only genuinely signature-less
+		// files fail detection.
+		if isContainerSignature(head) {
+			return KindUnknown, nil
+		}
 		return KindUnknown, fmt.Errorf("unsupported file type: %s", path)
 	}
 
