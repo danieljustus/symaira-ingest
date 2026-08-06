@@ -1,4 +1,16 @@
 // Package extract detects source-file types and extracts text.
+//
+// # Recovery policy
+//
+// Structured readers return an error when a container part is missing,
+// malformed, or over the fixed archive limits (see limits.go); the pipeline
+// quarantines such documents instead of aborting the batch. Inputs that parse
+// successfully but contain nothing extractable yield empty text without an
+// error, and readers that can salvage partial content return it. The corpus
+// in internal/extract/testdata/malformed encodes this contract in its file
+// names (<name>--<outcome>.<ext> with outcomes errors, recovers, skips); the
+// fuzz target over ReadStructuredKind keeps the readers panic-free on
+// arbitrary bytes.
 package extract
 
 import (
@@ -29,7 +41,11 @@ const (
 	KindRTF      Kind = "application/rtf"
 	KindDOCX     Kind = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 	KindXLSX     Kind = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+	KindPPTX     Kind = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 	KindODT      Kind = "application/vnd.oasis.opendocument.text"
+	KindODS      Kind = "application/vnd.oasis.opendocument.spreadsheet"
+	KindODP      Kind = "application/vnd.oasis.opendocument.presentation"
+	KindEPUB     Kind = "application/epub+zip"
 	KindEML      Kind = "message/rfc822"
 	KindUnknown  Kind = ""
 )
@@ -47,9 +63,14 @@ type Engine interface {
 }
 
 // Detect identifies the kind of file at path using magic bytes and extension fallback.
-// When the optional magika CLI (google/magika) is installed, its result is compared
-// against the extension-based guess and mismatches are logged as warnings to stderr.
-// The magika result never overrides the detected kind.
+// Container formats (ZIP-family and OLE) are resolved from the package's own
+// identity — the mimetype part, the OPC officeDocument relationship, or the
+// mandated OLE stream names — before the extension is consulted, so renamed
+// or extension-less packages are classified by content. An unrecognized
+// container yields KindUnknown without an error, letting the caller fall
+// back. When the optional magika CLI (google/magika) is installed, its result
+// is compared against the detected kind and mismatches are logged as warnings
+// to stderr. The magika result never overrides the detected kind.
 func Detect(path string) (Kind, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -82,6 +103,18 @@ func Detect(path string) (Kind, error) {
 	}
 
 	if kind == "" {
+		// Containers are resolved from the package's own identity; the
+		// extension is never trusted for a file whose content claims to be
+		// a container.
+		switch {
+		case bytes.HasPrefix(head, zipSignature):
+			kind = detectZIPContainer(path)
+		case bytes.HasPrefix(head, oleSignature):
+			kind = detectOLEContainer(f, head)
+		}
+	}
+
+	if kind == "" && !isContainerSignature(head) {
 		ext := strings.ToLower(filepath.Ext(path))
 		switch ext {
 		case ".txt", ".text":
@@ -98,8 +131,16 @@ func Detect(path string) (Kind, error) {
 			kind = KindDOCX
 		case ".xlsx":
 			kind = KindXLSX
+		case ".pptx":
+			kind = KindPPTX
 		case ".odt":
 			kind = KindODT
+		case ".ods":
+			kind = KindODS
+		case ".odp":
+			kind = KindODP
+		case ".epub":
+			kind = KindEPUB
 		case ".eml":
 			kind = KindEML
 		case ".pdf":
@@ -118,6 +159,12 @@ func Detect(path string) (Kind, error) {
 	}
 
 	if kind == "" {
+		// A signature-carrying container that could not be resolved is
+		// reported as unknown without an error; only genuinely signature-less
+		// files fail detection.
+		if isContainerSignature(head) {
+			return KindUnknown, nil
+		}
 		return KindUnknown, fmt.Errorf("unsupported file type: %s", path)
 	}
 

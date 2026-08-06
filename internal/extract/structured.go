@@ -41,6 +41,18 @@ func ReadStructuredKind(ctx context.Context, path string, kind Kind) (*Result, e
 	case KindODT:
 		text, err := readODT(path)
 		return structuredResult(text, kind, "odt-native", err)
+	case KindPPTX:
+		text, err := readPPTX(path)
+		return structuredResult(text, kind, "pptx-native", err)
+	case KindODS:
+		text, err := readODS(path)
+		return structuredResult(text, kind, "ods-native", err)
+	case KindODP:
+		text, err := readODP(path)
+		return structuredResult(text, kind, "odp-native", err)
+	case KindEPUB:
+		text, err := readEPUB(path)
+		return structuredResult(text, kind, "epub-native", err)
 	case KindEML:
 		text, err := readEML(path)
 		return structuredResult(text, kind, "eml-native", err)
@@ -69,6 +81,10 @@ func readHTML(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read html: %w", err)
 	}
+	return readHTMLBytes(data)
+}
+
+func readHTMLBytes(data []byte) (string, error) {
 	return htmlToText(string(data)), nil
 }
 
@@ -171,26 +187,36 @@ func rtfToText(s string) string {
 }
 
 func readDOCX(path string) (string, error) {
-	zr, err := zip.OpenReader(path)
+	a, err := openZip(path)
 	if err != nil {
 		return "", fmt.Errorf("open docx: %w", err)
 	}
-	defer zr.Close()
-	f := zipFind(&zr.Reader, "word/document.xml")
-	if f == nil {
-		return "", fmt.Errorf("docx missing word/document.xml")
-	}
-	r, err := f.Open()
+	defer closeZip(a)
+	data, err := a.readPart("word/document.xml")
 	if err != nil {
 		return "", err
 	}
-	defer r.Close()
-	return wordXMLToText(r)
+	if data == nil {
+		return "", fmt.Errorf("docx missing word/document.xml")
+	}
+	return wordXMLToText(bytes.NewReader(data))
 }
 
 func wordXMLToText(r io.Reader) (string, error) {
 	dec := xml.NewDecoder(r)
 	var out strings.Builder
+	var table [][]string
+	var row []string
+	var cell strings.Builder
+	inTable := false
+	inCell := false
+	flushTable := func() {
+		if len(table) == 0 {
+			return
+		}
+		out.WriteString(gfmTable(table))
+		table = nil
+	}
 	for {
 		tok, err := dec.Token()
 		if err == io.EOF {
@@ -202,16 +228,62 @@ func wordXMLToText(r io.Reader) (string, error) {
 		switch t := tok.(type) {
 		case xml.StartElement:
 			switch t.Name.Local {
+			case "tbl":
+				inTable = true
+			case "tr":
+				if inTable {
+					row = nil
+				}
+			case "tc":
+				if inTable {
+					inCell = true
+					cell.Reset()
+				}
 			case "t":
 				var text string
 				if err := dec.DecodeElement(&text, &t); err != nil {
 					return "", err
 				}
-				out.WriteString(text)
+				if inCell {
+					cell.WriteString(text)
+				} else if !inTable {
+					out.WriteString(text)
+				}
 			case "tab":
-				out.WriteByte('\t')
-			case "br", "cr", "p":
-				out.WriteByte('\n')
+				if inCell {
+					cell.WriteByte(' ')
+				} else if !inTable {
+					out.WriteByte('	')
+				}
+			case "br", "cr":
+				if inCell {
+					cell.WriteByte('\n')
+				} else if !inTable {
+					out.WriteByte('\n')
+				}
+			case "p":
+				if inCell {
+					cell.WriteByte('\n')
+				} else if !inTable {
+					out.WriteByte('\n')
+				}
+			}
+		case xml.EndElement:
+			switch t.Name.Local {
+			case "tc":
+				if inTable && inCell {
+					row = append(row, cell.String())
+					inCell = false
+				}
+			case "tr":
+				if inTable {
+					table = append(table, row)
+				}
+			case "tbl":
+				if inTable {
+					flushTable()
+					inTable = false
+				}
 			}
 		}
 	}
@@ -219,21 +291,25 @@ func wordXMLToText(r io.Reader) (string, error) {
 }
 
 func readODT(path string) (string, error) {
-	zr, err := zip.OpenReader(path)
+	return readODFContent(path, "odt")
+}
+
+// readODFContent opens an ODF package (ODT/ODS/ODP share the same shape:
+// ZIP + content.xml) and extracts its text through odfXMLToText.
+func readODFContent(path, what string) (string, error) {
+	a, err := openZip(path)
 	if err != nil {
-		return "", fmt.Errorf("open odt: %w", err)
+		return "", fmt.Errorf("open %s: %w", what, err)
 	}
-	defer zr.Close()
-	f := zipFind(&zr.Reader, "content.xml")
-	if f == nil {
-		return "", fmt.Errorf("odt missing content.xml")
-	}
-	r, err := f.Open()
+	defer closeZip(a)
+	data, err := a.readPart("content.xml")
 	if err != nil {
 		return "", err
 	}
-	defer r.Close()
-	return odfXMLToText(r)
+	if data == nil {
+		return "", fmt.Errorf("%s missing content.xml", what)
+	}
+	return odfXMLToText(bytes.NewReader(data))
 }
 
 func odfXMLToText(r io.Reader) (string, error) {
@@ -266,35 +342,28 @@ func odfXMLToText(r io.Reader) (string, error) {
 	return out.String(), nil
 }
 
-func readXLSX(path string) (string, error) {
-	zr, err := zip.OpenReader(path)
+// readPPTX extracts the text of every slide (ppt/slides/slide*.xml), keeping
+// paragraphs as lines and separating slides with a blank line.
+func readPPTX(path string) (string, error) {
+	a, err := openZip(path)
 	if err != nil {
-		return "", fmt.Errorf("open xlsx: %w", err)
+		return "", fmt.Errorf("open pptx: %w", err)
 	}
-	defer zr.Close()
-	shared, err := readSharedStrings(&zr.Reader)
-	if err != nil {
-		return "", err
-	}
+	defer closeZip(a)
 	var names []string
-	for _, f := range zr.File {
-		if strings.HasPrefix(f.Name, "xl/worksheets/sheet") && strings.HasSuffix(f.Name, ".xml") {
+	for _, f := range a.rc.File {
+		if strings.HasPrefix(f.Name, "ppt/slides/slide") && strings.HasSuffix(f.Name, ".xml") {
 			names = append(names, f.Name)
 		}
 	}
 	sort.Strings(names)
 	var out strings.Builder
 	for _, name := range names {
-		f := zipFind(&zr.Reader, name)
-		if f == nil {
-			continue
-		}
-		r, err := f.Open()
+		data, err := a.readPart(name)
 		if err != nil {
 			return "", err
 		}
-		text, parseErr := sheetXMLToText(r, shared)
-		_ = r.Close()
+		text, parseErr := pptxXMLToText(bytes.NewReader(data))
 		if parseErr != nil {
 			return "", parseErr
 		}
@@ -302,7 +371,132 @@ func readXLSX(path string) (string, error) {
 			if out.Len() > 0 {
 				out.WriteString("\n\n")
 			}
-			out.WriteString(filepath.Base(name))
+			out.WriteString(text)
+		}
+	}
+	return out.String(), nil
+}
+
+// pptxXMLToText extracts <a:t> runs from DrawingML, one paragraph per line.
+func pptxXMLToText(r io.Reader) (string, error) {
+	dec := xml.NewDecoder(r)
+	var out strings.Builder
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("parse pptx xml: %w", err)
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			switch t.Name.Local {
+			case "p":
+				if out.Len() > 0 {
+					out.WriteByte('\n')
+				}
+			case "t":
+				var text string
+				if err := dec.DecodeElement(&text, &t); err != nil {
+					return "", err
+				}
+				out.WriteString(text)
+			}
+		}
+	}
+	return out.String(), nil
+}
+
+func readODS(path string) (string, error) {
+	return readODFContent(path, "ods")
+}
+
+func readODP(path string) (string, error) {
+	return readODFContent(path, "odp")
+}
+
+// readEPUB extracts the text of every XHTML chapter, separating chapters
+// with a blank line. The package-level navigation (toc.ncx, META-INF/) is
+// skipped so the table of contents does not duplicate chapter text.
+func readEPUB(path string) (string, error) {
+	a, err := openZip(path)
+	if err != nil {
+		return "", fmt.Errorf("open epub: %w", err)
+	}
+	defer closeZip(a)
+	var names []string
+	for _, f := range a.rc.File {
+		name := f.Name
+		if strings.HasPrefix(name, "META-INF/") || strings.HasSuffix(name, "toc.ncx") {
+			continue
+		}
+		switch strings.ToLower(filepath.Ext(name)) {
+		case ".xhtml", ".html", ".htm":
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	var out strings.Builder
+	for _, name := range names {
+		data, err := a.readPart(name)
+		if err != nil {
+			return "", err
+		}
+		text, parseErr := readHTMLBytes(data)
+		if parseErr != nil {
+			return "", parseErr
+		}
+		if strings.TrimSpace(text) != "" {
+			if out.Len() > 0 {
+				out.WriteString("\n\n")
+			}
+			out.WriteString(text)
+		}
+	}
+	return out.String(), nil
+}
+
+func readXLSX(path string) (string, error) {
+	a, err := openZip(path)
+	if err != nil {
+		return "", fmt.Errorf("open xlsx: %w", err)
+	}
+	defer closeZip(a)
+	shared, err := readSharedStrings(a)
+	if err != nil {
+		return "", err
+	}
+	sheetNames, err := workbookSheetNames(a)
+	if err != nil {
+		return "", err
+	}
+	var names []string
+	for _, f := range a.rc.File {
+		if strings.HasPrefix(f.Name, "xl/worksheets/sheet") && strings.HasSuffix(f.Name, ".xml") {
+			names = append(names, f.Name)
+		}
+	}
+	sort.Strings(names)
+	var out strings.Builder
+	for _, name := range names {
+		data, err := a.readPart(name)
+		if err != nil {
+			return "", err
+		}
+		text, parseErr := sheetXMLToText(bytes.NewReader(data), shared)
+		if parseErr != nil {
+			return "", parseErr
+		}
+		if strings.TrimSpace(text) != "" {
+			if out.Len() > 0 {
+				out.WriteString("\n\n")
+			}
+			title := sheetNames[filepath.Base(name)]
+			if title == "" {
+				title = filepath.Base(name)
+			}
+			out.WriteString(title)
 			out.WriteByte('\n')
 			out.WriteString(text)
 		}
@@ -310,17 +504,15 @@ func readXLSX(path string) (string, error) {
 	return out.String(), nil
 }
 
-func readSharedStrings(zr *zip.Reader) ([]string, error) {
-	f := zipFind(zr, "xl/sharedStrings.xml")
-	if f == nil {
-		return nil, nil
-	}
-	r, err := f.Open()
+func readSharedStrings(a *zipArchive) ([]string, error) {
+	data, err := a.readPart("xl/sharedStrings.xml")
 	if err != nil {
 		return nil, err
 	}
-	defer r.Close()
-	dec := xml.NewDecoder(r)
+	if data == nil {
+		return nil, nil
+	}
+	dec := xml.NewDecoder(bytes.NewReader(data))
 	var vals []string
 	for {
 		tok, err := dec.Token()
@@ -339,6 +531,75 @@ func readSharedStrings(zr *zip.Reader) ([]string, error) {
 		}
 	}
 	return vals, nil
+}
+
+// workbookSheetNames resolves human-readable sheet titles from
+// xl/workbook.xml, using xl/_rels/workbook.xml.rels to map each sheet's
+// relationship id to its part file name. A missing workbook.xml yields an
+// empty map and callers fall back to the part file name.
+func workbookSheetNames(a *zipArchive) (map[string]string, error) {
+	names := map[string]string{}
+	data, err := a.readPart("xl/workbook.xml")
+	if err != nil {
+		return nil, err
+	}
+	if data == nil {
+		return names, nil
+	}
+	rels := map[string]string{}
+	if rdata, err := a.readPart("xl/_rels/workbook.xml.rels"); err != nil {
+		return nil, err
+	} else if rdata != nil {
+		dec := xml.NewDecoder(bytes.NewReader(rdata))
+		for {
+			tok, err := dec.Token()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return nil, fmt.Errorf("parse workbook rels: %w", err)
+			}
+			if start, ok := tok.(xml.StartElement); ok && start.Name.Local == "Relationship" {
+				var id, target string
+				for _, attr := range start.Attr {
+					switch attr.Name.Local {
+					case "Id":
+						id = attr.Value
+					case "Target":
+						target = attr.Value
+					}
+				}
+				if id != "" && target != "" {
+					rels[id] = filepath.Base(target)
+				}
+			}
+		}
+	}
+	dec := xml.NewDecoder(bytes.NewReader(data))
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("parse workbook.xml: %w", err)
+		}
+		if start, ok := tok.(xml.StartElement); ok && start.Name.Local == "sheet" {
+			var name, rid string
+			for _, attr := range start.Attr {
+				switch attr.Name.Local {
+				case "name":
+					name = attr.Value
+				case "id":
+					rid = attr.Value
+				}
+			}
+			if target, ok := rels[rid]; ok && name != "" {
+				names[target] = name
+			}
+		}
+	}
+	return names, nil
 }
 
 func sheetXMLToText(r io.Reader, shared []string) (string, error) {
@@ -377,11 +638,54 @@ func sheetXMLToText(r io.Reader, shared []string) (string, error) {
 			}
 		}
 	}
-	lines := make([]string, 0, len(rows))
-	for _, row := range rows {
-		lines = append(lines, strings.Join(row, "\t"))
+	lines := make([][]string, 0, len(rows))
+	lines = append(lines, rows...)
+	return gfmTable(lines), nil
+}
+
+// gfmTable renders rows as a GitHub-flavored Markdown table: the first row is
+// the header, followed by an alignment row, then the remaining rows. Cell
+// content is escaped so pipes and newlines cannot break the table.
+func gfmTable(rows [][]string) string {
+	if len(rows) == 0 {
+		return ""
 	}
-	return strings.Join(lines, "\n"), nil
+	width := 0
+	for _, row := range rows {
+		if len(row) > width {
+			width = len(row)
+		}
+	}
+	var out strings.Builder
+	writeRow := func(cells []string) {
+		esc := make([]string, 0, width)
+		for i := 0; i < width; i++ {
+			if i < len(cells) {
+				esc = append(esc, escapeCell(cells[i]))
+			} else {
+				esc = append(esc, "")
+			}
+		}
+		out.WriteString("| ")
+		out.WriteString(strings.Join(esc, " | "))
+		out.WriteString(" |\n")
+	}
+	writeRow(rows[0])
+	out.WriteString("| ")
+	out.WriteString(strings.Repeat("--- | ", width-1))
+	out.WriteString("--- |\n")
+	for _, row := range rows[1:] {
+		writeRow(row)
+	}
+	return out.String()
+}
+
+// escapeCell makes cell content safe for a GFM table cell: pipes are escaped
+// and newlines are replaced with spaces so the row stays on one line.
+func escapeCell(s string) string {
+	s = strings.ReplaceAll(s, "|", `\|`)
+	s = strings.ReplaceAll(s, "\n", " ")
+	return s
 }
 
 func readCell(dec *xml.Decoder, start xml.StartElement, shared []string) (string, error) {

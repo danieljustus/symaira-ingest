@@ -1,10 +1,32 @@
 package extract
 
 import (
+	"archive/zip"
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+// zipBytes builds a zip archive in memory for detection fixtures.
+func zipBytes(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, content := range files {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
 
 func TestDetect(t *testing.T) {
 	dir := t.TempDir()
@@ -26,9 +48,13 @@ func TestDetect(t *testing.T) {
 		{"markdown", []byte("# hi"), ".md", KindMarkdown},
 		{"html", []byte("<html><body>hi</body></html>"), ".html", KindHTML},
 		{"rtf", []byte("{\\rtf1 hi}"), ".rtf", KindRTF},
-		{"docx", []byte("PK\x03\x04fake"), ".docx", KindDOCX},
-		{"xlsx", []byte("PK\x03\x04fake"), ".xlsx", KindXLSX},
-		{"odt", []byte("PK\x03\x04fake"), ".odt", KindODT},
+		{"docx", zipBytes(t, map[string]string{"word/document.xml": `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>`}), ".docx", KindDOCX},
+		{"xlsx", zipBytes(t, map[string]string{"xl/workbook.xml": `<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>`}), ".xlsx", KindXLSX},
+		{"pptx", zipBytes(t, map[string]string{"ppt/presentation.xml": `<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>`}), ".pptx", KindPPTX},
+		{"odt", zipBytes(t, map[string]string{"mimetype": "application/vnd.oasis.opendocument.text"}), ".odt", KindODT},
+		{"ods", zipBytes(t, map[string]string{"mimetype": "application/vnd.oasis.opendocument.spreadsheet"}), ".ods", KindODS},
+		{"odp", zipBytes(t, map[string]string{"mimetype": "application/vnd.oasis.opendocument.presentation"}), ".odp", KindODP},
+		{"epub", zipBytes(t, map[string]string{"mimetype": "application/epub+zip"}), ".epub", KindEPUB},
 		{"eml", []byte("Subject: hi\n\nbody"), ".eml", KindEML},
 	}
 
