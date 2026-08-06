@@ -1,4 +1,16 @@
 // Package extract detects source-file types and extracts text.
+//
+// # Recovery policy
+//
+// Structured readers return an error when a container part is missing,
+// malformed, or over the fixed archive limits (see limits.go); the pipeline
+// quarantines such documents instead of aborting the batch. Inputs that parse
+// successfully but contain nothing extractable yield empty text without an
+// error, and readers that can salvage partial content return it. The corpus
+// in internal/extract/testdata/malformed encodes this contract in its file
+// names (<name>--<outcome>.<ext> with outcomes errors, recovers, skips); the
+// fuzz target over ReadStructuredKind keeps the readers panic-free on
+// arbitrary bytes.
 package extract
 
 import (
