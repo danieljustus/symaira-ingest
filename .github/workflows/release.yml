@@ -230,16 +230,10 @@ jobs:
           set -euo pipefail
           mkdir -p dist/dmg_staging
           cp -R build_dd/Build/Products/Release/Symingest.app dist/dmg_staging/
-          create-dmg \
-            --volname "Symingest" \
-            --window-pos 200 120 \
-            --window-size 600 300 \
-            --icon-size 100 \
-            --icon "Symingest.app" 175 120 \
-            --hide-extension "Symingest.app" \
-            --app-drop-link 425 120 \
+          ./scripts/create-symaira-dmg.sh \
+            build_dd/Build/Products/Release/Symingest.app \
             dist/Symingest.dmg \
-            dist/dmg_staging/
+            "Symingest"
 
       - name: Sign and notarize DMG
         if: steps.signing.outputs.signed == 'true'
