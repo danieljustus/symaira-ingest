@@ -167,12 +167,13 @@ var oleMainStreamKinds = map[string]Kind{
 // already-open file and scans the 128-byte directory entries for the
 // mandated names; anything else yields "".
 func detectOLEContainer(f *os.File, head []byte) Kind {
-	// Header layout: byte 30 holds the sector-shift exponent (512 or 4096
-	// byte sectors), bytes 48-51 the first directory sector index.
+	// Header layout: byte 30 holds the sector-shift exponent — the field
+	// value IS the power of two (9 for 512-byte sectors, 12 for 4096-byte
+	// sectors) — and bytes 48-51 the first directory sector index.
 	if len(head) < 52 {
 		return ""
 	}
-	sectorSize := 1 << (head[30] + 9)
+	sectorSize := 1 << head[30]
 	dirStart := binary.LittleEndian.Uint32(head[48:52])
 	dir := make([]byte, sectorSize)
 	// Sector n of the file starts at (n+1) * sectorSize (sector 0 follows
