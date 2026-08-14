@@ -87,7 +87,7 @@ func WriteMigrationReport(path string, report *MigrationReport) error {
 	if err != nil {
 		return fmt.Errorf("marshal migration report: %w", err)
 	}
-	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write migration report: %w", err)
 	}
 	return nil

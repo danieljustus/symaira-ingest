@@ -19,6 +19,10 @@ Drop a scanned PDF, image, or text-like export into a folder → get a searchabl
 - **Classification rules** — automatically categorize documents based on content patterns
 - **Paperless-ngx import** — pull documents from an existing Paperless-ngx instance, preserving tags, correspondent and document type as frontmatter
 
+## Status
+
+**Beta** (pre-1.0 SemVer). The CLI + MCP pipeline is stable and covered by CI on every commit; flags and output formats may still evolve between minor releases. Paperless-ngx replacement readiness is tracked in [`docs/plans/symingest-completion-roadmap.md`](docs/plans/symingest-completion-roadmap.md).
+
 ## Install
 
 ```bash
