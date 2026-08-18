@@ -2,6 +2,35 @@
 
 All notable changes to Symaira Ingest are documented here.
 
+## [0.12.1] - 2026-08-18
+
+### Changed
+
+- Replaced bare `go vet` with `golangci-lint` v2.2 in CI.
+- Extracted duplicated signing certificate import into a reusable composite action.
+
+### Fixed
+
+- Fixed CI deadlock where docs-only PRs could not merge due to `paths-ignore` skipping required checks.
+- Added context cancellation check in mail poller to prevent infinite loop on non-EOF errors.
+
+### Security
+
+- Added `-race` flag to CI test suite; fixed a real data race in `TestMailPoller_ProcessMessage_NextPartError`.
+- Added coverage regression gate (80% threshold) to CI.
+
+### Documentation
+
+- Added Homebrew install commands (CLI + Cask) to README.
+
+### Closed issues
+
+- #293 — CI deadlock on docs-only PRs.
+- #294 — Add race detector to CI.
+- #295 — Add coverage regression gate.
+- #296 — Replace go vet with golangci-lint.
+- #297 — Deduplicate signing certificate import.
+
 ## [0.12.0] - 2026-08-14
 
 ### Added
