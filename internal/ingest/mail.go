@@ -461,6 +461,9 @@ func (m *MailPoller) processMessage(ctx context.Context, acc config.IMAPAccount,
 	var attachments []string
 
 	for {
+		if ctx.Err() != nil {
+			break
+		}
 		p, err := mr.NextPart()
 		if err == io.EOF {
 			break
