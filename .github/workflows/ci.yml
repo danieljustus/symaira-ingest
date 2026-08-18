@@ -3,18 +3,8 @@ name: CI
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - 'docs/**'
-      - '**.md'
-      - 'LICENSE'
-      - '.github/ISSUE_TEMPLATE/**'
   pull_request:
     branches: [main]
-    paths-ignore:
-      - 'docs/**'
-      - '**.md'
-      - 'LICENSE'
-      - '.github/ISSUE_TEMPLATE/**'
   schedule:
     - cron: '47 5 * * 1'  # weekly Monday 05:47 UTC — full suite incl. macOS client
 
@@ -31,22 +21,37 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # pin@v7
 
+      - name: Check for source changes
+        id: changes
+        uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # pin@v3.0.2
+        with:
+          filters: |
+            src:
+              - '!docs/**'
+              - '!**.md'
+              - '!LICENSE'
+              - '!.github/ISSUE_TEMPLATE/**'
+
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # pin@v7
         with:
           go-version: '1.26'
 
       - name: Download dependencies
+        if: steps.changes.outputs.src == 'true'
         run: go mod download
 
       - name: Lint
+        if: steps.changes.outputs.src == 'true'
         run: |
           go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
           golangci-lint run --timeout 5m
 
       - name: Run tests
+        if: steps.changes.outputs.src == 'true'
         run: go test -race -coverprofile=coverage.out ./...
 
       - name: Check coverage threshold
+        if: steps.changes.outputs.src == 'true'
         run: |
           COVERAGE=$(go tool cover -func=coverage.out | tail -1 | awk '{print $NF}' | tr -d '%')
           echo "Coverage: ${COVERAGE}%"
@@ -56,9 +61,11 @@ jobs:
           fi
 
       - name: Build CGO-free binary
+        if: steps.changes.outputs.src == 'true'
         run: CGO_ENABLED=0 go build ./cmd/symingest
 
       - name: Verify CLI help
+        if: steps.changes.outputs.src == 'true'
         run: ./symingest --help
 
   macos-client:
