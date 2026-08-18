@@ -25,6 +25,15 @@ Drop a scanned PDF, image, or text-like export into a folder → get a searchabl
 
 ## Install
 
+**macOS (Homebrew — recommended):**
+
+```bash
+brew install --cask danieljustus/tap/symingest    # macOS GUI app (DMG)
+brew install danieljustus/tap/symingest           # CLI only
+```
+
+**From source:**
+
 ```bash
 go install github.com/danieljustus/symaira-ingest/cmd/symingest@latest
 ```
