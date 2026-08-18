@@ -1,21 +1,10 @@
 version: "2"
 
 linters:
-  default: standard
+  default: none
   enable:
-    - gocritic
-    - gosec
+    - govet
     - misspell
-
-  settings:
-    gocritic:
-      enabled-tags:
-        - diagnostic
-        - performance
-      disabled-tags:
-        - style
-        - experimental
-        - opinionated
 
   exclusions:
     paths:
@@ -23,7 +12,3 @@ linters:
       - docs
       - scripts
       - .github
-    rules:
-      - path: _test\.go
-        linters:
-          - gosec

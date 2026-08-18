@@ -39,10 +39,9 @@ jobs:
         run: go mod download
 
       - name: Lint
-        uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # pin@v8
-        with:
-          version: v2.2
-          args: --timeout 5m
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+          golangci-lint run --timeout 5m
 
       - name: Run tests
         run: go test -race -coverprofile=coverage.out ./...
