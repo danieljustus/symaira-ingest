@@ -42,11 +42,23 @@ jobs:
 
       - name: Lint
         if: steps.changes.outputs.src == 'true'
-        run: go vet ./...
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+          golangci-lint run --timeout 5m
 
       - name: Run tests
         if: steps.changes.outputs.src == 'true'
-        run: go test ./...
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: Check coverage threshold
+        if: steps.changes.outputs.src == 'true'
+        run: |
+          COVERAGE=$(go tool cover -func=coverage.out | tail -1 | awk '{print $NF}' | tr -d '%')
+          echo "Coverage: ${COVERAGE}%"
+          if [ "$(echo "$COVERAGE < 80" | bc -l)" -eq 1 ]; then
+            echo "::error::Coverage ${COVERAGE}% is below 80% threshold"
+            exit 1
+          fi
 
       - name: Build CGO-free binary
         if: steps.changes.outputs.src == 'true'

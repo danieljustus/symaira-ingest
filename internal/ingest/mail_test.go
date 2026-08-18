@@ -1113,16 +1113,20 @@ func TestMailPoller_ProcessMessage_NextPartError(t *testing.T) {
 	defer log.SetOutput(os.Stderr)
 
 	// The go-message multipart reader caches non-EOF errors permanently, so
-	// processMessage's `continue` on NextPart error creates an infinite loop.
-	// Run in a goroutine with a short deadline to cover lines 326-328.
+	// processMessage's `continue` on NextPart error created an infinite loop.
+	// The ctx.Err() break in the loop now stops on cancellation.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- poller.processMessage(context.Background(), config.IMAPAccount{}, &fakeIMAPClient{}, msg)
+		done <- poller.processMessage(ctx, config.IMAPAccount{}, &fakeIMAPClient{}, msg)
 	}()
 
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
+		cancel()
+		<-done // wait for goroutine to exit
 	}
 
 	output := logBuf.String()
