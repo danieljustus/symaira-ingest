@@ -99,7 +99,7 @@ No Makefile. Build and test are plain `go` commands.
 - **NEVER** print to `os.Stdout` except structured JSON-RPC 2.0 messages
 - **NEVER** echo secrets in chat or logs
 - **NEVER** commit `replace ../symaira-corekit` in `go.mod`
-- **DO NOT** add Cloud Pro, billing, or tenant-management code — this is a public repo
+- **DO NOT** add billing or tenant-management code — this is a public repo
 
 ## macOS Client (`client/`)
 
